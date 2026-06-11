@@ -1,7 +1,8 @@
 # LINE Chrome Extension — API Specification (v3.7.2)
 
-> **Source:** This specification is derived from two sources combined:
+> **Source:** This specification is derived from three sources combined:
 > - A live HAR capture (`ophjlpahpchlmihnnnihgmmeilfjmjjc.har`) from the LINE Chrome extension v3.7.2 recorded on 2026-06-11, containing 135 real HTTP entries including a full QR login flow, chat listing, and message retrieval.
+> - `main.js` — the Chrome extension's bundled JavaScript (6.7 MB, 138k lines), analyzed for the request-signing (`x-hmac`) mechanism and SSE authentication.
 > - `LINE_Login_Protocol_Specification.md` — prior reverse-engineering notes for context on E2EE and Thrift legacy flows.
 >
 > HAR entries override any conflicting information from prior reverse-engineering. All endpoints, headers, and body shapes below are confirmed from live traffic unless explicitly marked [unverified].
@@ -124,15 +125,59 @@ Token lifetime: ~7 days (`exp - iat`). Refresh token lifetime: ~1 year (`rexp`).
 
 ### 2.3 x-hmac Signing
 
-Every POST request includes an `x-hmac` header containing a base64-encoded signature:
+Every POST request to the gateway includes an `x-hmac` header containing a base64-encoded signature:
 
 ```
 x-hmac: xc7hTRfwaauLuMpoXQRt2DDZE+nu+8e4auOw1F/UQZo=
 ```
 
-The signature changes per request. Its exact computation is **not yet reversed** — it requires analysis of the Chrome extension's `main.js`. Likely inputs include some combination of the request body, URL path, timestamp, and a secret key embedded in the extension.
+#### Algorithm (from main.js analysis)
 
-**To replicate requests without reversing `x-hmac`:** The server validates this header. Any implementation will need to either reverse the signing algorithm from `main.js` or reuse a live session token and skip re-signing.
+The signature is **HMAC-SHA256** (32-byte output, base64-encoded). It is computed by a sandboxed iframe (`/ltsmSandbox.html`) via the Web Crypto API (`window.crypto.subtle.sign("HMAC", ...)`).
+
+The signing inputs passed to the sandbox are:
+
+```javascript
+{
+  accessToken: string,   // JWT accessToken, or "" before login
+  path: string,          // request URL path, e.g. "/api/talk/thrift/Talk/TalkService/getProfile"
+  body: string           // JSON.stringify(requestData)
+}
+```
+
+The exact message serialization format (how `accessToken`, `path`, and `body` are combined before signing) is implemented in `ltsmSandbox.html`, which is a separate extension file not analyzed here.
+
+#### Key Management (two-phase)
+
+**Phase 1 — Pre-auth (extension startup):**  
+The sandbox is initialized with `{command: "init"}` (no key material). It must use a static key embedded in `ltsmSandbox.html` for all requests before login. Pre-auth requests (createSession, createQrCode, checkQrCodeVerified, verifyCertificate, qrCodeLoginV2) are signed with `accessToken = ""`.
+
+**Phase 2 — Post-auth:**  
+After login, the server's `getEncryptedIdentityV3` response provides key material:
+```json
+{
+  "wrappedNonce":  "<base64, 48 bytes>",
+  "kdfParameter1": "<base64, 16 bytes>",
+  "kdfParameter2": "<base64, 16 bytes>"
+}
+```
+These are sent to the sandbox via `{command: "storage_key_init", payload: {wrappedNonce, kdfParameter1, kdfParameter2}}`. The sandbox derives the signing key from these parameters (full KDF algorithm in `ltsmSandbox.html`).
+
+#### Observed Example Values (HAR)
+
+| Endpoint | accessToken | Body | x-hmac |
+|---|---|---|---|
+| `createSession` | `""` | `[{}]` | `xc7hTRfwaauLuMpoXQRt2DDZE+nu+8e4auOw1F/UQZo=` |
+| `createQrCode` | `""` | `[{"authSessionId":"SQ..."}]` | `uXPAdcyQptjp9TzA7yVzUiDxZX1ARAFur4HEylLIW74=` |
+| `getLastOpRevision` | `<JWT>` | `[]` | `hOllK+6E5Lsf/QQVkbr53IxhDOkSqFtM/3NIUOkPCK4=` |
+| `getAllChatMids` | `<JWT>` | `[{"withMemberChats":true,...},2]` | `Ztx+06U5BioHU/9+rzDzRQ1wOYq/xJQcz+29OuviExY=` |
+
+#### What requires `ltsmSandbox.html` to fully implement:
+- The message serialization format (how inputs are concatenated for signing)
+- The pre-auth static key
+- The post-auth key derivation algorithm from `{wrappedNonce, kdfParameter1, kdfParameter2}`
+
+The `ltsmSandbox.html` file is located at `chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc/ltsmSandbox.html` and can be extracted from the Chrome extension package (`.crx` file).
 
 ### 2.4 Long-Poll Headers
 
@@ -334,7 +379,7 @@ x-hmac: <signature>
 
 ---
 
-## 4. Token Storage
+## 4. Token Storage & Refresh
 
 | Token | Source Field | Where to Persist | Used As |
 |---|---|---|---|
@@ -343,6 +388,32 @@ x-hmac: <signature>
 | `certificate` | `data.certificate` | Persistent storage (e.g. `.sqr.crt`) | Pass to `verifyCertificate` on next login to skip PIN |
 | `mid` | `data.mid` | Memory | User's own MID (used in message sender/recipient fields) |
 | `durationUntilRefreshInSec` | `data.tokenV3IssueResult.durationUntilRefreshInSec` | Reference only | Schedule refresh ~`durationUntilRefreshInSec` seconds after `tokenIssueTimeEpochSec` |
+
+---
+
+### 4.1 Token Refresh
+
+The `accessToken` JWT expires at `exp` (typically ~7 days from issue). Refresh before expiry using the `refreshToken`:
+
+```
+POST /api/auth/tokenRefresh
+Content-Type: application/json
+[standard headers, NO x-line-access]
+
+{"refreshToken": "<refreshToken>"}
+```
+
+The `durationUntilRefreshInSec` field in the `qrCodeLoginV2` response tells you when to schedule the refresh: `tokenIssueTimeEpochSec + durationUntilRefreshInSec`. The refresh retry policy:
+```json
+{
+  "initialDelayInMillis": "200",
+  "maxDelayInMillis": "104857600",
+  "multiplier": 2,
+  "jitterRate": 0.3
+}
+```
+
+Use exponential backoff with jitter if the refresh fails.
 
 ---
 
@@ -372,7 +443,9 @@ Response `data` fields:
 }
 ```
 
-### 5.2 Get Encrypted Identity
+### 5.2 Get Encrypted Identity (Required for x-hmac Key Init)
+
+This call is mandatory after login — its response initializes the HMAC signing key in the extension's secure sandbox.
 
 ```
 POST /api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3
@@ -380,6 +453,20 @@ x-line-access: <accessToken>
 
 []
 ```
+
+Response:
+```json
+{
+  "code": 0, "message": "OK",
+  "data": {
+    "wrappedNonce":  "AjsSI8WwGhQoymf7fzeYgp4ecqDpl9htub88/l+416eGYZ0AkRAyICML306xrIBT",
+    "kdfParameter1": "W5kowvH9dJNVemz7XD2dww==",
+    "kdfParameter2": "+ZFNyJlBAnn2W5e9m/ALYA=="
+  }
+}
+```
+
+`wrappedNonce` is 48 bytes (base64). `kdfParameter1` and `kdfParameter2` are each 16 bytes (base64). These are passed to the `ltsmSandbox.html` iframe to derive the HMAC signing key for all subsequent requests.
 
 ### 5.3 Get Server Time
 
@@ -656,7 +743,7 @@ sec-fetch-storage-access: active
 user-agent:       Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36
 ```
 
-> **Note:** `x-line-access` and `x-hmac` were not captured in the HAR for this GET endpoint — likely because Chrome DevTools does not always record headers injected by a Service Worker context. The server returns HTTP 200 without explicit `x-line-access` visible; the actual auth mechanism for this endpoint is **not definitively confirmed**. Possible mechanisms: HTTP/2 stream reuse from an authenticated connection, or the access token is carried by a different means. If direct requests fail, try adding `x-line-access: <accessToken>` to the GET request.
+> **Authentication mechanism (from main.js):** The SSE transport is constructed with `withCredentials: true` (see `HA.SSETransport` in `main.js`). This tells the browser to include cookies for `line-chrome-gw.line-apps.com` with the EventSource request. The cookie is named `lct` (LINE Chrome Token) and is removed on logout via `chrome.cookies.remove({url: ..., name: "lct"})`. The server sets this cookie implicitly (no `Set-Cookie` header was observed in the HAR, suggesting it may be set server-side on a domain-level basis prior to the capture, or via a Chrome extension privilege). For implementations outside the Chrome extension context, include `x-line-access: <accessToken>` as a fallback; the SSE stream returned 200 in the HAR without any visible auth header, which may indicate the `lct` cookie was already present from a previous request.
 
 ### 8.3 Response
 
@@ -665,12 +752,32 @@ Content-Type: text/event-stream
 Cache-Control: no-cache
 ```
 
-The stream delivers Server-Sent Events. Each event represents an operation (new message, read receipt, contact update, etc.). The event payload format [unverified — HAR body was not captured for SSE] likely follows the same JSON envelope with an `operations` array, each operation having:
-- `type` — OperationType (e.g., 25 = RECEIVE_MESSAGE)
-- `revision` — monotonic counter; update your `localRev` to this value
-- `message` — Message object (present when type = 25, see §7.3)
+The stream delivers Server-Sent Events with named event types. Event types (from main.js `Md` constants and `HA` interceptors):
 
-On reconnect, use the most recently received `revision` as the new `localRev`.
+| SSE Event Type | Description |
+|---|---|
+| `op` / default | Operation event — new message, read receipt, member change, etc. |
+| `ping` | Keep-alive heartbeat |
+| `connInfoRevision` | CDN routing revision changed; triggers connInfo re-fetch |
+| `reconnect` | Server instructs client to reconnect |
+| `talkException` | Server-side exception on the talk service |
+| `fullSync` | Full data synchronization required |
+| `partialFullSync` | Partial sync for specific data categories |
+
+**Operation event payload** (JSON, from `handleReceiveOpEvent` in main.js):
+```json
+{
+  "revision": "36542",
+  "type": 25,
+  "message": { ...Message object... }
+}
+```
+
+- `revision` — update `localRev` to this value after processing; skip events where `revision <= current localRev`
+- `type` — OperationType (25 = RECEIVE_MESSAGE, others include read receipts, group member events, etc.)
+- `message` — Message object (see §7.3), present when `type = 25`
+
+The ping interceptor is configured with `range: [20000, 20000]` (20 second interval). On reconnect, reopen the connection with the latest `localRev` as a query parameter.
 
 ---
 
@@ -719,11 +826,23 @@ GET https://ci.line-apps.com/R4
     ?type=Chrome_OS
     &version=3.7.2
     &region=JP
-    &time=<unix_timestamp>
+    &time=<unix_timestamp_seconds>
     &key=<md5_hash>
 ```
 
-This likely determines regional CDN routing. Not required for API calls.
+**`key` computation** (from main.js, `rN` class):
+```
+key = MD5(UTF8(type + version + region + time) + secret_bytes)
+```
+
+Where `secret_bytes` is a static hex constant embedded in `main.js`:
+```
+4c605effdf3dfca1217d48174020569180dc2338a5772a80ed0aaa01bcd0a08f
+```
+
+The hash input concatenates the raw bytes of the query string fields with the 32 decoded secret bytes.
+
+This determines regional CDN routing (JP vs global). Not required for main API calls.
 
 ### 10.2 Error Reporting (Sentry)
 
