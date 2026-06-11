@@ -1,0 +1,23 @@
+{
+  "name": "line-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@tsconfig/node20": "^20.1.9",
+    "@types/node": "^25.9.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
+    "wabt": "^1.0.39"
+  },
+  "dependencies": {
+    "happy-dom": "^20.10.2"
+  }
+}
