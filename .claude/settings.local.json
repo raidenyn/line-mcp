@@ -1,0 +1,10 @@
+{
+  "enabledMcpjsonServers": ["line"],
+  "permissions": {
+    "allow": [
+      "Bash(rm -rf /workspaces/line-mcp/node_modules)",
+      "Bash(npm init *)",
+      "Bash(npm install *)"
+    ]
+  }
+}

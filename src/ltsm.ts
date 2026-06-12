@@ -15,24 +15,34 @@ function handleParentPost(msg: unknown): void {
   responseHandlers.get(m.type ?? '')?.(m);
 }
 
+// Serializes all WASM sandbox commands — responseHandlers uses fixed keys, so concurrent
+// sendCommand calls would overwrite each other's handlers. Queue ensures one at a time.
+let commandQueue: Promise<unknown> = Promise.resolve();
+
 function sendCommand(win: Window & typeof globalThis, command: string, payload?: unknown): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    responseHandlers.set('response', (m) => {
-      responseHandlers.delete('response');
-      responseHandlers.delete('error');
-      resolve((m as Record<string, unknown>)['data']);
-    });
-    responseHandlers.set('error', (m) => {
-      responseHandlers.delete('response');
-      responseHandlers.delete('error');
-      reject((m as Record<string, unknown>)['data']);
-    });
-    win.dispatchEvent(
-      Object.assign(new win.MessageEvent('message'), {
-        data: { type: 'request', sandboxId: SANDBOX_ID, data: { command, payload } },
+  const next = commandQueue.then(
+    () =>
+      new Promise((resolve, reject) => {
+        responseHandlers.set('response', (m) => {
+          responseHandlers.delete('response');
+          responseHandlers.delete('error');
+          resolve((m as Record<string, unknown>)['data']);
+        });
+        responseHandlers.set('error', (m) => {
+          responseHandlers.delete('response');
+          responseHandlers.delete('error');
+          reject((m as Record<string, unknown>)['data']);
+        });
+        win.dispatchEvent(
+          Object.assign(new win.MessageEvent('message'), {
+            data: { type: 'request', sandboxId: SANDBOX_ID, data: { command, payload } },
+          }),
+        );
       }),
-    );
-  });
+  );
+  // Errors must not break the queue chain
+  commandQueue = next.catch(() => {});
+  return next;
 }
 
 let initPromise: Promise<{ win: Window & typeof globalThis }> | null = null;
@@ -124,4 +134,13 @@ export async function getHmac(params: {
 }): Promise<string> {
   const { win } = await initialize();
   return sendCommand(win, 'get_hmac', params) as Promise<string>;
+}
+
+export async function initStorageKey(params: {
+  wrappedNonce: string;
+  kdfParameter1: string;
+  kdfParameter2: string;
+}): Promise<void> {
+  const { win } = await initialize();
+  await sendCommand(win, 'storage_key_init', params);
 }

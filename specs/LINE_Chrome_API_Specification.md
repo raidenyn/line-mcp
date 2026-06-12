@@ -1,11 +1,12 @@
 # LINE Chrome Extension — API Specification (v3.7.2)
 
-> **Source:** This specification is derived from three sources combined:
+> **Source:** This specification is derived from four sources combined:
 > - A live HAR capture (`ophjlpahpchlmihnnnihgmmeilfjmjjc.har`) from the LINE Chrome extension v3.7.2 recorded on 2026-06-11, containing 135 real HTTP entries including a full QR login flow, chat listing, and message retrieval.
 > - `main.js` — the Chrome extension's bundled JavaScript (6.7 MB, 138k lines), analyzed for the request-signing (`x-hmac`) mechanism and SSE authentication.
+> - `ltsmSandbox.js` (`specs/raw/ltsm/ltsmSandbox.js`) — the HMAC signing sandbox source, analyzed to confirm the exact signing algorithm, static tokens, and `storage_key_init` behavior.
 > - `LINE_Login_Protocol_Specification.md` — prior reverse-engineering notes for context on E2EE and Thrift legacy flows.
 >
-> HAR entries override any conflicting information from prior reverse-engineering. All endpoints, headers, and body shapes below are confirmed from live traffic unless explicitly marked [unverified].
+> HAR entries and sandbox source override any conflicting information from prior reverse-engineering. All endpoints, headers, and body shapes below are confirmed from live traffic or sandbox source unless explicitly marked [unverified].
 
 ---
 
@@ -131,37 +132,48 @@ Every POST request to the gateway includes an `x-hmac` header containing a base6
 x-hmac: xc7hTRfwaauLuMpoXQRt2DDZE+nu+8e4auOw1F/UQZo=
 ```
 
-#### Algorithm (from main.js analysis)
+#### Algorithm (confirmed from `ltsmSandbox.js` source)
 
-The signature is **HMAC-SHA256** (32-byte output, base64-encoded). It is computed by a sandboxed iframe (`/ltsmSandbox.html`) via the Web Crypto API (`window.crypto.subtle.sign("HMAC", ...)`).
+The signature is **HMAC-SHA256** (32-byte output, base64-encoded). It is computed by the `ltsmSandbox.js` script running inside a sandboxed iframe, using the Web Crypto API. The algorithm was confirmed by reading the sandbox source (`specs/raw/ltsm/ltsmSandbox.js`):
 
-The signing inputs passed to the sandbox are:
+**Helper:**
+```javascript
+tm(x) = SHA-256(x)   // window.crypto.subtle.digest("SHA-256", encode(x))
+```
 
+**Key derivation (performed once during `init`):**
+```javascript
+cS = SecureKey.loadToken(staticToken)   // static token looked up by window.origin
+lS = tm("3.7.2")                        // derived from the extension version string
+```
+
+Where `staticToken` is a hardcoded string per extension origin:
+
+| Origin | Static Token |
+|---|---|
+| `chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc` | `wODdrvWqmdP4Zliay-iF3cz3KZcK0ekrial868apg06TXeCo7A1hIQO0ESElHg6D` |
+| `chrome-extension://jeafcjlknhfnfkfeliiolabnpjahldie` | `GS-30Ed0WxiXR50y9hED4O1qmJ2QaBK0dFpc_w9ZaBSisb2rlnKvPUkMK_93GS30` |
+
+**Per-request signing (performed for every `get_hmac` command):**
+```javascript
+key  = cS.deriveKey(lS, tm(accessToken))  // accessToken = "" for pre-auth requests
+hmac = base64( Hmac(key).digest(path + body) )  // path and body concatenated directly, no separator
+```
+
+The message signed is `path + body` — the URL path string concatenated with the JSON body string, with no delimiter between them.
+
+**Inputs passed to the sandbox for each request:**
 ```javascript
 {
-  accessToken: string,   // JWT accessToken, or "" before login
+  accessToken: string,   // JWT accessToken, or "" before login completes
   path: string,          // request URL path, e.g. "/api/talk/thrift/Talk/TalkService/getProfile"
-  body: string           // JSON.stringify(requestData)
+  body: string           // JSON.stringify(requestBody)
 }
 ```
 
-The exact message serialization format (how `accessToken`, `path`, and `body` are combined before signing) is implemented in `ltsmSandbox.html`, which is a separate extension file not analyzed here.
+**`storage_key_init` does NOT affect HMAC signing.** The `storage_key_init` sandbox command (called after login with `wrappedNonce`, `kdfParameter1`, `kdfParameter2` from `getEncryptedIdentityV3`) sets an **AES storage encryption key** (`hS`) used only by the `encrypt`/`decrypt` sandbox commands. The HMAC signing key is set once during `init` from the static token above and never changes. The spec's earlier implied connection between `storage_key_init` and HMAC key derivation is incorrect.
 
-#### Key Management (two-phase)
-
-**Phase 1 — Pre-auth (extension startup):**  
-The sandbox is initialized with `{command: "init"}` (no key material). It must use a static key embedded in `ltsmSandbox.html` for all requests before login. Pre-auth requests (createSession, createQrCode, checkQrCodeVerified, verifyCertificate, qrCodeLoginV2) are signed with `accessToken = ""`.
-
-**Phase 2 — Post-auth:**  
-After login, the server's `getEncryptedIdentityV3` response provides key material:
-```json
-{
-  "wrappedNonce":  "<base64, 48 bytes>",
-  "kdfParameter1": "<base64, 16 bytes>",
-  "kdfParameter2": "<base64, 16 bytes>"
-}
-```
-These are sent to the sandbox via `{command: "storage_key_init", payload: {wrappedNonce, kdfParameter1, kdfParameter2}}`. The sandbox derives the signing key from these parameters (full KDF algorithm in `ltsmSandbox.html`).
+**IMPORTANT — Concurrent signing:** The sandbox `responseHandlers` map uses fixed string keys (`'response'` / `'error'`). Concurrent `get_hmac` calls will overwrite each other's handlers, causing one request to receive the wrong HMAC. The server returns `REQUEST_INVALID_HMAC` (error code 10005) in this case. All sandbox `sendCommand` calls must be serialized (e.g. via a promise queue).
 
 #### Observed Example Values (HAR)
 
@@ -171,13 +183,6 @@ These are sent to the sandbox via `{command: "storage_key_init", payload: {wrapp
 | `createQrCode` | `""` | `[{"authSessionId":"SQ..."}]` | `uXPAdcyQptjp9TzA7yVzUiDxZX1ARAFur4HEylLIW74=` |
 | `getLastOpRevision` | `<JWT>` | `[]` | `hOllK+6E5Lsf/QQVkbr53IxhDOkSqFtM/3NIUOkPCK4=` |
 | `getAllChatMids` | `<JWT>` | `[{"withMemberChats":true,...},2]` | `Ztx+06U5BioHU/9+rzDzRQ1wOYq/xJQcz+29OuviExY=` |
-
-#### What requires `ltsmSandbox.html` to fully implement:
-- The message serialization format (how inputs are concatenated for signing)
-- The pre-auth static key
-- The post-auth key derivation algorithm from `{wrappedNonce, kdfParameter1, kdfParameter2}`
-
-The `ltsmSandbox.html` file is located at `chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc/ltsmSandbox.html` and can be extracted from the Chrome extension package (`.crx` file).
 
 ### 2.4 Long-Poll Headers
 
@@ -211,12 +216,24 @@ Chrome Extension                         LINE Server              Mobile App
        |                                      |                        |
        |-- checkQrCodeVerified (long-poll) -> |  <-- user scans QR -- |
        |<- {} (empty data = success) ------- |                        |
+       |   [HTTP 400/410 also means confirmed]|                        |
        |                                      |                        |
-       |-- verifyCertificate(sessionId,cert)->|                        |
-       |<- {} (cert valid = skip PIN) ------ |                        |
-       |   OR exception (need PIN)            |                        |
+       |-- verifyCertificate(sessionId,cert)->|  [MANDATORY step —    |
+       |<- {} (cert accepted = skip PIN) --- |   even with empty cert]|
+       |   OR code 2 (cert rejected)          |                        |
        |                                      |                        |
+       |  [if cert accepted:]                 |                        |
        |-- qrCodeLoginV2(...) ------------> |                        |
+       |                                      |                        |
+       |  [if cert rejected — PIN flow:]      |                        |
+       |-- createPinCode(authSessionId) ----> |                        |
+       |<- {pinCode: "123456"} ------------- |                        |
+       | [display PIN to user]                |                        |
+       |                                      | <-- user enters PIN -- |
+       |-- checkPinCodeVerified (long-poll) ->|                        |
+       |<- {} (success) ------------------- |                        |
+       |-- qrCodeLoginV2(...) ------------> |                        |
+       |                                      |                        |
        |<- {accessToken, refreshToken,        |                        |
        |    certificate, mid, metaData} ---- |                        |
 ```
@@ -305,9 +322,11 @@ Blocks until the user scans the QR with their mobile app. Retry up to `longPolli
 {"code": 0, "message": "OK", "data": {}}
 ```
 
-### 3.6 Step 5 — Verify Saved Certificate (Optional)
+**HTTP 400 or 410 responses** from this endpoint can mean the session was already confirmed by the mobile app before the poll registered (race condition). Treat HTTP 400/410 as "proceed to `verifyCertificate`" rather than a fatal error. Do not throw on these status codes.
 
-If a certificate from a previous login is saved, try to skip the PIN step:
+### 3.6 Step 5 — Verify Certificate (MANDATORY state machine step)
+
+This call is **always required** after `checkQrCodeVerified`, even if no certificate is available. It is a mandatory server-side state machine transition. Skipping it causes `createPinCode` to return `SecondaryQrCodeException` code 100 ("Your QR code has expired") even though the session is still valid.
 
 **Request:**
 ```
@@ -319,17 +338,74 @@ x-hmac: <signature>
 [{"authSessionId": "SQ4d46594f7...", "certificate": "3df83f30788c3ad01c4b5876eeb95fa3c3b67ec84fb9967d97ecce39f31728e0"}]
 ```
 
-**Response on success (certificate accepted):**
+When no saved certificate exists, send `"certificate": ""` (empty string).
+
+**Response — certificate accepted (skip PIN):**
 ```json
 {"code": 0, "message": "OK", "data": {}}
 ```
 
-If the certificate is invalid or absent, proceed to PIN creation [unverified from HAR — no PIN flow was needed in this session]:
-- `POST .../SecondaryQrCodeLoginService/createPinCode` with `[{"authSessionId":"..."}]` → `{"data":{"pinCode":"123456"}}`
-- Display PIN to user; user enters it on mobile
-- `POST .../SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified` with `x-lst: 150000` and same body as checkQrCodeVerified → long-poll until confirmed
+**Response — certificate rejected (proceed to PIN):**
+```json
+{
+  "code": 10051,
+  "data": {"code": 2, "alertMessage": "The verification code you entered is incorrect."}
+}
+```
 
-### 3.7 Step 6 — Complete QR Login
+Error code meanings for `SecondaryQrCodeException` (LINE API code 10051):
+
+| `data.code` | Meaning |
+|---|---|
+| `2` | Certificate rejected — expected when sending empty or stale certificate. Proceed to PIN flow. |
+| `100` | Session expired / wrong state — occurs when `verifyCertificate` was not called before `createPinCode`. Start over. |
+
+**Decision logic:** If `verifyCertificate` returns 200, skip PIN and proceed to `qrCodeLoginV2`. If it returns an error with `data.code === 2`, proceed to PIN flow (§3.7). Any other error code indicates the session is invalid; restart from `createSession`.
+
+### 3.7 Step 5b — PIN Flow (required when certificate not accepted)
+
+The PIN flow is required on first login (no saved certificate) or when the saved certificate is rejected. The server generates a 6-digit PIN that the user must enter in the LINE mobile app.
+
+**Step 5b-1 — Generate PIN:**
+
+```
+POST https://line-chrome-gw.line-apps.com/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode
+Content-Type: application/json
+[standard headers]
+x-hmac: <signature>
+
+[{"authSessionId": "SQ4d46594f7..."}]
+```
+
+**Response:**
+```json
+{
+  "code": 0,
+  "message": "OK",
+  "data": {
+    "pinCode": "592130"
+  }
+}
+```
+
+Display the `pinCode` to the user. The user must open the LINE mobile app and enter this PIN in the QR login confirmation screen.
+
+**Step 5b-2 — Wait for PIN confirmation:**
+
+```
+POST https://line-chrome-gw.line-apps.com/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified
+Content-Type: application/json
+[standard headers]
+x-hmac: <signature>
+x-lst: 150000
+x-line-session-id: SQ4d46594f7...
+
+[{"authSessionId": "SQ4d46594f7..."}]
+```
+
+Blocks until the user enters the PIN on mobile. Same long-poll headers as `checkQrCodeVerified`. Returns `{"code": 0, "message": "OK", "data": {}}` on success.
+
+### 3.8 Step 6 — Complete QR Login
 
 **Request:**
 ```
@@ -443,9 +519,11 @@ Response `data` fields:
 }
 ```
 
-### 5.2 Get Encrypted Identity (Required for x-hmac Key Init)
+### 5.2 Get Encrypted Identity (Required for Storage Key Init)
 
-This call is mandatory after login — its response initializes the HMAC signing key in the extension's secure sandbox.
+This call is mandatory after login — its response is used to initialize the **storage encryption key** in the sandbox, which enables the `encrypt`/`decrypt` sandbox commands.
+
+**Note:** This does NOT initialize or change the HMAC signing key. The HMAC key is set during `init` from the static token (see §2.3) and never changes.
 
 ```
 POST /api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3
@@ -466,7 +544,7 @@ Response:
 }
 ```
 
-`wrappedNonce` is 48 bytes (base64). `kdfParameter1` and `kdfParameter2` are each 16 bytes (base64). These are passed to the `ltsmSandbox.html` iframe to derive the HMAC signing key for all subsequent requests.
+`wrappedNonce` is 48 bytes (base64). `kdfParameter1` and `kdfParameter2` are each 16 bytes (base64). These are passed to the sandbox via `{command: "storage_key_init", payload: {wrappedNonce, kdfParameter1, kdfParameter2}}`, which sets `hS = new AesKey(...)` — an AES encryption key for local storage operations. This key must be initialized before calling any `encrypt`/`decrypt` sandbox commands.
 
 ### 5.3 Get Server Time
 
@@ -789,10 +867,10 @@ All endpoints are `POST https://line-chrome-gw.line-apps.com<path>` unless noted
 |---|---|---|---|
 | `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession` | No | 200 | Start QR login — get `authSessionId` |
 | `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode` | No | 200 | Get `callbackUrl` for QR rendering |
-| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified` | No (x-lst + x-line-session-id) | 200 | Long-poll: wait for mobile scan |
-| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate` | No | 200 | Validate saved cert to skip PIN |
-| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode` | No | — [unverified] | Generate PIN for first-time login |
-| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified` | No (x-lst) | — [unverified] | Long-poll: wait for PIN entry |
+| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified` | No (x-lst + x-line-session-id) | 200 (or 400/410 = already confirmed) | Long-poll: wait for mobile scan |
+| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate` | No | 200 (accepted) or 400 code 2 (rejected) | Mandatory state transition; always call even with empty cert |
+| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode` | No | 200 | Generate PIN for first-time login (when cert rejected) |
+| `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified` | No (x-lst + x-line-session-id) | 200 | Long-poll: wait for user to enter PIN on mobile |
 | `/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2` | No | 200 | Complete login — get tokens |
 | `/api/talk/thrift/Talk/TalkService/getProfile` | Yes | 200 | Own user profile |
 | `/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3` | Yes | 200 | Encrypted identity blob |

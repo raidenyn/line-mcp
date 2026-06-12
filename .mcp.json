@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "line": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["ts-node", "/workspaces/line-mcp/src/index.ts"]
+    }
+  }
+}

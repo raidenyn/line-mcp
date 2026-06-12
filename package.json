@@ -2,9 +2,11 @@
   "name": "line-mcp",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc",
+    "start": "ts-node src/index.ts"
   },
   "keywords": [],
   "author": "",
@@ -13,11 +15,16 @@
   "devDependencies": {
     "@tsconfig/node20": "^20.1.9",
     "@types/node": "^25.9.3",
+    "@types/qrcode-terminal": "^0.12.2",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "wabt": "^1.0.39"
   },
   "dependencies": {
-    "happy-dom": "^20.10.2"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "happy-dom": "^20.10.2",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.4.3"
   }
 }
