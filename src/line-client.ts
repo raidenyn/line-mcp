@@ -50,6 +50,7 @@ export class LineClient {
   private auth: AuthData | null = null;
   private storageKeyInitialized = false;
   private pendingLogin: (() => Promise<void>) | null = null;
+  private refreshPromise: Promise<void> | null = null;
   private pendingLoginError: Error | null = null;
   private pendingAuthSessionId: string | null = null;
   private pendingCertificate: string | null = null;
@@ -89,7 +90,7 @@ export class LineClient {
   private async request<T>(
     path: string,
     args: unknown[],
-    opts: { longPoll?: boolean; sessionId?: string } = {},
+    opts: { longPoll?: boolean; sessionId?: string; signal?: AbortSignal } = {},
   ): Promise<T> {
     const body = JSON.stringify(args);
     const accessToken = this.auth?.accessToken ?? '';
@@ -107,24 +108,19 @@ export class LineClient {
       if (opts.sessionId) headers['x-line-session-id'] = opts.sessionId;
     }
 
-    const dbgLine = `[${new Date().toISOString()}] POST ${path} body=${body}\n`;
-    fs.appendFileSync('/tmp/line-debug.log', dbgLine);
-
     const response = await this.fetchFn(BASE_URL + path, {
       method: 'POST',
       headers,
       body,
-      signal: this.loginAbortController?.signal,
+      signal: opts.signal,
     });
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
       process.stderr.write(`[LINE] HTTP ${response.status} on ${path}: ${errBody}\n`);
-      fs.appendFileSync('/tmp/line-debug.log', `  → ${response.status}: ${errBody}\n`);
       throw new Error(`HTTP ${response.status} on ${path}: ${errBody}`);
     }
     const rawText = await response.text();
-    fs.appendFileSync('/tmp/line-debug.log', `  → ${response.status} body=${rawText.slice(0, 400)}\n`);
     const json = JSON.parse(rawText) as { code: number; message: string; data: T };
     if (json.code !== 0) {
       throw new Error(`LINE API error ${json.code}: ${json.message} (${path})`);
@@ -146,17 +142,23 @@ export class LineClient {
     if (!this.auth) return;
     const exp = this.jwtExp();
     if (exp > 0 && exp - Date.now() / 1000 < 86400) {
-      const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
-        method: 'POST',
-        headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
-        body: JSON.stringify({ refreshToken: this.auth.refreshToken }),
-      });
-      if (response.ok) {
-        const data = await response.json() as { accessToken: string; refreshToken?: string };
-        this.auth.accessToken = data.accessToken;
-        if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
-        this.saveAuth(this.auth);
+      if (!this.refreshPromise) {
+        this.refreshPromise = (async () => {
+          if (!this.auth) return;
+          const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
+            method: 'POST',
+            headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
+            body: JSON.stringify({ refreshToken: this.auth.refreshToken }),
+          });
+          if (response.ok) {
+            const data = await response.json() as { accessToken: string; refreshToken?: string };
+            this.auth.accessToken = data.accessToken;
+            if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
+            this.saveAuth(this.auth);
+          }
+        })().finally(() => { this.refreshPromise = null; });
       }
+      await this.refreshPromise;
     }
   }
 
@@ -239,13 +241,15 @@ export class LineClient {
     this.pendingLoginError = null;
     const completionPromise = this.completeLogin().catch((err: Error) => {
       this.pendingLoginError = err;
-      this.pendingLogin = null;
-      // Unblock any waiting ensureAuthenticated()
+      if (this.pendingLogin === loginCompletion) {
+        this.pendingLogin = null;
+      }
       this.loginPinResolve?.(null);
       this.loginPinResolve = null;
       process.stderr.write(`completeLogin error: ${err.message}\n${err.stack}\n`);
     });
-    this.pendingLogin = () => completionPromise;
+    const loginCompletion = () => completionPromise;
+    this.pendingLogin = loginCompletion;
 
     return { qrUrl };
   }
@@ -253,6 +257,7 @@ export class LineClient {
   async completeLogin(): Promise<void> {
     const authSessionId = this.pendingAuthSessionId;
     if (!authSessionId) throw new Error('No pending login session');
+    const certificate = this.pendingCertificate;
 
     // Long-poll until QR is scanned. A 400 means the session may already be confirmed
     // (race: mobile confirmed before our poll registered) — treat as success and proceed.
@@ -262,13 +267,12 @@ export class LineClient {
         await this.request(
           '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified',
           [{ authSessionId }],
-          { longPoll: true, sessionId: authSessionId },
+          { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
         );
         break;
       } catch (err) {
         const msg = (err as Error).message;
         process.stderr.write(`[LINE] checkQrCodeVerified error: ${msg}\n`);
-        fs.appendFileSync('/tmp/line-debug.log', `[${new Date().toISOString()}] checkQrCodeVerified[${i}]: ${msg}\n`);
         if (msg.includes('HTTP 400') || msg.includes('HTTP 403')) {
           // 400/403 may mean the scan already completed before our poll arrived — proceed anyway
           break;
@@ -284,11 +288,15 @@ export class LineClient {
     try {
       await this.request(
         '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate',
-        [{ authSessionId, certificate: this.pendingCertificate ?? '' }],
+        [{ authSessionId, certificate: certificate ?? '' }],
       );
       pinRequired = false; // Certificate accepted — skip PIN
-    } catch {
-      // Certificate rejected or absent — proceed to PIN flow
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      if (!msg.includes('HTTP 4') && !msg.includes('LINE API error')) {
+        throw err; // Transient network or 5xx — don't silently swallow
+      }
+      process.stderr.write(`[LINE] verifyCertificate: certificate rejected (${msg}), proceeding with PIN\n`);
     }
 
     if (pinRequired) {
@@ -307,7 +315,7 @@ export class LineClient {
       await this.request(
         '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified',
         [{ authSessionId }],
-        { longPoll: true, sessionId: authSessionId },
+        { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
       );
       process.stderr.write(`[LINE] PIN confirmed\n`);
     } else {
@@ -411,21 +419,23 @@ export class LineClient {
   private async fetchContactsV2(
     mids: string[],
   ): Promise<Array<{ mid: string; displayName: string; pictureStatus?: string }>> {
-    const results: Array<{ mid: string; displayName: string; pictureStatus?: string }> = [];
+    const batches: string[][] = [];
     for (let i = 0; i < mids.length; i += 50) {
-      const batch = mids.slice(i, i + 50);
-      const data = await this.request<{
-        contacts: Record<string, { contact: { mid: string; displayName: string; pictureStatus?: string } }>;
-      }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }]);
-      for (const entry of Object.values(data.contacts ?? {})) {
-        results.push({
+      batches.push(mids.slice(i, i + 50));
+    }
+    const batchResults = await Promise.all(
+      batches.map(async (batch) => {
+        const data = await this.request<{
+          contacts: Record<string, { contact: { mid: string; displayName: string; pictureStatus?: string } }>;
+        }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }]);
+        return Object.values(data.contacts ?? {}).map((entry) => ({
           mid: entry.contact.mid,
           displayName: entry.contact.displayName,
           pictureStatus: entry.contact.pictureStatus,
-        });
-      }
-    }
-    return results;
+        }));
+      }),
+    );
+    return batchResults.flat();
   }
 
   async getMessages(chatMid: string, count = 50): Promise<Message[]> {
@@ -458,9 +468,11 @@ export class LineClient {
     }));
   }
 
-  async getImageBuffer(url: string): Promise<Buffer> {
+  async getImageBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }> {
     const response = await this.fetchFn(url);
     if (!response.ok) throw new Error(`Image fetch failed: ${response.status} ${url}`);
-    return Buffer.from(await response.arrayBuffer());
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim() ?? 'image/jpeg';
+    return { buffer, mimeType };
   }
 }

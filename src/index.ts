@@ -89,7 +89,8 @@ server.registerTool(
         return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
       }
       const lines = messages.map((m) => {
-        const time = new Date(parseInt(m.createdTime)).toISOString();
+        const createdMs = parseInt(m.createdTime, 10);
+        const time = Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : 'unknown';
         const label = CONTENT_TYPE_LABELS[m.contentType] ?? `type:${m.contentType}`;
         if (m.contentType === 0) {
           return `[${time}] ${m.from}: ${m.text ?? ''}`;
@@ -118,13 +119,13 @@ server.registerTool(
   },
   async ({ url }) => {
     try {
-      const buffer = await client.getImageBuffer(url);
+      const { buffer, mimeType } = await client.getImageBuffer(url);
       return {
         content: [
           {
             type: 'image' as const,
             data: buffer.toString('base64'),
-            mimeType: 'image/jpeg',
+            mimeType,
           },
         ],
       };
