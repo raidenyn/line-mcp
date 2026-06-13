@@ -38,7 +38,8 @@ server.registerTool(
       const lines = chats.map((c) => {
         const type = c.type === 'group' ? 'GROUP' : 'USER';
         const members = c.memberCount != null ? ` (${c.memberCount} members)` : '';
-        return `[${type}] ${c.name}${members}\n  mid: ${c.mid}`;
+        const pic = c.pictureUrl ? `\n  pictureUrl: ${c.pictureUrl}` : '';
+        return `[${type}] ${c.name}${members}\n  mid: ${c.mid}${pic}`;
       });
       const chatText = lines.length > 0 ? lines.join('\n') : 'No chats found.';
       return { content: [{ type: 'text' as const, text: chatText }] };
