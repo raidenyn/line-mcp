@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Window } from 'happy-dom';
+import type { Window } from 'happy-dom';
 
 const SANDBOX_ID = 'node-ltsm';
 const ORIGIN = 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc';
@@ -52,6 +52,8 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    // Lazy-load happy-dom (7s parse time) — deferred until first LINE API call
+    const { Window } = await import('happy-dom');
     const wasmBinary = fs.readFileSync(WASM_PATH);
 
     const win = new Window({
