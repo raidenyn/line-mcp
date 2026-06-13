@@ -26,6 +26,7 @@ beforeAll(async () => {
     command: 'npx',
     args: ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
     cwd: PROJECT_ROOT,
+    env: { ...process.env, LINE_AUTH_DATA: authJson },
     stderr: 'pipe',
   });
   mcpClient = new Client({ name: 'e2e-test', version: '1.0.0' });
@@ -37,7 +38,7 @@ afterAll(async () => {
 });
 
 it('list_chats returns at least one chat with a mid', async () => {
-  const result = await mcpClient.callTool({ name: 'list_chats', arguments: { auth: authJson } });
+  const result = await mcpClient.callTool({ name: 'list_chats', arguments: {} });
   expect(result.isError).toBeFalsy();
   const text = extractText(result);
   expect(text).toMatch(/\[(?:GROUP|USER)\]/);
@@ -53,7 +54,7 @@ it('get_messages returns messages for a valid chatMid', async () => {
   for (const mid of allMids) {
     const result = await mcpClient.callTool({
       name: 'get_messages',
-      arguments: { chatMid: mid, count: 20, auth: authJson },
+      arguments: { chatMid: mid, count: 20 },
     });
     if (result.isError) continue;
     const text = extractText(result);
@@ -75,7 +76,7 @@ it('get_messages rejects count > 200', async () => {
   expect(firstChatMid).toBeTruthy();
   const result = await mcpClient.callTool({
     name: 'get_messages',
-    arguments: { chatMid: firstChatMid, count: 999, auth: authJson },
+    arguments: { chatMid: firstChatMid, count: 999 },
   });
   expect(result.isError).toBe(true);
 });
@@ -86,7 +87,7 @@ it('get_image returns a base64 image when a previewUrl is available', async ({ s
   }
   const result = await mcpClient.callTool({
     name: 'get_image',
-    arguments: { url: imagePreviewUrl, auth: authJson },
+    arguments: { url: imagePreviewUrl },
   });
   expect(result.isError).toBeFalsy();
   const item = result.content[0];
@@ -100,7 +101,7 @@ it('get_image returns a base64 image when a previewUrl is available', async ({ s
 it('get_image returns isError for a bad URL', async () => {
   const result = await mcpClient.callTool({
     name: 'get_image',
-    arguments: { url: 'https://invalid.example.test/no-such.jpg', auth: authJson },
+    arguments: { url: 'https://invalid.example.test/no-such.jpg' },
   });
   expect(result.isError).toBe(true);
   expect(extractText(result)).toMatch(/Failed to fetch image/);

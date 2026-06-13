@@ -17,13 +17,18 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
 let pendingLoginClient: LineClient | null = null;
 const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
 
-function parseAuth(auth: string): AuthData | null {
+function loadEnvAuth(): AuthData | null {
+  const raw = process.env.LINE_AUTH_DATA;
+  if (!raw) return null;
   try {
-    return JSON.parse(auth) as AuthData;
+    return JSON.parse(raw) as AuthData;
   } catch {
+    process.stderr.write('[LINE] Warning: LINE_AUTH_DATA is set but is not valid JSON — ignoring.\n');
     return null;
   }
 }
+
+const envAuthData: AuthData | null = loadEnvAuth();
 
 server.registerTool(
   'login',
@@ -62,40 +67,26 @@ server.registerTool(
   {
     description:
       'List all LINE chats (group chats and 1:1 contacts). ' +
-      'Pass the auth JSON from a previous login to use stored credentials. ' +
-      'Omit auth when completing a QR login flow (after scanning the QR and entering PIN if prompted). ' +
-      'On login completion, the response includes an AUTH_DATA block — save it and pass it as auth on future calls. ' +
+      'Uses credentials from the LINE_AUTH_DATA environment variable. ' +
+      'When completing a QR login flow (after scanning the QR and entering PIN if prompted), ' +
+      'call this without any arguments. ' +
       'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count.',
-    inputSchema: {
-      auth: z
-        .string()
-        .optional()
-        .describe(
-          'Auth JSON returned after login. Omit only when completing the QR login flow.',
-        ),
-    },
+    inputSchema: {},
   },
-  async ({ auth }) => {
+  async () => {
     try {
       let client: LineClient;
       let isLoginCompletion = false;
 
-      if (auth) {
-        const authData = parseAuth(auth);
-        if (!authData) {
-          return {
-            content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
-            isError: true,
-          };
-        }
-        client = new LineClient(authData);
+      if (envAuthData) {
+        client = new LineClient(envAuthData);
       } else {
         if (!pendingLoginClient) {
           return {
             content: [
               {
                 type: 'text' as const,
-                text: 'No pending login. Call the login tool first and scan the QR code.',
+                text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env, or call the login tool first and scan the QR code.',
               },
             ],
             isError: true,
@@ -124,8 +115,9 @@ server.registerTool(
                 type: 'text' as const,
                 text:
                   `${chatText}\n\n---\n` +
-                  `AUTH_DATA (save this and pass as \`auth\` to list_chats, get_messages, and get_image):\n` +
-                  JSON.stringify(completedAuth),
+                  `Login complete. Add LINE_AUTH_DATA to your MCP server config, then restart the server.\n\n` +
+                  `In ~/.claude.json (under mcpServers.line.env):\n` +
+                  `  "LINE_AUTH_DATA": ${JSON.stringify(JSON.stringify(completedAuth))}`,
               },
             ],
           };
@@ -152,19 +144,17 @@ server.registerTool(
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
       count: z.number().int().min(1).max(200).default(50).describe('Number of recent messages to fetch'),
-      auth: z.string().describe('Auth JSON returned by list_chats after login'),
     },
   },
-  async ({ chatMid, count, auth }) => {
-    const authData = parseAuth(auth);
-    if (!authData) {
+  async ({ chatMid, count }) => {
+    if (!envAuthData) {
       return {
-        content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
+        content: [{ type: 'text' as const, text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env and restart the server.' }],
         isError: true,
       };
     }
     try {
-      const client = new LineClient(authData);
+      const client = new LineClient(envAuthData);
       const messages = await client.getMessages(chatMid, count);
       if (messages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
@@ -199,19 +189,17 @@ server.registerTool(
       'Prefer previewUrl for faster loads; use downloadUrl for full-resolution.',
     inputSchema: {
       url: z.string().url().describe('Image URL to fetch'),
-      auth: z.string().describe('Auth JSON returned by list_chats after login'),
     },
   },
-  async ({ url, auth }) => {
-    const authData = parseAuth(auth);
-    if (!authData) {
+  async ({ url }) => {
+    if (!envAuthData) {
       return {
-        content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
+        content: [{ type: 'text' as const, text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env and restart the server.' }],
         isError: true,
       };
     }
     try {
-      const client = new LineClient(authData);
+      const client = new LineClient(envAuthData);
       const { buffer, mimeType } = await client.getImageBuffer(url);
       return {
         content: [
