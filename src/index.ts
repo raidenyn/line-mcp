@@ -1,8 +1,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { AsyncLocalStorage } from 'async_hooks';
+import express from 'express';
 import { z } from 'zod';
-import * as qrcodeterminal from 'qrcode-terminal';
 import { LineClient, AuthData } from './line-client';
+import { setupOAuthRoutes, activeTokens, loadTokenState, makeWwwAuthenticate } from './oauth';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -14,116 +16,31 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
   22: 'flex',
 };
 
-let pendingLoginClient: LineClient | null = null;
 const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
-
-function loadEnvAuth(): AuthData | null {
-  const raw = process.env.LINE_AUTH_DATA;
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as AuthData;
-  } catch {
-    process.stderr.write('[LINE] Warning: LINE_AUTH_DATA is set but is not valid JSON — ignoring.\n');
-    return null;
-  }
-}
-
-const envAuthData: AuthData | null = loadEnvAuth();
-
-server.registerTool(
-  'login',
-  {
-    description:
-      'Start LINE QR code login. Returns a QR code and URL to scan with the LINE mobile app. ' +
-      'On first login a PIN will be shown — the user must enter it in LINE mobile to confirm. ' +
-      'After scanning (and entering PIN if prompted), call list_chats to complete authentication.',
-  },
-  async () => {
-    try {
-      pendingLoginClient = new LineClient();
-      const { qrUrl } = await pendingLoginClient.login();
-      const qrText = await new Promise<string>((resolve) => {
-        qrcodeterminal.generate(qrUrl, { small: true }, resolve);
-      });
-      return {
-        content: [
-          {
-            type: 'text' as const,
-            text: `Scan this QR code with your LINE mobile app:\n\n${qrText}\nURL: ${qrUrl}\n\nAfter scanning, call list_chats (without auth) to continue.`,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Login failed: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
+const authStore = new AsyncLocalStorage<AuthData>();
 
 server.registerTool(
   'list_chats',
   {
     description:
       'List all LINE chats (group chats and 1:1 contacts). ' +
-      'Uses credentials from the LINE_AUTH_DATA environment variable. ' +
-      'When completing a QR login flow (after scanning the QR and entering PIN if prompted), ' +
-      'call this without any arguments. ' +
       'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count.',
     inputSchema: {},
   },
   async () => {
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
     try {
-      let client: LineClient;
-      let isLoginCompletion = false;
-
-      if (envAuthData) {
-        client = new LineClient(envAuthData);
-      } else {
-        if (!pendingLoginClient) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env, or call the login tool first and scan the QR code.',
-              },
-            ],
-            isError: true,
-          };
-        }
-        client = pendingLoginClient;
-        isLoginCompletion = true;
-      }
-
+      const client = new LineClient(authData);
       const chats = await client.listChats();
-
       const lines = chats.map((c) => {
         const type = c.type === 'group' ? 'GROUP' : 'USER';
         const members = c.memberCount != null ? ` (${c.memberCount} members)` : '';
         return `[${type}] ${c.name}${members}\n  mid: ${c.mid}`;
       });
       const chatText = lines.length > 0 ? lines.join('\n') : 'No chats found.';
-
-      if (isLoginCompletion) {
-        const completedAuth = client.getCompletedAuth();
-        pendingLoginClient = null;
-        if (completedAuth) {
-          return {
-            content: [
-              {
-                type: 'text' as const,
-                text:
-                  `${chatText}\n\n---\n` +
-                  `Login complete. Add LINE_AUTH_DATA to your MCP server config, then restart the server.\n\n` +
-                  `In ~/.claude.json (under mcpServers.line.env):\n` +
-                  `  "LINE_AUTH_DATA": ${JSON.stringify(JSON.stringify(completedAuth))}`,
-              },
-            ],
-          };
-        }
-      }
-
       return { content: [{ type: 'text' as const, text: chatText }] };
     } catch (err) {
       return {
@@ -147,14 +64,12 @@ server.registerTool(
     },
   },
   async ({ chatMid, count }) => {
-    if (!envAuthData) {
-      return {
-        content: [{ type: 'text' as const, text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env and restart the server.' }],
-        isError: true,
-      };
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const client = new LineClient(envAuthData);
+      const client = new LineClient(authData);
       const messages = await client.getMessages(chatMid, count);
       if (messages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
@@ -192,14 +107,12 @@ server.registerTool(
     },
   },
   async ({ url }) => {
-    if (!envAuthData) {
-      return {
-        content: [{ type: 'text' as const, text: 'No auth configured. Set LINE_AUTH_DATA in the MCP server env and restart the server.' }],
-        isError: true,
-      };
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const client = new LineClient(envAuthData);
+      const client = new LineClient(authData);
       const { buffer, mimeType } = await client.getImageBuffer(url);
       return {
         content: [
@@ -219,10 +132,57 @@ server.registerTool(
   },
 );
 
+function seedTestToken(): void {
+  const testToken = process.env.TEST_TOKEN;
+  const authRaw = process.env.LINE_AUTH_DATA;
+  if (!testToken || !authRaw) return;
+  try {
+    const authData: AuthData = JSON.parse(authRaw);
+    activeTokens.set(testToken, { authData, mcpRefreshToken: '', expiresAt: Date.now() + 86_400_000 });
+    process.stderr.write('[LINE] Test token seeded from TEST_TOKEN + LINE_AUTH_DATA\n');
+  } catch {
+    process.stderr.write('[LINE] Warning: failed to seed test token — LINE_AUTH_DATA is not valid JSON\n');
+  }
+}
+
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write('LINE MCP server started (stdio)\n');
+  const PORT = parseInt(process.env.PORT ?? '3000', 10);
+  const WWW_AUTH = makeWwwAuthenticate(PORT);
+  loadTokenState();
+  seedTestToken();
+
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+
+  setupOAuthRoutes(app, PORT);
+
+  app.post('/mcp', async (req, res) => {
+    const authHeader = req.headers.authorization ?? '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+    const entry = activeTokens.get(token);
+
+    if (!entry || entry.expiresAt < Date.now()) {
+      res.status(401).set('WWW-Authenticate', WWW_AUTH).json({ error: 'invalid_token' });
+      return;
+    }
+
+    await authStore.run(entry.authData, async () => {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on('close', () => { transport.close().catch(() => {}); });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    });
+  });
+
+  app.get('/mcp', (_req, res) => {
+    res.status(405).send('Use POST /mcp');
+  });
+
+  app.listen(PORT, '127.0.0.1', () => {
+    process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}/mcp\n`);
+    process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}/mcp\n`);
+  });
 }
 
 main().catch((err) => {

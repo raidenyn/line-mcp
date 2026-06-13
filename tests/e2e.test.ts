@@ -1,14 +1,21 @@
 import { beforeAll, afterAll, it, expect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import * as http from 'http';
+import { spawn, ChildProcess } from 'child_process';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
+const PORT = 13117; // Fixed port for tests to avoid collisions
+const MCP_URL = new URL(`http://localhost:${PORT}/mcp`);
 
 let mcpClient: Client;
-let transport: StdioClientTransport;
+let transport: StreamableHTTPClientTransport;
+let serverProcess: ChildProcess;
 let authJson: string;
+let testToken: string;
 let firstChatMid: string;
 let imagePreviewUrl: string | null = null;
 
@@ -20,21 +27,61 @@ function extractText(result: CallToolResult): string {
   return item.text;
 }
 
+async function waitForServer(baseUrl: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = http.get(`${baseUrl}/.well-known/oauth-authorization-server`, (res) => {
+          res.resume();
+          res.statusCode === 200 ? resolve() : reject(new Error(`Status ${res.statusCode}`));
+        });
+        req.on('error', reject);
+        req.setTimeout(500, () => { req.destroy(); reject(new Error('timeout')); });
+      });
+      return;
+    } catch {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  throw new Error('Server did not become ready in time');
+}
+
 beforeAll(async () => {
   authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
-  transport = new StdioClientTransport({
-    command: 'npx',
-    args: ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
-    cwd: PROJECT_ROOT,
-    env: { ...process.env, LINE_AUTH_DATA: authJson },
-    stderr: 'pipe',
+  testToken = crypto.randomBytes(32).toString('hex');
+
+  serverProcess = spawn(
+    'npx',
+    ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
+    {
+      cwd: PROJECT_ROOT,
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        LINE_AUTH_DATA: authJson,
+        TEST_TOKEN: testToken,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
+  );
+
+  serverProcess.stderr?.on('data', (chunk: Buffer) => {
+    process.stderr.write(`[server] ${chunk}`);
+  });
+
+  await waitForServer(`http://localhost:${PORT}`, 30_000);
+
+  transport = new StreamableHTTPClientTransport(MCP_URL, {
+    requestInit: { headers: { Authorization: `Bearer ${testToken}` } },
   });
   mcpClient = new Client({ name: 'e2e-test', version: '1.0.0' });
   await mcpClient.connect(transport);
-});
+}, 60_000);
 
 afterAll(async () => {
-  await transport.close();
+  await transport.close().catch(() => {});
+  serverProcess.kill();
 });
 
 it('list_chats returns at least one chat with a mid', async () => {

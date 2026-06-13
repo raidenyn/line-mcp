@@ -104,7 +104,9 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
         try { Object.defineProperty(global, key, { value: val, configurable: true, writable: true }); } catch { /* skip */ }
       }
     }
-    // fetch must be our custom version (not the Node.js built-in)
+    // Temporarily override global fetch so the sandbox script uses wasmFetch during init
+    // (the sandbox calls fetch("ltsm.wasm") as a global, not via window.fetch)
+    const originalFetch = nodeGlobal['fetch'];
     try { nodeGlobal['fetch'] = wasmFetch; } catch { /* skip */ }
 
     // Load the sandbox — self-executes and registers a DOMContentLoaded listener
@@ -121,6 +123,9 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
 
     // INIT: loads wasm and derives static key from the Chrome extension token
     await sendCommand(win, 'init');
+
+    // Restore global fetch — wasmFetch is only needed during WASM load above
+    try { nodeGlobal['fetch'] = originalFetch; } catch { /* skip */ }
 
     return { win };
   })();

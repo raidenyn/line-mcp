@@ -78,6 +78,14 @@ export class LineClient {
     return this.completedAuth;
   }
 
+  async waitForPin(): Promise<string | null> {
+    return this.loginPinPromise;
+  }
+
+  async waitForCompletion(): Promise<void> {
+    if (this.pendingLogin) await this.pendingLogin();
+  }
+
   private async request<T>(
     path: string,
     args: unknown[],
@@ -214,7 +222,11 @@ export class LineClient {
     });
     // SPKI DER wraps the 32-byte raw key with a 12-byte header; strip the header.
     const rawPublicKey = Buffer.from(pubKeyObj).slice(-32);
-    const qrUrl = `${callbackUrl}?secret=${rawPublicKey.toString('base64url')}`;
+    // Chrome extension uses window.btoa (standard base64) and adds e2eeVersion=1
+    const qrUrlObj = new URL(callbackUrl);
+    qrUrlObj.searchParams.set('secret', rawPublicKey.toString('base64'));
+    qrUrlObj.searchParams.set('e2eeVersion', '1');
+    const qrUrl = qrUrlObj.toString();
 
     // Save certificate for use after QR scan confirmation (spec: verifyCertificate follows checkQrCodeVerified)
     this.pendingCertificate = this.auth?.certificate ?? null;
@@ -424,11 +436,13 @@ export class LineClient {
         const data = await this.request<{
           contacts: Record<string, { contact: { mid: string; displayName: string; pictureStatus?: string } }>;
         }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }]);
-        return Object.values(data.contacts ?? {}).map((entry) => ({
-          mid: entry.contact.mid,
-          displayName: entry.contact.displayName,
-          pictureStatus: entry.contact.pictureStatus,
-        }));
+        return Object.values(data.contacts ?? {})
+          .filter((entry) => entry?.contact != null)
+          .map((entry) => ({
+            mid: entry.contact.mid,
+            displayName: entry.contact.displayName,
+            pictureStatus: entry.contact.pictureStatus,
+          }));
       }),
     );
     return batchResults.flat();

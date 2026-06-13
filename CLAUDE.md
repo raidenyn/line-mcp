@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 npm run build        # tsc → dist/
-npm start            # ts-node src/index.ts  (runs the MCP server over stdio)
+npm start            # ts-node src/index.ts  (HTTP MCP server on localhost:3000)
 npm test             # vitest run (e2e tests — requires valid .line-auth.json)
 ```
 
@@ -17,16 +17,24 @@ npx vitest run tests/e2e.test.ts
 
 ## Architecture
 
-This is a **LINE MCP server** — an MCP (Model Context Protocol) server that exposes LINE messenger as tools to an AI assistant. It runs over stdio and is consumed by Claude Code or any MCP-compatible client.
+This is a **LINE MCP server** — an MCP (Model Context Protocol) server that exposes LINE messenger as tools to an AI assistant. It runs as an HTTP server (Streamable HTTP transport) and implements OAuth 2.0 so Claude Code handles authentication natively.
 
 ### Source files (`src/`)
 
-**`index.ts`** — entry point. Registers four tools (`login`, `list_chats`, `get_messages`, `get_image`), starts stdio transport. The server is stateless: no shared `LineClient` instance. A module-level `pendingLoginClient` holds the in-flight login session; all other calls create a `LineClient` on-demand from auth data loaded from `process.env.LINE_AUTH_DATA` at startup.
+**`index.ts`** — entry point. Creates an Express app, registers three tools (`list_chats`, `get_messages`, `get_image`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token store so e2e tests bypass the OAuth flow.
+
+**`oauth.ts`** — OAuth 2.0 authorization server. Provides:
+- `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
+- `GET /.well-known/oauth-protected-resource` — resource server metadata (referenced from `WWW-Authenticate`)
+- `GET /authorize` — starts a LINE QR login, renders an HTML page with QR code image and PIN display; polls `/authorize/poll` via JS to detect completion and auto-redirects with the auth code
+- `GET /authorize/poll?sid=<id>` — JSON status endpoint polled by the authorize page
+- `POST /token` — PKCE code exchange and refresh-token rotation; issues opaque MCP tokens mapped to `AuthData` in memory
+- In-memory stores: `loginSessions`, `pendingCodes`, `activeTokens`, `refreshTokens`
 
 **`line-client.ts`** — all LINE API logic. Targets `https://line-chrome-gw.line-apps.com`, impersonating the LINE Chrome extension (`ophjlpahpchlmihnnnihgmmeilfjmjjc`). Key concerns:
-- **Login flow**: QR code → `checkQrCodeVerified` long-poll → `verifyCertificate` (uses saved certificate to skip PIN on repeat logins) → optional PIN confirmation (`checkPinCodeVerified`) → `qrCodeLoginV2` → `getEncryptedIdentityV3`. After completion, `getCompletedAuth()` returns the full `AuthData` for the caller to store.
-- **PIN surfacing**: `list_chats` (called when `LINE_AUTH_DATA` is unset) doubles as the login-completion trigger. When a PIN is needed, `ensureAuthenticated` throws with the PIN value so the caller can display it, then waits for PIN confirmation on the next `list_chats` call.
-- **Token refresh**: access tokens are refreshed when less than 24 hours from expiry. The refresh is in-memory only; the caller's stored auth data is not updated.
+- **Login flow**: QR code → `checkQrCodeVerified` long-poll → `verifyCertificate` (uses saved certificate to skip PIN on repeat logins) → optional PIN confirmation (`checkPinCodeVerified`) → `qrCodeLoginV2` → `getEncryptedIdentityV3`. After completion, `getCompletedAuth()` returns the full `AuthData`.
+- **PIN surfacing for OAuth**: `waitForPin()` and `waitForCompletion()` are public methods used by `oauth.ts` to monitor the background login without going through `ensureAuthenticated()`.
+- **Token refresh**: access tokens are refreshed when less than 24 hours from expiry. The `AuthData` object is mutated in-place, so the same reference stored in `activeTokens` stays current across calls.
 - **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
 - **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
 
@@ -40,35 +48,20 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 ### Tests (`tests/`)
 
-`e2e.test.ts` is an integration test that launches the MCP server as a child process (`ts-node src/index.ts`) via `StdioClientTransport` and calls the actual LINE API. It requires a pre-existing `.line-auth.json` (read at test startup and passed to the server process as the `LINE_AUTH_DATA` environment variable). Tests run sequentially and share state across cases (the first chat MID found by `list_chats` is reused by `get_messages`).
+`e2e.test.ts` launches the MCP server as a child process (`ts-node src/index.ts`) over HTTP on port 13117. It reads `.line-auth.json`, passes the contents as `LINE_AUTH_DATA` and a random hex string as `TEST_TOKEN` to the server process. The server pre-seeds `activeTokens` with `TEST_TOKEN`, so the test client connects over `StreamableHTTPClientTransport` with that token already valid — no OAuth flow needed. Tests run sequentially and share state across cases.
 
 ### Auth flow
 
-Auth data lives in the **`LINE_AUTH_DATA` environment variable** passed to the MCP server process. The `AuthData` struct holds `accessToken`, `refreshToken`, `certificate`, `mid`, and three WASM key-derivation fields (`wrappedNonce`, `kdfParameter1`, `kdfParameter2`).
+**Transport**: Streamable HTTP on `http://localhost:PORT` (default port 3000). Claude Code adds the server as an HTTP MCP connector.
 
-**First-time login (two steps):**
-1. Call `login` → returns a QR code. Scan it with the LINE mobile app.
-2. Call `list_chats` (no arguments) → completes the login (entering PIN if prompted). The response includes the auth JSON and instructions to set `LINE_AUTH_DATA` in your MCP server config.
+**First-time setup:**
+1. Start the server: `npm start`
+2. Add to Claude Code: `claude mcp add --transport http --scope user line http://localhost:3000/mcp`
+3. Call any tool — Claude Code detects the `401` response, opens the LINE QR page in a browser
+4. Scan the QR code with the LINE mobile app; enter PIN if prompted
+5. Claude Code receives tokens automatically and retries the tool call
 
-**Setting up the env var:**
-
-In `~/.claude.json` (or `.claude/settings.json`), add an `env` block to the `line` server entry:
-```json
-{
-  "mcpServers": {
-    "line": {
-      "command": "npx",
-      "args": ["-y", "line-mcp"],
-      "env": {
-        "LINE_AUTH_DATA": "{...auth json from login...}"
-      }
-    }
-  }
-}
-```
-Then restart the MCP server.
-
-**Subsequent calls:**
-- `list_chats`, `get_messages`, and `get_image` take no `auth` argument — they read from `process.env.LINE_AUTH_DATA` at server startup.
-- The server creates a fresh `LineClient` per call from `envAuthData`; nothing is persisted server-side.
-- On re-login with a matching certificate, the PIN step is skipped.
+**Token lifecycle:**
+- MCP tokens expire after 24 hours; Claude Code refreshes them proactively via `POST /token` with `grant_type=refresh_token`
+- LINE access tokens are refreshed on-demand inside `LineClient.ensureAuthenticated()` when < 24 h remain; since `AuthData` is mutated in-place and the same reference is stored in `activeTokens`, refreshed tokens are picked up on subsequent calls without re-issuing MCP tokens
+- All state is in-memory; restarting the server clears all tokens — Claude Code will re-run the OAuth flow on the next tool call
