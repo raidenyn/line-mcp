@@ -46,6 +46,7 @@ function sendCommand(win: Window & typeof globalThis, command: string, payload?:
 }
 
 let initPromise: Promise<{ win: Window & typeof globalThis }> | null = null;
+let currentStorageKeyMid: string | null = null;
 
 function initialize(): Promise<{ win: Window & typeof globalThis }> {
   if (initPromise) return initPromise;
@@ -137,10 +138,23 @@ export async function getHmac(params: {
 }
 
 export async function initStorageKey(params: {
+  mid: string;
   wrappedNonce: string;
   kdfParameter1: string;
   kdfParameter2: string;
 }): Promise<void> {
   const { win } = await initialize();
-  await sendCommand(win, 'storage_key_init', params);
+  const { wrappedNonce, kdfParameter1, kdfParameter2 } = params;
+  await sendCommand(win, 'storage_key_init', { wrappedNonce, kdfParameter1, kdfParameter2 });
+  currentStorageKeyMid = params.mid;
+}
+
+export async function ensureStorageKey(params: {
+  mid: string;
+  wrappedNonce: string;
+  kdfParameter1: string;
+  kdfParameter2: string;
+}): Promise<void> {
+  if (currentStorageKeyMid === params.mid) return;
+  await initStorageKey(params);
 }

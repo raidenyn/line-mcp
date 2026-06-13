@@ -1,12 +1,14 @@
 import { beforeAll, afterAll, it, expect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import * as fs from 'fs';
 import * as path from 'path';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 let mcpClient: Client;
 let transport: StdioClientTransport;
+let authJson: string;
 let firstChatMid: string;
 let imagePreviewUrl: string | null = null;
 
@@ -19,6 +21,7 @@ function extractText(result: CallToolResult): string {
 }
 
 beforeAll(async () => {
+  authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
   transport = new StdioClientTransport({
     command: 'npx',
     args: ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
@@ -34,14 +37,13 @@ afterAll(async () => {
 });
 
 it('list_chats returns at least one chat with a mid', async () => {
-  const result = await mcpClient.callTool({ name: 'list_chats', arguments: {} });
+  const result = await mcpClient.callTool({ name: 'list_chats', arguments: { auth: authJson } });
   expect(result.isError).toBeFalsy();
   const text = extractText(result);
   expect(text).toMatch(/\[(?:GROUP|USER)\]/);
   const mids = [...text.matchAll(/^\s+mid:\s+(\S+)/gm)].map((m) => m[1]);
   expect(mids.length).toBeGreaterThan(0);
   firstChatMid = mids[0];
-  // Store all mids for get_messages to try in order
   (globalThis as Record<string, unknown>).__allChatMids = mids;
 });
 
@@ -51,7 +53,7 @@ it('get_messages returns messages for a valid chatMid', async () => {
   for (const mid of allMids) {
     const result = await mcpClient.callTool({
       name: 'get_messages',
-      arguments: { chatMid: mid, count: 20 },
+      arguments: { chatMid: mid, count: 20, auth: authJson },
     });
     if (result.isError) continue;
     const text = extractText(result);
@@ -73,7 +75,7 @@ it('get_messages rejects count > 200', async () => {
   expect(firstChatMid).toBeTruthy();
   const result = await mcpClient.callTool({
     name: 'get_messages',
-    arguments: { chatMid: firstChatMid, count: 999 },
+    arguments: { chatMid: firstChatMid, count: 999, auth: authJson },
   });
   expect(result.isError).toBe(true);
 });
@@ -84,7 +86,7 @@ it('get_image returns a base64 image when a previewUrl is available', async ({ s
   }
   const result = await mcpClient.callTool({
     name: 'get_image',
-    arguments: { url: imagePreviewUrl },
+    arguments: { url: imagePreviewUrl, auth: authJson },
   });
   expect(result.isError).toBeFalsy();
   const item = result.content[0];
@@ -98,7 +100,7 @@ it('get_image returns a base64 image when a previewUrl is available', async ({ s
 it('get_image returns isError for a bad URL', async () => {
   const result = await mcpClient.callTool({
     name: 'get_image',
-    arguments: { url: 'https://invalid.example.test/no-such.jpg' },
+    arguments: { url: 'https://invalid.example.test/no-such.jpg', auth: authJson },
   });
   expect(result.isError).toBe(true);
   expect(extractText(result)).toMatch(/Failed to fetch image/);

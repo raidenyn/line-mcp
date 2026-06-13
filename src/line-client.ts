@@ -1,6 +1,5 @@
-import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { getHmac, initStorageKey } from './ltsm';
+import { getHmac, initStorageKey, ensureStorageKey } from './ltsm';
 
 const BASE_URL = 'https://line-chrome-gw.line-apps.com';
 
@@ -49,7 +48,7 @@ export interface Message {
 
 export class LineClient {
   private auth: AuthData | null = null;
-  private storageKeyInitialized = false;
+  private completedAuth: AuthData | null = null;
   private contactNameCache = new Map<string, string>();
   private pendingLogin: (() => Promise<void>) | null = null;
   private refreshPromise: Promise<void> | null = null;
@@ -65,28 +64,18 @@ export class LineClient {
   private loginAbortController: AbortController | null = null;
 
   constructor(
-    private readonly tokenPath: string = '.line-auth.json',
+    auth?: AuthData | null,
     private readonly fetchFn: typeof globalThis.fetch = globalThis.fetch,
   ) {
-    this.loadAuth();
+    if (auth) this.auth = auth;
   }
 
   isAuthenticated(): boolean {
     return this.auth !== null || this.pendingLogin !== null;
   }
 
-  private loadAuth(): void {
-    if (!fs.existsSync(this.tokenPath)) return;
-    try {
-      this.auth = JSON.parse(fs.readFileSync(this.tokenPath, 'utf8'));
-    } catch {
-      this.auth = null;
-    }
-  }
-
-  private saveAuth(auth: AuthData): void {
-    fs.writeFileSync(this.tokenPath, JSON.stringify(auth, null, 2));
-    this.auth = auth;
+  getCompletedAuth(): AuthData | null {
+    return this.completedAuth;
   }
 
   private async request<T>(
@@ -156,7 +145,6 @@ export class LineClient {
             const data = await response.json() as { accessToken: string; refreshToken?: string };
             this.auth.accessToken = data.accessToken;
             if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
-            this.saveAuth(this.auth);
           }
         })().finally(() => { this.refreshPromise = null; });
       }
@@ -189,14 +177,12 @@ export class LineClient {
     if (!this.auth) {
       throw new Error('Not authenticated. Call the login tool first and scan the QR code.');
     }
-    if (!this.storageKeyInitialized) {
-      await initStorageKey({
-        wrappedNonce: this.auth.wrappedNonce,
-        kdfParameter1: this.auth.kdfParameter1,
-        kdfParameter2: this.auth.kdfParameter2,
-      });
-      this.storageKeyInitialized = true;
-    }
+    await ensureStorageKey({
+      mid: this.auth.mid,
+      wrappedNonce: this.auth.wrappedNonce,
+      kdfParameter1: this.auth.kdfParameter1,
+      kdfParameter2: this.auth.kdfParameter2,
+    });
     await this.refreshIfExpired();
   }
 
@@ -340,7 +326,7 @@ export class LineClient {
 
     const { accessToken, refreshToken } = loginData.tokenV3IssueResult;
 
-    // Set auth without storageKeyInitialized so HMAC uses JWT but x-line-access is NOT sent
+    // Set auth so HMAC uses accessToken for the identity fetch below
     this.auth = {
       accessToken,
       refreshToken,
@@ -350,7 +336,6 @@ export class LineClient {
       kdfParameter1: '',
       kdfParameter2: '',
     };
-    this.storageKeyInitialized = false;
 
     const identityData = await this.request<{
       wrappedNonce: string;
@@ -359,13 +344,13 @@ export class LineClient {
     }>('/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3', []);
 
     await initStorageKey({
+      mid: loginData.mid,
       wrappedNonce: identityData.wrappedNonce,
       kdfParameter1: identityData.kdfParameter1,
       kdfParameter2: identityData.kdfParameter2,
     });
-    this.storageKeyInitialized = true;
 
-    this.saveAuth({
+    this.completedAuth = {
       accessToken,
       refreshToken,
       certificate: loginData.certificate,
@@ -373,7 +358,8 @@ export class LineClient {
       wrappedNonce: identityData.wrappedNonce,
       kdfParameter1: identityData.kdfParameter1,
       kdfParameter2: identityData.kdfParameter2,
-    });
+    };
+    this.auth = this.completedAuth;
 
     this.pendingLogin = null;
     this.pendingAuthSessionId = null;
@@ -462,6 +448,13 @@ export class LineClient {
       hasContent: boolean;
       contentMetadata?: Record<string, string>;
     }>>('/api/talk/thrift/Talk/TalkService/getRecentMessagesV2', [chatMid, count]);
+
+    const unknownMids = [...new Set((raw ?? []).map((m) => m.from))]
+      .filter((mid) => !this.contactNameCache.has(mid));
+    if (unknownMids.length > 0) {
+      const resolved = await this.fetchContactsV2(unknownMids);
+      for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
+    }
 
     return (raw ?? []).map((m) => ({
       id: m.id,

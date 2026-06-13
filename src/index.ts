@@ -2,7 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import * as qrcodeterminal from 'qrcode-terminal';
-import { LineClient } from './line-client';
+import { LineClient, AuthData } from './line-client';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -14,8 +14,16 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
   22: 'flex',
 };
 
-const client = new LineClient('.line-auth.json');
+let pendingLoginClient: LineClient | null = null;
 const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
+
+function parseAuth(auth: string): AuthData | null {
+  try {
+    return JSON.parse(auth) as AuthData;
+  } catch {
+    return null;
+  }
+}
 
 server.registerTool(
   'login',
@@ -27,7 +35,8 @@ server.registerTool(
   },
   async () => {
     try {
-      const { qrUrl } = await client.login();
+      pendingLoginClient = new LineClient();
+      const { qrUrl } = await pendingLoginClient.login();
       const qrText = await new Promise<string>((resolve) => {
         qrcodeterminal.generate(qrUrl, { small: true }, resolve);
       });
@@ -35,7 +44,7 @@ server.registerTool(
         content: [
           {
             type: 'text' as const,
-            text: `Scan this QR code with your LINE mobile app:\n\n${qrText}\nURL: ${qrUrl}\n\nAfter scanning, call list_chats to continue.`,
+            text: `Scan this QR code with your LINE mobile app:\n\n${qrText}\nURL: ${qrUrl}\n\nAfter scanning, call list_chats (without auth) to continue.`,
           },
         ],
       };
@@ -53,22 +62,77 @@ server.registerTool(
   {
     description:
       'List all LINE chats (group chats and 1:1 contacts). ' +
-      'If login is in progress (QR scanned / PIN entered), calling this completes authentication. ' +
-      'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count. ' +
-      'Also caches contact display names so get_messages can show sender names instead of raw IDs.',
+      'Pass the auth JSON from a previous login to use stored credentials. ' +
+      'Omit auth when completing a QR login flow (after scanning the QR and entering PIN if prompted). ' +
+      'On login completion, the response includes an AUTH_DATA block — save it and pass it as auth on future calls. ' +
+      'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count.',
+    inputSchema: {
+      auth: z
+        .string()
+        .optional()
+        .describe(
+          'Auth JSON returned after login. Omit only when completing the QR login flow.',
+        ),
+    },
   },
-  async () => {
+  async ({ auth }) => {
     try {
-      const chats = await client.listChats();
-      if (chats.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No chats found.' }] };
+      let client: LineClient;
+      let isLoginCompletion = false;
+
+      if (auth) {
+        const authData = parseAuth(auth);
+        if (!authData) {
+          return {
+            content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
+            isError: true,
+          };
+        }
+        client = new LineClient(authData);
+      } else {
+        if (!pendingLoginClient) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'No pending login. Call the login tool first and scan the QR code.',
+              },
+            ],
+            isError: true,
+          };
+        }
+        client = pendingLoginClient;
+        isLoginCompletion = true;
       }
+
+      const chats = await client.listChats();
+
       const lines = chats.map((c) => {
         const type = c.type === 'group' ? 'GROUP' : 'USER';
         const members = c.memberCount != null ? ` (${c.memberCount} members)` : '';
         return `[${type}] ${c.name}${members}\n  mid: ${c.mid}`;
       });
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      const chatText = lines.length > 0 ? lines.join('\n') : 'No chats found.';
+
+      if (isLoginCompletion) {
+        const completedAuth = client.getCompletedAuth();
+        pendingLoginClient = null;
+        if (completedAuth) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text:
+                  `${chatText}\n\n---\n` +
+                  `AUTH_DATA (save this and pass as \`auth\` to list_chats, get_messages, and get_image):\n` +
+                  JSON.stringify(completedAuth),
+              },
+            ],
+          };
+        }
+      }
+
+      return { content: [{ type: 'text' as const, text: chatText }] };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to list chats: ${(err as Error).message}` }],
@@ -83,15 +147,24 @@ server.registerTool(
   {
     description:
       'Get recent messages from a LINE chat. Use the mid value from list_chats. ' +
-      'Sender names are resolved from the contact cache (call list_chats first for best results). ' +
+      'Sender names are resolved automatically. ' +
       'Non-text messages (images, stickers, etc.) show a content-type label and preview URL when available.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
       count: z.number().int().min(1).max(200).default(50).describe('Number of recent messages to fetch'),
+      auth: z.string().describe('Auth JSON returned by list_chats after login'),
     },
   },
-  async ({ chatMid, count }) => {
+  async ({ chatMid, count, auth }) => {
+    const authData = parseAuth(auth);
+    if (!authData) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
+        isError: true,
+      };
+    }
     try {
+      const client = new LineClient(authData);
       const messages = await client.getMessages(chatMid, count);
       if (messages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
@@ -126,10 +199,19 @@ server.registerTool(
       'Prefer previewUrl for faster loads; use downloadUrl for full-resolution.',
     inputSchema: {
       url: z.string().url().describe('Image URL to fetch'),
+      auth: z.string().describe('Auth JSON returned by list_chats after login'),
     },
   },
-  async ({ url }) => {
+  async ({ url, auth }) => {
+    const authData = parseAuth(auth);
+    if (!authData) {
+      return {
+        content: [{ type: 'text' as const, text: 'Invalid auth JSON.' }],
+        isError: true,
+      };
+    }
     try {
+      const client = new LineClient(authData);
       const { buffer, mimeType } = await client.getImageBuffer(url);
       return {
         content: [
