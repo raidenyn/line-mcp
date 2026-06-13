@@ -63,6 +63,7 @@ beforeAll(async () => {
         TEST_TOKEN: testToken,
       },
       stdio: ['ignore', 'ignore', 'pipe'],
+      detached: true, // spawn as process group leader so we can kill the whole group
     },
   );
 
@@ -80,8 +81,13 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  await transport.close().catch(() => {});
-  serverProcess.kill();
+  await transport?.close().catch(() => {});
+  try {
+    // Kill the whole process group (npx → ts-node → node) so nothing lingers on the port
+    process.kill(-serverProcess.pid!, 'SIGTERM');
+  } catch {
+    serverProcess.kill();
+  }
 });
 
 it('list_chats returns at least one chat with a mid', async () => {
