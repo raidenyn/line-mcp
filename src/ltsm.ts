@@ -4,7 +4,7 @@ import { Window } from 'happy-dom';
 
 const SANDBOX_ID = 'node-ltsm';
 const ORIGIN = 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc';
-const WASM_PATH = path.join(__dirname, '../specs/raw/ltsm/ltsm.wasm');
+const WASM_PATH = path.join(__dirname, 'ltsm/ltsm.wasm');
 
 // sandbox listens on window "message" events; responds via window.parent.postMessage
 const responseHandlers = new Map<string, (msg: unknown) => void>();
@@ -107,7 +107,7 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
     try { nodeGlobal['fetch'] = wasmFetch; } catch { /* skip */ }
 
     // Load the sandbox — self-executes and registers a DOMContentLoaded listener
-    require('../specs/raw/ltsm/ltsmSandbox.js');
+    require('./ltsm/ltsmSandbox.js');
 
     // Fire DOMContentLoaded so the sandbox wires up its "message" handler and sends LOADED
     await new Promise<void>((resolve) => {
