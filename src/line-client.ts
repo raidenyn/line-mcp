@@ -35,6 +35,7 @@ export interface Chat {
 export interface Message {
   id: string;
   from: string;
+  senderName?: string;
   to: string;
   toType: number;
   createdTime: string;
@@ -49,6 +50,7 @@ export interface Message {
 export class LineClient {
   private auth: AuthData | null = null;
   private storageKeyInitialized = false;
+  private contactNameCache = new Map<string, string>();
   private pendingLogin: (() => Promise<void>) | null = null;
   private refreshPromise: Promise<void> | null = null;
   private pendingLoginError: Error | null = null;
@@ -176,6 +178,10 @@ export class LineClient {
       }
       // PIN not needed (certificate accepted) or already acknowledged — wait for full completion
       await this.pendingLogin();
+      // If we reach here, the current session succeeded. An aborted previous session's .catch()
+      // may have set pendingLoginError (AbortError) before we got here — clear it so callers
+      // don't see a stale failure after a successful re-login.
+      this.pendingLoginError = null;
     }
     if (this.pendingLoginError) {
       throw new Error(`Login failed: ${this.pendingLoginError.message}`);
@@ -413,6 +419,10 @@ export class LineClient {
       pictureUrl: c.pictureStatus ? `https://profile.line-scdn.net/${c.pictureStatus}/preview` : undefined,
     }));
 
+    for (const c of contactsData) {
+      this.contactNameCache.set(c.mid, c.displayName);
+    }
+
     return [...groups, ...contacts];
   }
 
@@ -456,6 +466,7 @@ export class LineClient {
     return (raw ?? []).map((m) => ({
       id: m.id,
       from: m.from,
+      senderName: this.contactNameCache.get(m.from),
       to: m.to,
       toType: m.toType,
       createdTime: m.createdTime,

@@ -78,10 +78,9 @@ it('get_messages rejects count > 200', async () => {
   expect(result.isError).toBe(true);
 });
 
-it('get_image returns a base64 image when a previewUrl is available', async () => {
+it('get_image returns a base64 image when a previewUrl is available', async ({ skip }) => {
   if (!imagePreviewUrl) {
-    console.warn('No image messages found in test account — get_image happy-path not exercised');
-    return;
+    skip();
   }
   const result = await mcpClient.callTool({
     name: 'get_image',

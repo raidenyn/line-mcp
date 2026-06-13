@@ -21,7 +21,9 @@ server.registerTool(
   'login',
   {
     description:
-      'Start LINE QR code login. Returns a URL to scan with the LINE mobile app. After scanning, call list_chats to complete authentication and list your chats.',
+      'Start LINE QR code login. Returns a QR code and URL to scan with the LINE mobile app. ' +
+      'On first login a PIN will be shown — the user must enter it in LINE mobile to confirm. ' +
+      'After scanning (and entering PIN if prompted), call list_chats to complete authentication.',
   },
   async () => {
     try {
@@ -50,7 +52,10 @@ server.registerTool(
   'list_chats',
   {
     description:
-      'List all LINE chats (group chats and 1:1 contacts). If login is in progress (QR was shown), this will complete the authentication first.',
+      'List all LINE chats (group chats and 1:1 contacts). ' +
+      'If login is in progress (QR scanned / PIN entered), calling this completes authentication. ' +
+      'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count. ' +
+      'Also caches contact display names so get_messages can show sender names instead of raw IDs.',
   },
   async () => {
     try {
@@ -76,7 +81,10 @@ server.registerTool(
 server.registerTool(
   'get_messages',
   {
-    description: 'Get recent messages from a LINE chat. Use the mid value from list_chats.',
+    description:
+      'Get recent messages from a LINE chat. Use the mid value from list_chats. ' +
+      'Sender names are resolved from the contact cache (call list_chats first for best results). ' +
+      'Non-text messages (images, stickers, etc.) show a content-type label and preview URL when available.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
       count: z.number().int().min(1).max(200).default(50).describe('Number of recent messages to fetch'),
@@ -91,12 +99,13 @@ server.registerTool(
       const lines = messages.map((m) => {
         const createdMs = parseInt(m.createdTime, 10);
         const time = Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : 'unknown';
+        const sender = m.senderName ?? m.from;
         const label = CONTENT_TYPE_LABELS[m.contentType] ?? `type:${m.contentType}`;
         if (m.contentType === 0) {
-          return `[${time}] ${m.from}: ${m.text ?? ''}`;
+          return `[${time}] ${sender}: ${m.text ?? ''}`;
         }
         const extra = m.previewUrl ? ` (preview: ${m.previewUrl})` : '';
-        return `[${time}] ${m.from}: [${label}]${extra}`;
+        return `[${time}] ${sender}: [${label}]${extra}`;
       });
       return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
     } catch (err) {
@@ -112,7 +121,9 @@ server.registerTool(
   'get_image',
   {
     description:
-      'Fetch an image from LINE and return it as base64. Pass a URL from list_chats (pictureUrl) or get_messages (previewUrl or downloadUrl).',
+      'Fetch an image from LINE and return it as inline base64 for display. ' +
+      'Pass a pictureUrl from list_chats, or a previewUrl/downloadUrl from get_messages. ' +
+      'Prefer previewUrl for faster loads; use downloadUrl for full-resolution.',
     inputSchema: {
       url: z.string().url().describe('Image URL to fetch'),
     },
