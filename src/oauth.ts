@@ -5,7 +5,76 @@ import * as QRCode from 'qrcode';
 import type { Express, Request, Response } from 'express';
 import { LineClient, AuthData } from './line-client';
 
-const TOKEN_STATE_FILE = path.join(process.cwd(), '.line-mcp-tokens.json');
+// ─── Signing key ──────────────────────────────────────────────────────────────
+
+function loadOrCreateSecret(): string {
+  const secretFile = path.join(process.cwd(), '.line-mcp-secret');
+  try {
+    return fs.readFileSync(secretFile, 'utf8').trim();
+  } catch {
+    const secret = crypto.randomBytes(32).toString('hex');
+    fs.writeFileSync(secretFile, secret, 'utf8');
+    return secret;
+  }
+}
+
+const SERVER_SECRET = loadOrCreateSecret();
+
+// ─── Token helpers ────────────────────────────────────────────────────────────
+
+function signToken(payload: object): string {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', SERVER_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifyToken<T>(token: string): T | null {
+  const dot = token.lastIndexOf('.');
+  if (dot < 0) return null;
+  const data = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', SERVER_SECRET).update(data).digest('base64url');
+  try {
+    const sigBuf = Buffer.from(sig, 'base64url');
+    const expBuf = Buffer.from(expected, 'base64url');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+    return JSON.parse(Buffer.from(data, 'base64url').toString()) as T;
+  } catch {
+    return null;
+  }
+}
+
+// ─── In-memory LINE credential cache (updated on LINE token refresh) ──────────
+
+// Keyed by mid — updated via onTokenRefreshed callback in LineClient
+export const latestAuthData = new Map<string, AuthData>();
+
+// ─── Test token bypass (e2e tests only) ──────────────────────────────────────
+
+const testOverrides = new Map<string, AuthData>();
+
+export function seedTestToken(token: string, authData: AuthData): void {
+  testOverrides.set(token, authData);
+}
+
+// ─── Public token API ─────────────────────────────────────────────────────────
+
+export function validateBearerToken(token: string): AuthData | null {
+  if (testOverrides.has(token)) return testOverrides.get(token)!;
+  const payload = verifyToken<{ authData: AuthData; expiresAt: number }>(token);
+  if (!payload || payload.expiresAt < Date.now()) return null;
+  return latestAuthData.get(payload.authData.mid) ?? payload.authData;
+}
+
+function issueTokens(authData: AuthData): { access_token: string; refresh_token: string } {
+  // Use the freshest LINE credentials if we have them from a prior refresh
+  const freshAuth = latestAuthData.get(authData.mid) ?? authData;
+  const access_token = signToken({ authData: freshAuth, expiresAt: Date.now() + 86_400_000 });
+  const refresh_token = signToken({ authData: freshAuth });
+  return { access_token, refresh_token };
+}
+
+// ─── Login session types ──────────────────────────────────────────────────────
 
 interface LoginSession {
   lineClient: LineClient;
@@ -29,55 +98,10 @@ interface PendingCode {
   expiresAt: number;
 }
 
-interface ActiveToken {
-  authData: AuthData;
-  mcpRefreshToken: string;
-  expiresAt: number;
-}
-
 const loginSessions = new Map<string, LoginSession>();
 const pendingCodes = new Map<string, PendingCode>();
 
-// Exported so index.ts can validate bearer tokens per-request
-export const activeTokens = new Map<string, ActiveToken>();
-
-// MCP refresh token → authData (authData is the same object reference stored in activeTokens)
-const refreshTokens = new Map<string, AuthData>();
-
-function saveTokenState(): void {
-  try {
-    const state = {
-      activeTokens: Object.fromEntries(activeTokens),
-      refreshTokens: Object.fromEntries(refreshTokens),
-    };
-    fs.writeFileSync(TOKEN_STATE_FILE, JSON.stringify(state), 'utf8');
-  } catch {
-    // Non-fatal — tokens remain in memory for this session
-  }
-}
-
-export function loadTokenState(): void {
-  try {
-    const raw = fs.readFileSync(TOKEN_STATE_FILE, 'utf8');
-    const state = JSON.parse(raw) as {
-      activeTokens: Record<string, ActiveToken>;
-      refreshTokens: Record<string, AuthData>;
-    };
-    const now = Date.now();
-    for (const [token, entry] of Object.entries(state.activeTokens ?? {})) {
-      if (entry.expiresAt > now) activeTokens.set(token, entry);
-    }
-    for (const [token, authData] of Object.entries(state.refreshTokens ?? {})) {
-      // Only restore refresh tokens whose corresponding active token is still valid
-      if ([...activeTokens.values()].some((e) => e.mcpRefreshToken === token)) {
-        refreshTokens.set(token, authData);
-      }
-    }
-    process.stderr.write(`[OAuth] Restored ${activeTokens.size} token(s) from disk\n`);
-  } catch {
-    // File missing or corrupt — start fresh
-  }
-}
+// ─── OAuth helpers ────────────────────────────────────────────────────────────
 
 // Loopback redirect URIs allowed per RFC 8252
 function isLoopbackRedirectUri(uri: string): boolean {
@@ -91,18 +115,6 @@ function isLoopbackRedirectUri(uri: string): boolean {
 
 function s256(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
-}
-
-function issueTokens(authData: AuthData): { access_token: string; refresh_token: string } {
-  const access_token = crypto.randomBytes(32).toString('hex');
-  const refresh_token = crypto.randomBytes(32).toString('hex');
-  const expiresAt = Date.now() + 86_400_000; // 24 h
-
-  activeTokens.set(access_token, { authData, mcpRefreshToken: refresh_token, expiresAt });
-  refreshTokens.set(refresh_token, authData);
-  saveTokenState();
-
-  return { access_token, refresh_token };
 }
 
 async function monitorLogin(sid: string): Promise<void> {
@@ -325,13 +337,12 @@ export function setupOAuthRoutes(app: Express, port: number): void {
         res.status(400).json({ error: 'invalid_request', error_description: 'refresh_token required' });
         return;
       }
-      const authData = refreshTokens.get(refresh_token);
-      if (!authData) {
+      const payload = verifyToken<{ authData: AuthData }>(refresh_token);
+      if (!payload?.authData) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'Refresh token not found or expired' });
         return;
       }
-      refreshTokens.delete(refresh_token);
-      const { access_token, refresh_token: new_refresh } = issueTokens(authData);
+      const { access_token, refresh_token: new_refresh } = issueTokens(payload.authData);
       res.json({ access_token, refresh_token: new_refresh, token_type: 'Bearer', expires_in: 86400 });
 
     } else {

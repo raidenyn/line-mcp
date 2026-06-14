@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import express from 'express';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
-import { setupOAuthRoutes, activeTokens, loadTokenState, makeWwwAuthenticate } from './oauth';
+import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate } from './oauth';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -33,7 +33,7 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const client = new LineClient(authData);
+      const client = makeLineClient(authData);
       const chats = await client.listChats();
       const lines = chats.map((c) => {
         const type = c.type === 'group' ? 'GROUP' : 'USER';
@@ -70,7 +70,7 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const client = new LineClient(authData);
+      const client = makeLineClient(authData);
       const messages = await client.getMessages(chatMid, count);
       if (messages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
@@ -113,7 +113,7 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const client = new LineClient(authData);
+      const client = makeLineClient(authData);
       const { buffer, mimeType } = await client.getImageBuffer(url);
       return {
         content: [
@@ -133,13 +133,19 @@ server.registerTool(
   },
 );
 
+function makeLineClient(authData: AuthData): LineClient {
+  return new LineClient(authData, globalThis.fetch, () => {
+    latestAuthData.set(authData.mid, authData);
+  });
+}
+
 function seedTestToken(): void {
   const testToken = process.env.TEST_TOKEN;
   const authRaw = process.env.LINE_AUTH_DATA;
   if (!testToken || !authRaw) return;
   try {
     const authData: AuthData = JSON.parse(authRaw);
-    activeTokens.set(testToken, { authData, mcpRefreshToken: '', expiresAt: Date.now() + 86_400_000 });
+    oauthSeedTestToken(testToken, authData);
     process.stderr.write('[LINE] Test token seeded from TEST_TOKEN + LINE_AUTH_DATA\n');
   } catch {
     process.stderr.write('[LINE] Warning: failed to seed test token — LINE_AUTH_DATA is not valid JSON\n');
@@ -149,7 +155,6 @@ function seedTestToken(): void {
 async function main() {
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const WWW_AUTH = makeWwwAuthenticate(PORT);
-  loadTokenState();
   seedTestToken();
 
   const app = express();
@@ -161,14 +166,14 @@ async function main() {
   app.post('/mcp', async (req, res) => {
     const authHeader = req.headers.authorization ?? '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const entry = activeTokens.get(token);
+    const authData = validateBearerToken(token);
 
-    if (!entry || entry.expiresAt < Date.now()) {
+    if (!authData) {
       res.status(401).set('WWW-Authenticate', WWW_AUTH).json({ error: 'invalid_token' });
       return;
     }
 
-    await authStore.run(entry.authData, async () => {
+    await authStore.run(authData, async () => {
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on('close', () => { transport.close().catch(() => {}); });
       await server.connect(transport);

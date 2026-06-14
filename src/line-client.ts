@@ -51,7 +51,6 @@ export class LineClient {
   private completedAuth: AuthData | null = null;
   private contactNameCache = new Map<string, string>();
   private pendingLogin: (() => Promise<void>) | null = null;
-  private refreshPromise: Promise<void> | null = null;
   private pendingLoginError: Error | null = null;
   private pendingAuthSessionId: string | null = null;
   private pendingCertificate: string | null = null;
@@ -63,9 +62,13 @@ export class LineClient {
   // Aborts all in-flight fetch calls when a new login() cancels the previous session
   private loginAbortController: AbortController | null = null;
 
+  // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
+  private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
+
   constructor(
     auth?: AuthData | null,
     private readonly fetchFn: typeof globalThis.fetch = globalThis.fetch,
+    private readonly onTokenRefreshed?: () => void,
   ) {
     if (auth) this.auth = auth;
   }
@@ -140,23 +143,34 @@ export class LineClient {
   private async refreshIfExpired(): Promise<void> {
     if (!this.auth) return;
     const exp = this.jwtExp();
-    if (exp > 0 && exp - Date.now() / 1000 < 86400) {
-      if (!this.refreshPromise) {
-        this.refreshPromise = (async () => {
-          if (!this.auth) return;
-          const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
-            method: 'POST',
-            headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
-            body: JSON.stringify({ refreshToken: this.auth.refreshToken }),
-          });
-          if (response.ok) {
-            const data = await response.json() as { accessToken: string; refreshToken?: string };
-            this.auth.accessToken = data.accessToken;
-            if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
-          }
-        })().finally(() => { this.refreshPromise = null; });
+    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return;
+
+    const mid = this.auth.mid;
+    const auth = this.auth;
+
+    if (!LineClient.refreshLocks.has(mid)) {
+      const p = (async () => {
+        const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
+          method: 'POST',
+          headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: auth.refreshToken }),
+        });
+        if (!response.ok) return null;
+        const data = await response.json() as { accessToken: string; refreshToken?: string };
+        auth.accessToken = data.accessToken;
+        if (data.refreshToken) auth.refreshToken = data.refreshToken;
+        this.onTokenRefreshed?.();
+        return data;
+      })().finally(() => { LineClient.refreshLocks.delete(mid); });
+      LineClient.refreshLocks.set(mid, p);
+      await p;
+    } else {
+      // Another concurrent request is refreshing — wait and apply the result
+      const data = await LineClient.refreshLocks.get(mid)!;
+      if (data) {
+        this.auth.accessToken = data.accessToken;
+        if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
       }
-      await this.refreshPromise;
     }
   }
 

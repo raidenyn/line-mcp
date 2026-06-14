@@ -375,7 +375,7 @@ describe('LineClient — JWT expiry', () => {
     const client = new LineClient(auth, mockFetch);
     await client.listChats();
 
-    const refreshCall = mockFetch.mock.calls.find(([url]: [string]) => url.includes('tokenRefresh'));
+    const refreshCall = mockFetch.mock.calls.find(([url]: string[]) => url.includes('tokenRefresh'));
     expect(refreshCall).toBeTruthy();
     expect(auth.accessToken).toBe(newToken);
   });
@@ -390,7 +390,7 @@ describe('LineClient — JWT expiry', () => {
     const client = new LineClient(baseAuth, mockFetch);
     await client.listChats();
 
-    const refreshCall = mockFetch.mock.calls.find(([url]: [string]) => url.includes('tokenRefresh'));
+    const refreshCall = mockFetch.mock.calls.find(([url]: string[]) => url.includes('tokenRefresh'));
     expect(refreshCall).toBeFalsy();
   });
 });
@@ -420,11 +420,59 @@ describe('LineClient — contact batching in fetchContactsV2', () => {
     const client = new LineClient(baseAuth, mockFetch);
     const chats = await client.listChats();
 
-    const contactCalls = mockFetch.mock.calls.filter(([url]: [string]) =>
+    const contactCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
       url.includes('getContactsV2'),
     );
     // 110 contacts → ceil(110/50) = 3 batches
     expect(contactCalls.length).toBe(3);
     expect(chats.filter((c) => c.type === 'user')).toHaveLength(110);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// Concurrent refresh deduplication
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient — concurrent refresh deduplication', () => {
+  function makeSoonAuth(mid: string): AuthData {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600;
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+    return { ...baseAuth, mid, accessToken: soonJwt };
+  }
+
+  function makeRefreshFetch() {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.includes('tokenRefresh'))
+        return Promise.resolve(new Response(JSON.stringify({ accessToken: makeFakeJwt() }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }));
+      if (url.includes('getAllChatMids')) return Promise.resolve(apiOk({ memberChatMids: [], invitedChatMids: [] }));
+      if (url.includes('getAllContactIds')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+  }
+
+  it('two instances with the same mid fire only one tokenRefresh call', async () => {
+    const auth = makeSoonAuth('concurrent-mid-1');
+    const mockFetch = makeRefreshFetch();
+    const client1 = new LineClient(auth, mockFetch);
+    const client2 = new LineClient(auth, mockFetch);
+
+    await Promise.all([client1.listChats(), client2.listChats()]);
+
+    const refreshCalls = mockFetch.mock.calls.filter(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCalls).toHaveLength(1);
+  });
+
+  it('calls onTokenRefreshed exactly once after a successful refresh', async () => {
+    const auth = makeSoonAuth('callback-mid-1');
+    const mockFetch = makeRefreshFetch();
+    const callback = vi.fn();
+    const client = new LineClient(auth, mockFetch, callback);
+
+    await client.listChats();
+
+    expect(callback).toHaveBeenCalledTimes(1);
   });
 });
