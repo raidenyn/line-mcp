@@ -181,10 +181,10 @@
     </div>
     <p>Open <strong>Settings → MCP Servers</strong> and add a new server entry with the URL below.</p>
     <div class="code-block">
-      <code id="lms-cfg">{
-  "name": "line",
-  "transport": "http",
-  "url": "…/mcp"
+      <code id="lms-cfg">"mcpServers": {
+  "line": {
+    "url": "http://localhost:3000/mcp"
+  }
 }</code>
       <button class="copy-btn" data-target="lms-cfg">Copy</button>
     </div>

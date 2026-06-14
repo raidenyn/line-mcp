@@ -190,7 +190,7 @@ async function main() {
     res.status(405).send('Use POST /mcp');
   });
 
-  app.listen(PORT, '127.0.0.1', () => {
+  app.listen(PORT, '0.0.0.0', () => {
     process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}/mcp\n`);
     process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}/mcp\n`);
   });
