@@ -5,6 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "test": "vitest run",
+    "test:unit": "vitest run src",
+    "test:e2e": "vitest run tests",
     "build": "tsc",
     "start": "ts-node src/index.ts"
   },
