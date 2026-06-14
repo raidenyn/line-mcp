@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { AsyncLocalStorage } from 'async_hooks';
 import express from 'express';
+import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate } from './oauth';
@@ -162,6 +163,10 @@ async function main() {
   app.use(express.urlencoded({ extended: false }));
 
   setupOAuthRoutes(app, PORT);
+
+  app.get('/', (_req, res) => {
+    res.sendFile(join(__dirname, 'index.html'));
+  });
 
   app.post('/mcp', async (req, res) => {
     const authHeader = req.headers.authorization ?? '';
