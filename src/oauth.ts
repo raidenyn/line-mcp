@@ -103,11 +103,11 @@ const pendingCodes = new Map<string, PendingCode>();
 
 // ─── OAuth helpers ────────────────────────────────────────────────────────────
 
-// Loopback redirect URIs allowed per RFC 8252
+// Loopback redirect URIs allowed per RFC 8252 §7.3 — any path is valid on loopback
 function isLoopbackRedirectUri(uri: string): boolean {
   try {
     const u = new URL(uri);
-    return (u.hostname === 'localhost' || u.hostname === '127.0.0.1') && u.pathname === '/callback';
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
   } catch {
     return false;
   }
@@ -240,11 +240,28 @@ export function setupOAuthRoutes(app: Express, port: number): void {
       issuer: base,
       authorization_endpoint: `${base}/authorize`,
       token_endpoint: `${base}/token`,
+      registration_endpoint: `${base}/register`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code', 'refresh_token'],
       token_endpoint_auth_methods_supported: ['none'],
       code_challenge_methods_supported: ['S256'],
       client_id_metadata_document_supported: true,
+    });
+  });
+
+  // RFC 7591 Dynamic Client Registration
+  app.post('/register', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const client_id = crypto.randomBytes(16).toString('hex');
+    res.status(201).json({
+      client_id,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      token_endpoint_auth_method: body.token_endpoint_auth_method ?? 'none',
+      ...(body.redirect_uris !== undefined && { redirect_uris: body.redirect_uris }),
+      ...(body.client_name !== undefined && { client_name: body.client_name }),
+      ...(body.grant_types !== undefined && { grant_types: body.grant_types }),
+      ...(body.response_types !== undefined && { response_types: body.response_types }),
+      ...(body.scope !== undefined && { scope: body.scope }),
     });
   });
 
