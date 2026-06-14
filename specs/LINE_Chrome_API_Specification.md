@@ -3,7 +3,7 @@
 > **Source:** This specification is derived from four sources combined:
 > - A live HAR capture (`ophjlpahpchlmihnnnihgmmeilfjmjjc.har`) from the LINE Chrome extension v3.7.2 recorded on 2026-06-11, containing 135 real HTTP entries including a full QR login flow, chat listing, and message retrieval.
 > - `main.js` — the Chrome extension's bundled JavaScript (6.7 MB, 138k lines), analyzed for the request-signing (`x-hmac`) mechanism and SSE authentication.
-> - `ltsmSandbox.js` (`specs/raw/ltsm/ltsmSandbox.js`) — the HMAC signing sandbox source, analyzed to confirm the exact signing algorithm, static tokens, and `storage_key_init` behavior.
+> - `ltsmSandbox.js` — the HMAC signing sandbox source, analyzed to confirm the exact signing algorithm, static tokens, and `storage_key_init` behavior.
 > - `LINE_Login_Protocol_Specification.md` — prior reverse-engineering notes for context on E2EE and Thrift legacy flows.
 >
 > HAR entries and sandbox source override any conflicting information from prior reverse-engineering. All endpoints, headers, and body shapes below are confirmed from live traffic or sandbox source unless explicitly marked [unverified].
@@ -134,7 +134,7 @@ x-hmac: xc7hTRfwaauLuMpoXQRt2DDZE+nu+8e4auOw1F/UQZo=
 
 #### Algorithm (confirmed from `ltsmSandbox.js` source)
 
-The signature is **HMAC-SHA256** (32-byte output, base64-encoded). It is computed by the `ltsmSandbox.js` script running inside a sandboxed iframe, using the Web Crypto API. The algorithm was confirmed by reading the sandbox source (`specs/raw/ltsm/ltsmSandbox.js`):
+The signature is **HMAC-SHA256** (32-byte output, base64-encoded). It is computed by the `ltsmSandbox.js` script running inside a sandboxed iframe, using the Web Crypto API. The algorithm was confirmed by reading the sandbox source :
 
 **Helper:**
 ```javascript
