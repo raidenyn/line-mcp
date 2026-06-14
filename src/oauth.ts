@@ -8,7 +8,7 @@ import { LineClient, AuthData } from './line-client';
 // ─── Signing key ──────────────────────────────────────────────────────────────
 
 function loadOrCreateSecret(): string {
-  const secretFile = path.join(process.cwd(), '.line-mcp-secret');
+  const secretFile = path.join(process.env.DATA_DIR ?? process.cwd(), '.line-mcp-secret');
   try {
     return fs.readFileSync(secretFile, 'utf8').trim();
   } catch {
