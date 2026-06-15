@@ -3,3 +3,8 @@ services:
     build: .
     ports:
       - "3000:3000"
+    volumes:
+      - line-mcp-data:/data
+
+volumes:
+  line-mcp-data:
