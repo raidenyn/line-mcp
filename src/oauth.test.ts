@@ -372,6 +372,15 @@ describe('persistAuthData', () => {
     // persistAuthData should catch the ENOTDIR/EEXIST error and not propagate it
     expect(() => mod.persistAuthData(TEST_AUTH)).not.toThrow();
   });
+
+  it('silently ignores unsafe mid values (path traversal attempt)', () => {
+    const maliciousMid = '../evil';
+    const maliciousAuth = { ...TEST_AUTH, mid: maliciousMid };
+    mod.persistAuthData(maliciousAuth);
+    // No file should be written outside the auth directory
+    expect(fs.existsSync(path.join(tmpdir, 'evil.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpdir, '../evil.json'))).toBe(false);
+  });
 });
 
 describe('loadAuthFromDisk', () => {
@@ -409,6 +418,23 @@ describe('loadAuthFromDisk', () => {
     fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), 'not-valid-json');
     expect(() => mod.loadAuthFromDisk(TEST_AUTH.mid)).not.toThrow();
     expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toBeNull();
+  });
+
+  it('rejects unsafe mid values (path traversal attempt)', () => {
+    expect(mod.loadAuthFromDisk('../evil')).toBeNull();
+    expect(mod.loadAuthFromDisk('evil/path')).toBeNull();
+    expect(mod.loadAuthFromDisk('')).toBeNull();
+  });
+
+  it('returns null when file mid does not match requested mid', () => {
+    // Write a file for TEST_AUTH.mid but manually swap the mid inside
+    const dir = path.join(tmpdir, 'auth');
+    fs.mkdirSync(dir, { recursive: true });
+    const wrongMidAuth = { ...TEST_AUTH, mid: 'uDIFFERENTMID' };
+    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(wrongMidAuth));
+    // Requesting TEST_AUTH.mid but the file contains a different mid — should be rejected
+    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toBeNull();
+    expect(mod.latestAuthData.has(TEST_AUTH.mid)).toBe(false);
   });
 });
 
