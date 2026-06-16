@@ -5,7 +5,7 @@ import express from 'express';
 import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
-import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate } from './oauth';
+import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData } from './oauth';
 import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
@@ -209,6 +209,7 @@ server.registerTool(
 function makeLineClient(authData: AuthData): LineClient {
   return new LineClient(authData, globalThis.fetch, () => {
     latestAuthData.set(authData.mid, authData);
+    persistAuthData(authData);
   });
 }
 
