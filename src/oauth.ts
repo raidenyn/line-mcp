@@ -51,12 +51,18 @@ export const latestAuthData = new Map<string, AuthData>();
 
 // ─── Persistent credential storage ───────────────────────────────────────────
 
+function isSafeMid(mid: string): boolean {
+  return /^[A-Za-z0-9_-]+$/.test(mid);
+}
+
 export function persistAuthData(authData: AuthData): void {
+  if (!isSafeMid(authData.mid)) return;
   try {
-    const dir = path.join(process.env.DATA_DIR ?? process.cwd(), 'auth');
+    const baseDir = process.env.DATA_DIR ?? process.cwd();
+    const dir = path.resolve(baseDir, 'auth');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700); // enforce 0o700 even if dir already existed
-    const filePath = path.join(dir, `${authData.mid}.json`);
+    const filePath = path.resolve(dir, `${authData.mid}.json`);
     fs.writeFileSync(filePath, JSON.stringify(authData, null, 2), { mode: 0o600 });
   } catch (err) {
     process.stderr.write(`[OAuth] Failed to persist auth for ${authData.mid}: ${err}\n`);
@@ -64,8 +70,12 @@ export function persistAuthData(authData: AuthData): void {
 }
 
 export function loadAuthFromDisk(mid: string): AuthData | null {
+  if (!isSafeMid(mid)) return null;
   try {
-    const file = path.join(process.env.DATA_DIR ?? process.cwd(), 'auth', `${mid}.json`);
+    const baseDir = process.env.DATA_DIR ?? process.cwd();
+    const authDir = path.resolve(baseDir, 'auth');
+    const file = path.resolve(authDir, `${mid}.json`);
+    if (!file.startsWith(authDir + path.sep)) return null;
     const raw = fs.readFileSync(file, 'utf8');
     const authData = JSON.parse(raw) as AuthData;
     latestAuthData.set(mid, authData);
