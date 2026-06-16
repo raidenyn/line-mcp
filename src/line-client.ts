@@ -462,7 +462,7 @@ export class LineClient {
     return batchResults.flat();
   }
 
-  async getMessages(chatMid: string, count = 50): Promise<Message[]> {
+  async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
     await this.ensureAuthenticated();
 
     const raw = await this.request<Array<{
@@ -477,11 +477,13 @@ export class LineClient {
       contentMetadata?: Record<string, string>;
     }>>('/api/talk/thrift/Talk/TalkService/getRecentMessagesV2', [chatMid, count]);
 
-    const unknownMids = [...new Set((raw ?? []).map((m) => m.from))]
-      .filter((mid) => !this.contactNameCache.has(mid));
-    if (unknownMids.length > 0) {
-      const resolved = await this.fetchContactsV2(unknownMids);
-      for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
+    if (resolveNames) {
+      const unknownMids = [...new Set((raw ?? []).map((m) => m.from))]
+        .filter((mid) => !this.contactNameCache.has(mid));
+      if (unknownMids.length > 0) {
+        const resolved = await this.fetchContactsV2(unknownMids);
+        for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
+      }
     }
 
     return (raw ?? []).map((m) => ({

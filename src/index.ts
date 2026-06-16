@@ -6,6 +6,7 @@ import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate } from './oauth';
+import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -128,6 +129,77 @@ server.registerTool(
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to fetch image: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+
+server.registerTool(
+  'get_transactions',
+  {
+    description:
+      'Fetch messages from a LINE chat and parse them into structured transactions using caller-supplied regex templates. ' +
+      'Non-matching messages (promotions, alerts) are silently dropped. ' +
+      'Results are sorted oldest→newest. ' +
+      'Call get_messages first to inspect a few examples and derive the templates.',
+    inputSchema: {
+      chatMid: z.string().describe('Chat MID from list_chats'),
+      templates: z.array(TransactionTemplateSchema).min(1).describe('Ordered list of patterns to try per message; first match wins'),
+      limit: z.number().int().min(1).max(200).default(100).describe('Max messages to fetch from LINE'),
+      since: z.string().optional().describe('ISO date — exclude transactions before this date'),
+      until: z.string().optional().describe('ISO date — exclude transactions after this date'),
+    },
+  },
+  async ({ chatMid, templates, limit, since, until }) => {
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
+    try {
+      const client = makeLineClient(authData);
+      const messages = await client.getMessages(chatMid, limit, false);
+
+      let transactions = messages
+        .map((msg) => parseTransaction(msg, templates))
+        .filter((tx) => tx !== null);
+
+      if (since) transactions = transactions.filter((tx) => tx.date >= since);
+      if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
+      transactions.sort((a, b) => a.date.localeCompare(b.date));
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to get transactions: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
+  'summarize_transactions',
+  {
+    description:
+      'Aggregate a list of transactions (from get_transactions) into totals and per-group breakdowns. ' +
+      'Pure arithmetic — no LINE API calls. ' +
+      'When transactions span multiple currencies the totals are labelled "mixed"; filter to one currency before calling if you need meaningful totals.',
+    inputSchema: {
+      transactions: z.array(TransactionSchema).describe('Transaction list from get_transactions'),
+      group_by: z.enum(['month', 'merchant']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name'),
+      since: z.string().optional().describe('ISO date — exclude transactions before this date'),
+      until: z.string().optional().describe('ISO date — exclude transactions after this date'),
+    },
+  },
+  async ({ transactions, group_by, since, until }) => {
+    try {
+      const result = summarize(transactions, group_by, since, until);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to summarize: ${(err as Error).message}` }],
         isError: true,
       };
     }

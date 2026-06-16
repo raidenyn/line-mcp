@@ -9,6 +9,31 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | `list_chats` | List recent LINE chats |
 | `get_messages` | Fetch messages from a chat |
 | `get_image` | Download and return an image from a message |
+| `get_transactions` | Parse bank notification messages into structured transactions using caller-supplied regex templates |
+| `summarize_transactions` | Aggregate transactions into totals grouped by month or merchant |
+
+### Transaction tools
+
+Some LINE channels (e.g. UOB Thai, CardX Thailand, SCB Connect) deliver bank notifications as templated messages. The transaction tools let Claude extract structured data from them without any hardcoded parsers.
+
+**How it works:**
+1. Claude calls `get_messages` on a bank chat to inspect a few example messages
+2. Claude derives a regex template with named capture groups (`amount`, `currency`, `merchant`, `date`, `balance`, `account`)
+3. Claude calls `get_transactions` with that template — the server applies it to all messages and returns structured JSON; promotional/non-matching messages are silently dropped
+4. Claude calls `summarize_transactions` to get totals grouped by month or merchant
+
+**Example template for UOB Thailand:**
+```json
+[
+  {
+    "pattern": "You have spent (?<currency>\\w+) (?<amount>[\\d,]+\\.?\\d*) using UOB card \\(ending (?<account>[^)]+)\\) at (?<merchant>.+?) on (?<date>\\d{2}/\\d{2})\\. Available credit: THB (?<balance>[\\d,]+\\.?\\d*)",
+    "amount_sign": "debit",
+    "date_format": "DD/MM"
+  }
+]
+```
+
+When a bank changes its message format, Claude can derive a new template from a single example — no code changes needed.
 
 ## How it works
 
@@ -49,19 +74,16 @@ claude mcp add --transport http --scope user line http://localhost:3000/mcp
 ## Commands
 
 ```bash
-npm run build      # compile TypeScript → dist/
-npm start          # run with ts-node (development)
-npm test           # run e2e tests (requires .line-auth.json)
-```
-
-To run a single test file:
-```bash
-npx vitest run tests/e2e.test.ts
+npm run build        # compile TypeScript → dist/
+npm start            # run with ts-node (development)
+npm test             # run all tests
+npm run test:unit    # run unit tests only (no LINE session required)
+npm run test:e2e     # run e2e tests (requires .line-auth.json)
 ```
 
 ## E2E tests
 
-Tests require a valid LINE session. Export your auth data to `.line-auth.json` in the project root, then run `npm test`. The test suite launches the server as a child process, seeds a test token to bypass OAuth, and connects over the MCP HTTP transport.
+Tests require a valid LINE session. Export your auth data to `.line-auth.json` in the project root, then run `npm run test:e2e`. The test suite launches the server as a child process, seeds a test token to bypass OAuth, and connects over the MCP HTTP transport.
 
 ## Security notes
 

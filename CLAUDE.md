@@ -10,6 +10,11 @@ npm start            # ts-node src/index.ts  (HTTP MCP server on localhost:3000)
 npm test             # vitest run (e2e tests — requires valid .line-auth.json)
 ```
 
+```bash
+npm run test:unit    # unit tests only (no LINE session required)
+npm run test:e2e     # e2e tests (requires .line-auth.json)
+```
+
 To run a single test file:
 ```bash
 npx vitest run tests/e2e.test.ts
@@ -21,7 +26,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 ### Source files (`src/`)
 
-**`index.ts`** — entry point. Creates an Express app, registers three tools (`list_chats`, `get_messages`, `get_image`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Creates `LineClient` via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
+**`index.ts`** — entry point. Creates an Express app, registers five tools (`list_chats`, `get_messages`, `get_image`, `get_transactions`, `summarize_transactions`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Creates `LineClient` via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
 
 **`oauth.ts`** — OAuth 2.0 authorization server. Provides:
 - `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
@@ -41,6 +46,8 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - **Token refresh**: LINE access tokens are refreshed when less than 24 hours from expiry. Uses a static `refreshLocks = Map<mid, Promise>` so concurrent requests for the same user share one in-flight refresh rather than racing. The `onTokenRefreshed` constructor callback is fired once per refresh so callers can persist the updated credentials.
 - **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
 - **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
+
+**`transaction-parser.ts`** — template-driven transaction parser. Exports `parseTransaction(message, templates)` which applies an ordered list of caller-supplied regex patterns (named capture groups: `amount`, `currency`, `merchant`, `date`, `balance`, `account`) to a single message and returns a `Transaction` or `null`. Also exports `summarize(transactions, groupBy, since, until)` for pure-math aggregation. No LINE API calls; used directly by the `get_transactions` and `summarize_transactions` tool handlers in `index.ts`. Key design: `currency` must always be an explicit named capture group — no fallbacks. The `'s'` (dotAll) flag is applied to all patterns so `.` matches newlines in bilingual messages (e.g. UOB Thai + English in one blob).
 
 **`ltsm.ts`** — thin wrapper around the LINE WASM crypto sandbox. The real HMAC and storage-key logic lives in `src/ltsm/ltsm.wasm` (a WebAssembly binary extracted from the LINE Chrome extension). Running it requires a browser-like environment; `ltsm.ts` creates one with `happy-dom`, loads `src/ltsm/ltsmSandbox.js`, and communicates via `window.postMessage` using a serialized command queue (one command at a time — concurrent sends would collide on the fixed response-handler keys). The storage key is initialized per LINE account (`mid`) and cached module-wide; `ensureStorageKey` skips re-initialization when the same account is already active.
 
