@@ -78,6 +78,7 @@ export function loadAuthFromDisk(mid: string): AuthData | null {
     if (!file.startsWith(authDir + path.sep)) return null;
     const raw = fs.readFileSync(file, 'utf8');
     const authData = JSON.parse(raw) as AuthData;
+    if (!authData.mid || !authData.accessToken) return null;
     latestAuthData.set(mid, authData);
     return authData;
   } catch {
@@ -99,7 +100,8 @@ export function validateBearerToken(token: string): AuthData | null {
   if (testOverrides.has(token)) return testOverrides.get(token)!;
   const payload = verifyToken<{ authData: AuthData; expiresAt: number }>(token);
   if (!payload || payload.expiresAt < Date.now()) return null;
-  return latestAuthData.get(payload.authData.mid) ?? payload.authData;
+  const mid = payload.authData.mid;
+  return latestAuthData.get(mid) ?? loadAuthFromDisk(mid) ?? payload.authData;
 }
 
 export function issueTokens(authData: AuthData): { access_token: string; refresh_token: string } {

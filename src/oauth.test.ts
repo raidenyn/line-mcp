@@ -438,3 +438,32 @@ describe('issueTokens lazy load', () => {
     expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
   });
 });
+
+describe('validateBearerToken lazy load', () => {
+  let tmpdir: string;
+  let mod: typeof import('./oauth');
+
+  beforeEach(async () => {
+    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
+    vi.resetModules();
+    process.env.DATA_DIR = tmpdir;
+    mod = await import('./oauth');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+    delete process.env.DATA_DIR;
+  });
+
+  it('returns fresh credentials from disk when latestAuthData is empty', () => {
+    // Issue a token that embeds stale auth (no disk file yet — latestAuthData is empty)
+    const { access_token } = mod.issueTokens(TEST_AUTH);
+    // Now write FRESH_AUTH to disk (latestAuthData still empty)
+    mod.persistAuthData(FRESH_AUTH);
+    // Validate — should lazy-load FRESH_AUTH from disk
+    const result = mod.validateBearerToken(access_token);
+    expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
+    // Subsequent access hits in-memory cache (disk loaded into latestAuthData)
+    expect(mod.latestAuthData.get(TEST_AUTH.mid)?.accessToken).toBe(FRESH_AUTH.accessToken);
+  });
+});
