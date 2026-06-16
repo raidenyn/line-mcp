@@ -49,6 +49,18 @@ function verifyToken<T>(token: string): T | null {
 // Keyed by mid — updated via onTokenRefreshed callback in LineClient
 export const latestAuthData = new Map<string, AuthData>();
 
+// ─── Persistent credential storage ───────────────────────────────────────────
+
+export function persistAuthData(authData: AuthData): void {
+  try {
+    const dir = path.join(process.env.DATA_DIR ?? process.cwd(), 'auth');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${authData.mid}.json`), JSON.stringify(authData, null, 2));
+  } catch (err) {
+    process.stderr.write(`[OAuth] Failed to persist auth for ${authData.mid}: ${err}\n`);
+  }
+}
+
 // ─── Test token bypass (e2e tests only) ──────────────────────────────────────
 
 const testOverrides = new Map<string, AuthData>();

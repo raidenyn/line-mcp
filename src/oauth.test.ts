@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import type { AuthData } from './line-client';
 import express from 'express';
 import * as http from 'http';
 import * as crypto from 'crypto';
@@ -307,5 +311,59 @@ describe('POST /token', () => {
     });
     expect(status).toBe(400);
     expect((body as Record<string, string>).error).toBe('invalid_grant');
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// persistAuthData
+// ───────────────────────────────────────────────────────────
+
+const TEST_AUTH: AuthData = {
+  accessToken: 'stale-access-token',
+  refreshToken: 'stale-refresh-token',
+  certificate: 'test-cert',
+  mid: 'u1234567890test',
+  wrappedNonce: 'test-nonce',
+  kdfParameter1: 'test-kdf1',
+  kdfParameter2: 'test-kdf2',
+};
+
+describe('persistAuthData', () => {
+  let tmpdir: string;
+  let mod: typeof import('./oauth');
+
+  beforeEach(async () => {
+    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
+    vi.resetModules();
+    process.env.DATA_DIR = tmpdir;
+    mod = await import('./oauth');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+    delete process.env.DATA_DIR;
+  });
+
+  it('writes AuthData to DATA_DIR/auth/{mid}.json', () => {
+    mod.persistAuthData(TEST_AUTH);
+    const filePath = path.join(tmpdir, 'auth', `${TEST_AUTH.mid}.json`);
+    expect(fs.existsSync(filePath)).toBe(true);
+    const written = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    expect(written).toEqual(TEST_AUTH);
+  });
+
+  it('creates the auth/ directory if it does not exist', () => {
+    const dir = path.join(tmpdir, 'auth');
+    expect(fs.existsSync(dir)).toBe(false);
+    mod.persistAuthData(TEST_AUTH);
+    expect(fs.existsSync(dir)).toBe(true);
+  });
+
+  it('does not throw on write failure', () => {
+    // Block the auth/ subdirectory by placing a file where mkdirSync would create a dir
+    const authPath = path.join(tmpdir, 'auth');
+    fs.writeFileSync(authPath, 'blocking file');
+    // persistAuthData should catch the ENOTDIR/EEXIST error and not propagate it
+    expect(() => mod.persistAuthData(TEST_AUTH)).not.toThrow();
   });
 });
