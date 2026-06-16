@@ -102,9 +102,9 @@ export function validateBearerToken(token: string): AuthData | null {
   return latestAuthData.get(payload.authData.mid) ?? payload.authData;
 }
 
-function issueTokens(authData: AuthData): { access_token: string; refresh_token: string } {
-  // Use the freshest LINE credentials if we have them from a prior refresh
-  const freshAuth = latestAuthData.get(authData.mid) ?? authData;
+export function issueTokens(authData: AuthData): { access_token: string; refresh_token: string } {
+  const mid = authData.mid;
+  const freshAuth = latestAuthData.get(mid) ?? loadAuthFromDisk(mid) ?? authData;
   const access_token = signToken({ authData: freshAuth, expiresAt: Date.now() + 86_400_000 });
   const refresh_token = signToken({ authData: freshAuth });
   return { access_token, refresh_token };
