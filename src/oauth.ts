@@ -180,15 +180,7 @@ async function monitorLogin(sid: string): Promise<void> {
     session.code = code;
     session.phase = 'complete';
 
-    // Keep .line-auth.json in sync so e2e tests always have valid tokens
-    try {
-      fs.writeFileSync(
-        path.join(process.cwd(), '.line-auth.json'),
-        JSON.stringify(authData, null, 2),
-      );
-    } catch {
-      // Non-fatal
-    }
+    persistAuthData(authData);
   } catch (err) {
     session.phase = 'failed';
     session.error = String(err);
