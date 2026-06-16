@@ -78,7 +78,7 @@ export function loadAuthFromDisk(mid: string): AuthData | null {
     if (!file.startsWith(authDir + path.sep)) return null;
     const raw = fs.readFileSync(file, 'utf8');
     const authData = JSON.parse(raw) as AuthData;
-    if (!authData.mid || !authData.accessToken) return null;
+    if (!authData.mid || authData.mid !== mid || !authData.accessToken) return null;
     latestAuthData.set(mid, authData);
     return authData;
   } catch {
