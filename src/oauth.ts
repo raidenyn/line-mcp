@@ -61,6 +61,18 @@ export function persistAuthData(authData: AuthData): void {
   }
 }
 
+export function loadAuthFromDisk(mid: string): AuthData | null {
+  try {
+    const file = path.join(process.env.DATA_DIR ?? process.cwd(), 'auth', `${mid}.json`);
+    const raw = fs.readFileSync(file, 'utf8');
+    const authData = JSON.parse(raw) as AuthData;
+    latestAuthData.set(mid, authData);
+    return authData;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Test token bypass (e2e tests only) ──────────────────────────────────────
 
 const testOverrides = new Map<string, AuthData>();

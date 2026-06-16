@@ -328,6 +328,12 @@ const TEST_AUTH: AuthData = {
   kdfParameter2: 'test-kdf2',
 };
 
+const FRESH_AUTH: AuthData = {
+  ...TEST_AUTH,
+  accessToken: 'fresh-access-token',
+  refreshToken: 'fresh-refresh-token',
+};
+
 describe('persistAuthData', () => {
   let tmpdir: string;
   let mod: typeof import('./oauth');
@@ -365,5 +371,43 @@ describe('persistAuthData', () => {
     fs.writeFileSync(authPath, 'blocking file');
     // persistAuthData should catch the ENOTDIR/EEXIST error and not propagate it
     expect(() => mod.persistAuthData(TEST_AUTH)).not.toThrow();
+  });
+});
+
+describe('loadAuthFromDisk', () => {
+  let tmpdir: string;
+  let mod: typeof import('./oauth');
+
+  beforeEach(async () => {
+    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
+    vi.resetModules();
+    process.env.DATA_DIR = tmpdir;
+    mod = await import('./oauth');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+    delete process.env.DATA_DIR;
+  });
+
+  it('reads AuthData from disk and populates latestAuthData', () => {
+    mod.persistAuthData(FRESH_AUTH);
+    mod.latestAuthData.clear();
+    const result = mod.loadAuthFromDisk(FRESH_AUTH.mid);
+    expect(result).toEqual(FRESH_AUTH);
+    expect(mod.latestAuthData.get(FRESH_AUTH.mid)).toEqual(FRESH_AUTH);
+  });
+
+  it('returns null when file does not exist', () => {
+    const result = mod.loadAuthFromDisk('u-nonexistent-mid');
+    expect(result).toBeNull();
+  });
+
+  it('returns null and does not throw on corrupt JSON', () => {
+    const dir = path.join(tmpdir, 'auth');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), 'not-valid-json');
+    expect(() => mod.loadAuthFromDisk(TEST_AUTH.mid)).not.toThrow();
+    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toBeNull();
   });
 });
