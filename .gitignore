@@ -70,6 +70,7 @@ web_modules/
 .line-mcp-tokens.json
 .line-mcp-secret
 line-qr.png
+auth/
 
 # dotenv environment variable files
 .env

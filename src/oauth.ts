@@ -180,6 +180,7 @@ async function monitorLogin(sid: string): Promise<void> {
     session.code = code;
     session.phase = 'complete';
 
+    latestAuthData.set(authData.mid, authData);
     persistAuthData(authData);
   } catch (err) {
     session.phase = 'failed';

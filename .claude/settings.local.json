@@ -1,10 +1,16 @@
 {
-  "enabledMcpjsonServers": ["line"],
   "permissions": {
     "allow": [
       "Bash(rm -rf /workspaces/line-mcp/node_modules)",
       "Bash(npm init *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "mcp__line__get_transactions"
     ]
+  },
+  "enabledMcpjsonServers": [
+    "line"
+  ],
+  "remote": {
+    "defaultEnvironmentId": "env_01DGX3ttPjLBVwxAdwnV85nu"
   }
 }
