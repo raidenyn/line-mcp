@@ -2,8 +2,9 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as QRCode from 'qrcode';
-import type { Express, Request, Response } from 'express';
+import express, { type Express, type Request, type Response } from 'express';
 import { LineClient, AuthData } from './line-client';
+import { parseExportHeader } from './export-parser';
 
 // ─── Signing key ──────────────────────────────────────────────────────────────
 
@@ -48,6 +49,11 @@ function verifyToken<T>(token: string): T | null {
 
 // Keyed by mid — updated via onTokenRefreshed callback in LineClient
 export const latestAuthData = new Map<string, AuthData>();
+
+// ─── Import upload state ──────────────────────────────────────────────────────
+
+export const pendingUploads = new Map<string, { expires: number }>();
+export const pendingFiles   = new Map<string, { content: string; chatName: string; expires: number }>();
 
 // ─── Persistent credential storage ───────────────────────────────────────────
 
@@ -397,6 +403,35 @@ export function setupOAuthRoutes(app: Express, port: number): void {
       res.status(400).json({ error: 'unsupported_grant_type' });
     }
   });
+
+  app.post(
+    '/import-upload',
+    express.raw({ type: '*/*', limit: '10mb' }),
+    (req: Request, res: Response) => {
+      const token = typeof req.query['token'] === 'string' ? req.query['token'] : '';
+      const entry = pendingUploads.get(token);
+      if (!entry || entry.expires < Date.now()) {
+        pendingUploads.delete(token);
+        res.status(401).json({ error: 'invalid_or_expired_token' });
+        return;
+      }
+      pendingUploads.delete(token); // consume — one-time use
+
+      const content = (req.body as Buffer).toString('utf8');
+      let chatName: string;
+      try {
+        chatName = parseExportHeader(content);
+      } catch {
+        res.status(400).json({ error: 'File does not appear to be a LINE chat export.' });
+        return;
+      }
+
+      const fileRefId = crypto.randomUUID();
+      pendingFiles.set(fileRefId, { content, chatName, expires: Date.now() + 3_600_000 });
+
+      res.json({ file_ref_id: fileRefId, chat_name: chatName });
+    },
+  );
 }
 
 export function makeWwwAuthenticate(port: number): string {
