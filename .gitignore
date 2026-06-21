@@ -75,6 +75,9 @@ auth/
 # LINE MCP saved templates
 .line-templates/
 
+# LINE MCP message cache (SQLite)
+.line-cache/
+
 # dotenv environment variable files
 .env
 .env.*
