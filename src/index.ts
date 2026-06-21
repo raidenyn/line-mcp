@@ -218,7 +218,7 @@ server.registerTool(
       'sorted oldest-first so format evolution is visible top-to-bottom.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
-      count: z.number().int().min(1).max(50).default(20).describe('Number of recent text messages to return'),
+      count: z.number().int().min(1).max(50).default(20).describe('Number of recent messages to fetch (text messages returned; images/stickers excluded from output)'),
     },
   },
   async ({ chatMid, count }) => {

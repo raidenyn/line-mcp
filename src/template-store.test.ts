@@ -88,7 +88,7 @@ describe('listTemplates', () => {
 });
 
 describe('filterByTime', () => {
-  // TMPL_A valid until 2025-02-28T23:59:59+07:00 = 2025-02-28T16:59:59.000Z = 1740762199000 ms UTC
+  // TMPL_A valid until 2025-02-28T23:59:59+07:00 = 2025-02-28T16:59:59.000Z = 1740761999000 ms UTC
   // TMPL_B valid from 2025-03-01T00:00:00+07:00  = 2025-02-28T17:00:00.000Z = 1740762000000 ms UTC
   const beforeCutover = new Date('2025-02-15T00:00:00.000Z').getTime();
   const afterCutover = new Date('2025-03-15T00:00:00.000Z').getTime();
