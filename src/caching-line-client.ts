@@ -4,7 +4,7 @@ import type { MessageCache } from './message-cache';
 export class CachingLineClient {
   constructor(private inner: LineClient, private cache: MessageCache) {}
 
-  async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
+  async getMessages(chatMid: string, count = 50): Promise<Message[]> {
     const latestMs = this.cache.latestTimestamp(chatMid);
     const live = await this.inner.getMessagesInRange(chatMid, latestMs ?? 0, true);
     if (live.length > 0) this.cache.upsertMessages(chatMid, live);
@@ -15,7 +15,6 @@ export class CachingLineClient {
   async getMessagesInRange(
     chatMid: string,
     sinceMs: number,
-    resolveNames = true,
     pageSize = 200,
   ): Promise<Message[]> {
     const latestMs = this.cache.latestTimestamp(chatMid);

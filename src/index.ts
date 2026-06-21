@@ -246,8 +246,8 @@ server.registerTool(
       }
       const client = makeLineClient(authData);
       const messages = since
-        ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
-        : await client.getMessages(chatMid, count, false);
+        ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
+        : await client.getMessages(chatMid, count);
       const textMessages = messages
         .filter((m) => m.contentType === 0 && m.text)
         .filter((m) => !until || parseInt(m.createdTime, 10) <= new Date(until).getTime())
@@ -307,8 +307,8 @@ server.registerTool(
       }
       const client = makeLineClient(authData);
       const messages = since
-        ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
-        : await client.getMessages(chatMid, 200, false);
+        ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
+        : await client.getMessages(chatMid, 200);
 
       const warnings: string[] = [];
       let savedTemplates: NamedTemplate[] | null = null;
