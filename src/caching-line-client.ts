@@ -6,7 +6,7 @@ export class CachingLineClient {
 
   async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
     const latestMs = this.cache.latestTimestamp(chatMid);
-    const live = await this.inner.getMessagesInRange(chatMid, latestMs ?? 0, resolveNames);
+    const live = await this.inner.getMessagesInRange(chatMid, latestMs ?? 0, true);
     if (live.length > 0) this.cache.upsertMessages(chatMid, live);
     const all = this.cache.getMessages(chatMid);
     return all.slice(-count);
@@ -19,7 +19,7 @@ export class CachingLineClient {
     pageSize = 200,
   ): Promise<Message[]> {
     const latestMs = this.cache.latestTimestamp(chatMid);
-    const live = await this.inner.getMessagesInRange(chatMid, latestMs ?? 0, resolveNames, pageSize);
+    const live = await this.inner.getMessagesInRange(chatMid, latestMs ?? 0, true, pageSize);
     if (live.length > 0) this.cache.upsertMessages(chatMid, live);
     return this.cache.getMessages(chatMid, sinceMs);
   }

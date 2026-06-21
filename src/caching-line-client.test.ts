@@ -68,6 +68,15 @@ describe('CachingLineClient.getMessages', () => {
     const result = await client.getMessages('chat1', 2);
     expect(result.map(m => m.id)).toEqual(['2', '3']);
   });
+
+  it('always resolves names when writing to cache regardless of resolveNames flag', async () => {
+    const cache = new MessageCache(':memory:');
+    const inner = makeMockInner([msg('1', '1000')]);
+    const client = new CachingLineClient(inner as any, cache);
+
+    await client.getMessages('chat1', 10, false);
+    expect(inner.getMessagesInRange).toHaveBeenCalledWith('chat1', 0, true);
+  });
 });
 
 describe('CachingLineClient.getMessagesInRange', () => {
@@ -99,6 +108,15 @@ describe('CachingLineClient.getMessagesInRange', () => {
 
     const result = await client.getMessagesInRange('chat1', 1500);
     expect(result.map(m => m.id)).toEqual(['2']);
+  });
+
+  it('always resolves names when writing to cache regardless of resolveNames flag', async () => {
+    const cache = new MessageCache(':memory:');
+    const inner = makeMockInner([msg('1', '1000')]);
+    const client = new CachingLineClient(inner as any, cache);
+
+    await client.getMessagesInRange('chat1', 0, false);
+    expect(inner.getMessagesInRange).toHaveBeenCalledWith('chat1', 0, true, 200);
   });
 });
 
