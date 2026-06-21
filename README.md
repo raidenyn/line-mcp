@@ -9,9 +9,9 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | `list_chats` | List recent LINE chats |
 | `get_messages` | Fetch messages from a chat |
 | `get_image` | Download and return an image from a message |
-| `sample_messages` | Fetch raw text messages with timestamps — use before writing regex templates |
+| `sample_messages` | Fetch raw text messages with timestamps; accepts optional `since`/`until` for historical ranges — use before writing regex templates |
 | `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `.line-templates/`) |
-| `get_transactions` | Parse bank notifications into structured transactions; auto-loads saved templates |
+| `get_transactions` | Parse bank notifications into structured transactions; paginates the full history when `since` is given; auto-loads saved templates |
 | `summarize_transactions` | Aggregate transactions into totals grouped by month or merchant |
 
 ### Transaction tools
@@ -21,7 +21,7 @@ Some LINE channels (e.g. UOB Thai, CardX Thailand, SCB Connect) deliver bank not
 Templates are saved per-chat on the server and loaded automatically — no need to re-derive patterns each session.
 
 **Workflow (first time for a new bank chat):**
-1. Call `sample_messages` to inspect raw message text and identify anchor strings and field positions
+1. Call `sample_messages` to inspect raw message text — pass `since` to reach older messages if the bank changed its format months ago
 2. Call `manage_templates` (`action: upsert`) to save a named regex template with capture groups
 3. Call `get_transactions` with no `templates` argument — saved templates are loaded automatically
 4. Call `summarize_transactions` to get totals grouped by month or merchant
@@ -51,6 +51,8 @@ Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that 
 ```
 
 > **Tip:** Use `\\s+` instead of a literal space throughout patterns. LINE bank messages frequently contain non-breaking spaces (U+00A0) that look identical but break literal-space matches.
+
+> **Tip:** Pass `since` to `get_transactions` (e.g. `since: "2026-05-01"`) to fetch the complete history for a month. Without `since`, only the latest 200 messages are checked.
 
 When a bank changes its message format, save a new template with an appropriate `valid_from` date — no code changes needed.
 

@@ -28,9 +28,9 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 **`index.ts`** — entry point. Creates an Express app, registers seven tools (`list_chats`, `get_messages`, `get_image`, `sample_messages`, `manage_templates`, `get_transactions`, `summarize_transactions`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Creates `LineClient` via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
 
-- `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first) so Claude can identify anchor strings before writing regex templates.
+- `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first). Accepts optional `since`/`until` ISO date strings; when `since` is provided, calls `getMessagesInRange` to paginate the full history back to that date.
 - `manage_templates` — CRUD for named regex templates; delegates to `template-store.ts`. Actions: `upsert`, `delete`, `list`.
-- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `.line-templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. Returns a zero-match hint when saved templates exist but nothing matched.
+- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `.line-templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. When `since` is provided, calls `getMessagesInRange()` to paginate backwards through LINE history until that date; without `since`, fetches the latest 200 messages and appends a note recommending `since` for full-range accuracy. Returns a zero-match hint when saved templates exist but nothing matched.
 
 **`oauth.ts`** — OAuth 2.0 authorization server. Provides:
 - `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
