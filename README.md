@@ -68,6 +68,8 @@ The server runs as an HTTP server using the [Streamable HTTP MCP transport](http
 
 **Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `.line-mcp-secret`. LINE access tokens are refreshed transparently when they near expiry.
 
+**Message cache:** Every message fetched from LINE is automatically stored in a local SQLite database (`.line-cache/messages.db`). On subsequent calls, the server reads from the cache first and only fetches messages newer than the latest cached entry from LINE. This means history older than LINE's ~2-week API window remains accessible indefinitely — `since` dates from months ago work without any special configuration.
+
 ## Usage
 
 ### Docker (recommended)
