@@ -430,6 +430,144 @@ describe('LineClient — contact batching in fetchContactsV2', () => {
 });
 
 // ───────────────────────────────────────────────────────────
+// getMessagesInRange
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.getMessagesInRange', () => {
+  function rawMsg(id: string, createdTime: string, from = 'u1') {
+    return { id, from, to: 'g1', toType: 2, createdTime, contentType: 0, text: 'txt', hasContent: false };
+  }
+
+  it('returns empty array when no messages exist', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false);
+    expect(result).toHaveLength(0);
+  });
+
+  it('returns messages within range from a single page', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1700000002000'),
+          rawMsg('m2', '1700000003000'),
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000001000, false);
+    expect(result).toHaveLength(2);
+    expect(result.map(m => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('filters out messages older than sinceMs', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000'), // before sinceMs
+          rawMsg('m2', '1700000002000'), // after sinceMs
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('m2');
+  });
+
+  it('paginates backwards and stops when oldest message is before sinceMs', async () => {
+    // pageSize=2: first page is full → triggers pagination
+    // second page contains one message before sinceMs → stops
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m3', '1700000003000'),
+          rawMsg('m4', '1700000004000'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000'), // before sinceMs
+          rawMsg('m2', '1700000002000'), // after sinceMs
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // m1 filtered out; m2, m3, m4 kept
+    expect(result).toHaveLength(3);
+    expect(result.map(m => m.id).sort()).toEqual(['m2', 'm3', 'm4']);
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+  });
+
+  it('stops pagination when previous page is empty (end of history)', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1700000001000'),
+          rawMsg('m2', '1700000002000'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    expect(result).toHaveLength(2);
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+  });
+
+  it('resolves contact names once across all pages', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m3', '1700000003000', 'u1'),
+          rawMsg('m4', '1700000004000', 'u2'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000', 'u3'), // before sinceMs — filtered out
+          rawMsg('m2', '1700000002000', 'u4'),
+        ]));
+      }
+      if (url.includes('getContactsV2')) {
+        return Promise.resolve(apiOk({
+          contacts: {
+            u1: { contact: { mid: 'u1', displayName: 'Alice' } },
+            u2: { contact: { mid: 'u2', displayName: 'Bob' } },
+            u4: { contact: { mid: 'u4', displayName: 'Dave' } },
+          },
+        }));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, true, 2);
+    const contactCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getContactsV2'),
+    );
+    expect(contactCalls).toHaveLength(1); // one batch for all in-range messages
+    expect(result.find(m => m.id === 'm4')?.senderName).toBe('Bob');
+    expect(result.find(m => m.id === 'm2')?.senderName).toBe('Dave');
+  });
+});
+
+// ───────────────────────────────────────────────────────────
 // Concurrent refresh deduplication
 // ───────────────────────────────────────────────────────────
 

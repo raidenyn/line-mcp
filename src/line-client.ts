@@ -46,6 +46,18 @@ export interface Message {
   downloadUrl?: string;
 }
 
+interface RawMessage {
+  id: string;
+  from: string;
+  to: string;
+  toType: number;
+  createdTime: string;
+  contentType: number;
+  text?: string;
+  hasContent: boolean;
+  contentMetadata?: Record<string, string>;
+}
+
 export class LineClient {
   private auth: AuthData | null = null;
   private completedAuth: AuthData | null = null;
@@ -462,30 +474,33 @@ export class LineClient {
     return batchResults.flat();
   }
 
-  async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
-    await this.ensureAuthenticated();
+  private async fetchRawPage(chatMid: string, count: number): Promise<RawMessage[]> {
+    return this.request<RawMessage[]>(
+      '/api/talk/thrift/Talk/TalkService/getRecentMessagesV2',
+      [chatMid, count],
+    );
+  }
 
-    const raw = await this.request<Array<{
-      id: string;
-      from: string;
-      to: string;
-      toType: number;
-      createdTime: string;
-      contentType: number;
-      text?: string;
-      hasContent: boolean;
-      contentMetadata?: Record<string, string>;
-    }>>('/api/talk/thrift/Talk/TalkService/getRecentMessagesV2', [chatMid, count]);
+  private async fetchPreviousRawPage(
+    chatMid: string,
+    endMessageId: { messageId: string; deliveredTime: string },
+    count: number,
+  ): Promise<RawMessage[]> {
+    return this.request<RawMessage[]>(
+      '/api/talk/thrift/Talk/TalkService/getPreviousMessagesV2WithRequest',
+      [{ messageBoxId: chatMid, endMessageId, messagesCount: count }, 1],
+    );
+  }
 
-    if (resolveNames) {
-      const unknownMids = [...new Set((raw ?? []).map((m) => m.from))]
-        .filter((mid) => !this.contactNameCache.has(mid));
-      if (unknownMids.length > 0) {
-        const resolved = await this.fetchContactsV2(unknownMids);
-        for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
-      }
+  private async resolveContactNames(mids: string[]): Promise<void> {
+    const unknownMids = [...new Set(mids)].filter(mid => !this.contactNameCache.has(mid));
+    if (unknownMids.length > 0) {
+      const resolved = await this.fetchContactsV2(unknownMids);
+      for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
     }
+  }
 
+  private mapRawMessages(raw: RawMessage[]): Message[] {
     return (raw ?? []).map((m) => ({
       id: m.id,
       from: m.from,
@@ -500,6 +515,55 @@ export class LineClient {
       previewUrl: m.contentType === 1 ? m.contentMetadata?.['PREVIEW_URL'] : undefined,
       downloadUrl: m.contentType === 1 ? m.contentMetadata?.['DOWNLOAD_URL'] : undefined,
     }));
+  }
+
+  async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
+    await this.ensureAuthenticated();
+    const raw = await this.fetchRawPage(chatMid, count);
+    if (resolveNames) {
+      await this.resolveContactNames((raw ?? []).map(m => m.from));
+    }
+    return this.mapRawMessages(raw);
+  }
+
+  async getMessagesInRange(
+    chatMid: string,
+    sinceMs: number,
+    resolveNames = true,
+    pageSize = 200,
+  ): Promise<Message[]> {
+    await this.ensureAuthenticated();
+
+    let allRaw: RawMessage[] = [];
+
+    const firstPage = await this.fetchRawPage(chatMid, pageSize);
+    const page0 = firstPage ?? [];
+    allRaw = [...page0];
+
+    let currentPage = page0;
+    while (currentPage.length >= pageSize) {
+      const oldest = currentPage.reduce((a, b) =>
+        parseInt(a.createdTime, 10) < parseInt(b.createdTime, 10) ? a : b,
+      );
+      if (parseInt(oldest.createdTime, 10) < sinceMs) break;
+
+      const prevPage = await this.fetchPreviousRawPage(
+        chatMid,
+        { messageId: oldest.id, deliveredTime: oldest.createdTime },
+        pageSize,
+      );
+      const page = prevPage ?? [];
+      allRaw = [...allRaw, ...page];
+      currentPage = page;
+    }
+
+    const filtered = allRaw.filter(m => parseInt(m.createdTime, 10) >= sinceMs);
+
+    if (resolveNames) {
+      await this.resolveContactNames(filtered.map(m => m.from));
+    }
+
+    return this.mapRawMessages(filtered);
   }
 
   async getImageBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }> {
