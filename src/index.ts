@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData } from './oauth';
 import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
+import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema, NamedTemplate } from './template-store';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -135,6 +136,76 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'manage_templates',
+  {
+    description:
+      'Create, update, delete, or list saved transaction regex templates for a LINE chat. ' +
+      'Templates are persisted in .line-templates/<chatMid>.json and auto-loaded by get_transactions. ' +
+      'Recommended workflow: call sample_messages first to inspect raw message text, ' +
+      'then upsert templates here, then call get_transactions with no templates argument.',
+    inputSchema: {
+      chatMid: z.string().describe('Chat MID from list_chats'),
+      action: z.enum(['upsert', 'delete', 'list']).describe(
+        '"upsert" — save or replace a template by name. ' +
+        '"delete" — remove a named template. ' +
+        '"list" — return all saved templates for this chat (full objects, in insertion order).'
+      ),
+      template: NamedTemplateSchema.optional().describe(
+        'Required for action: upsert. Pattern rules: ' +
+        'Use named capture groups — (?<currency>...) and (?<amount>...) are REQUIRED; ' +
+        '(?<merchant>...), (?<date>...), (?<balance>...), (?<account>...) are optional. ' +
+        'Pattern is compiled with the "s" flag (dotAll) — . matches newlines, enabling one pattern for bilingual messages. ' +
+        'Backslashes must be doubled in JSON strings: \\\\d, \\\\s, \\\\. — but / does NOT need escaping. ' +
+        'Bank messages often use non-breaking spaces (U+00A0) — use \\\\s+ instead of a literal space at word boundaries. ' +
+        'amount_sign: "debit" stores amount as negative; "credit" as positive. ' +
+        'date_format hint: "DD/MM", "DD/MM/YYYY", or "DD/MM/YYYY HH:mm" — omit if date is already ISO-parseable. ' +
+        'valid_from / valid_until: ISO 8601 with timezone offset, e.g. "2025-03-01T00:00:00+07:00". ' +
+        'Messages outside this window skip this template — use when the bank changed its message format.'
+      ),
+      name: z.string().optional().describe('Template name to remove (required for action: delete)'),
+    },
+  },
+  async ({ chatMid, action, template, name }) => {
+    if (action === 'upsert') {
+      if (!template) {
+        return { content: [{ type: 'text' as const, text: 'template is required for action: upsert' }], isError: true };
+      }
+      try {
+        upsertTemplate(chatMid, template);
+        return { content: [{ type: 'text' as const, text: `Template '${template.name}' saved for chat ${chatMid}.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to save template: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'delete') {
+      if (!name) {
+        return { content: [{ type: 'text' as const, text: 'name is required for action: delete' }], isError: true };
+      }
+      try {
+        const deleted = deleteTemplate(chatMid, name);
+        if (!deleted) {
+          return { content: [{ type: 'text' as const, text: `No template named '${name}' found for this chat.` }], isError: true };
+        }
+        return { content: [{ type: 'text' as const, text: `Template '${name}' deleted from chat ${chatMid}.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to delete template: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    // action === 'list'
+    try {
+      const templates = listTemplates(chatMid);
+      const text = templates.length === 0
+        ? `No templates saved for chat ${chatMid}.`
+        : JSON.stringify(templates, null, 2);
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Failed to list templates: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
 
 server.registerTool(
   'get_transactions',
