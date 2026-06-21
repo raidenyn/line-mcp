@@ -6,6 +6,8 @@ import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData } from './oauth';
+import { CachingLineClient } from './caching-line-client';
+import { MessageCache } from './message-cache';
 import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema, NamedTemplate } from './template-store';
 
@@ -21,6 +23,7 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
 
 const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
 const authStore = new AsyncLocalStorage<AuthData>();
+let sharedCache: MessageCache;
 
 server.registerTool(
   'list_chats',
@@ -398,11 +401,14 @@ server.registerTool(
   },
 );
 
-function makeLineClient(authData: AuthData): LineClient {
-  return new LineClient(authData, globalThis.fetch, () => {
-    latestAuthData.set(authData.mid, authData);
-    persistAuthData(authData);
-  });
+function makeLineClient(authData: AuthData): CachingLineClient {
+  return new CachingLineClient(
+    new LineClient(authData, globalThis.fetch, () => {
+      latestAuthData.set(authData.mid, authData);
+      persistAuthData(authData);
+    }),
+    sharedCache,
+  );
 }
 
 function seedTestToken(): void {
@@ -419,6 +425,7 @@ function seedTestToken(): void {
 }
 
 async function main() {
+  sharedCache = new MessageCache('.line-cache/messages.db');
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const WWW_AUTH = makeWwwAuthenticate(PORT);
   seedTestToken();
