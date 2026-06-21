@@ -72,6 +72,9 @@ web_modules/
 line-qr.png
 auth/
 
+# LINE MCP saved templates
+.line-templates/
+
 # dotenv environment variable files
 .env
 .env.*
