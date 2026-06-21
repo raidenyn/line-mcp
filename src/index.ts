@@ -539,7 +539,10 @@ server.registerTool(
 
       const timestamps = messages.map(m => parseInt(m.createdTime, 10)).filter(Number.isFinite);
       const dateRange = timestamps.length > 0
-        ? { from: new Date(Math.min(...timestamps)).toISOString(), to: new Date(Math.max(...timestamps)).toISOString() }
+        ? {
+            from: new Date(timestamps.reduce((a, b) => b < a ? b : a)).toISOString(),
+            to:   new Date(timestamps.reduce((a, b) => b > a ? b : a)).toISOString(),
+          }
         : null;
 
       return {
