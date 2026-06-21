@@ -52,6 +52,7 @@ interface RawMessage {
   to: string;
   toType: number;
   createdTime: string;
+  deliveredTime?: string;
   contentType: number;
   text?: string;
   hasContent: boolean;
@@ -549,7 +550,7 @@ export class LineClient {
 
       const prevPage = await this.fetchPreviousRawPage(
         chatMid,
-        { messageId: oldest.id, deliveredTime: oldest.createdTime },
+        { messageId: oldest.id, deliveredTime: oldest.deliveredTime ?? oldest.createdTime },
         pageSize,
       );
       const page = prevPage ?? [];

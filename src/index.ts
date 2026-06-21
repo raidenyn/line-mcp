@@ -229,6 +229,18 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
+      if (since) {
+        const sinceMs = new Date(since).getTime();
+        if (!Number.isFinite(sinceMs)) {
+          return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
+        }
+      }
+      if (until) {
+        const untilMs = new Date(until).getTime();
+        if (!Number.isFinite(untilMs)) {
+          return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
+        }
+      }
       const client = makeLineClient(authData);
       const messages = since
         ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
@@ -279,6 +291,12 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
+      if (since) {
+        const sinceMs = new Date(since).getTime();
+        if (!Number.isFinite(sinceMs)) {
+          return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
+        }
+      }
       const client = makeLineClient(authData);
       const messages = since
         ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
@@ -327,18 +345,17 @@ server.registerTool(
       transactions.sort((a, b) => a.date.localeCompare(b.date));
 
       const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
+      const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
 
       if (savedTemplates !== null && transactions.length === 0 && messages.length > 0) {
         return {
           content: [{
             type: 'text' as const,
             text: '0 transactions matched. Check that saved templates cover the message timestamps — ' +
-              'use manage_templates (action: list) to review validity ranges.' + warningBlock,
+              'use manage_templates (action: list) to review validity ranges.' + warningBlock + rangeNote,
           }],
         };
       }
-
-      const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
       return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock + rangeNote }] };
     } catch (err) {
       return {
