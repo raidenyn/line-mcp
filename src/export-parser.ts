@@ -27,7 +27,21 @@ function localToUtcMs(
   const get = (type: string) => parseInt(parts.find(p => p.type === type)!.value, 10);
   const renderedMs = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'), 0);
   // Offset correction: utc = 2*guess - renderedMs  (exact for non-DST-gap instants)
-  return 2 * guess - renderedMs;
+  const corrected = 2 * guess - renderedMs;
+  // Second pass: re-render the corrected estimate to verify it maps back to the desired
+  // local time. If it doesn't (DST-gap edge case), apply one more correction step.
+  const parts2 = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: 'numeric', second: 'numeric',
+    hour12: false,
+  }).formatToParts(new Date(corrected));
+  const get2 = (type: string) => parseInt(parts2.find(p => p.type === type)!.value, 10);
+  const renderedMs2 = Date.UTC(get2('year'), get2('month') - 1, get2('day'), get2('hour') % 24, get2('minute'), 0);
+  // Target local time in pseudo-UTC representation for comparison
+  const targetMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  if (renderedMs2 === targetMs) return corrected; // first pass was exact
+  return 2 * corrected - renderedMs2;
 }
 
 function syntheticId(

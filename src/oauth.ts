@@ -52,8 +52,8 @@ export const latestAuthData = new Map<string, AuthData>();
 
 // ─── Import upload state ──────────────────────────────────────────────────────
 
-export const pendingUploads = new Map<string, { expires: number }>();
-export const pendingFiles   = new Map<string, { content: string; chatName: string; expires: number }>();
+export const pendingUploads = new Map<string, { mid: string; expires: number }>();
+export const pendingFiles   = new Map<string, { content: string; chatName: string; mid: string; expires: number }>();
 
 // ─── Persistent credential storage ───────────────────────────────────────────
 
@@ -415,9 +415,14 @@ export function setupOAuthRoutes(app: Express, port: number): void {
         res.status(401).json({ error: 'invalid_or_expired_token' });
         return;
       }
+      const { mid } = entry;
       pendingUploads.delete(token); // consume — one-time use
 
-      const content = (req.body as Buffer).toString('utf8');
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(400).json({ error: 'Expected raw file body.' });
+        return;
+      }
+      const content = req.body.toString('utf8');
       let chatName: string;
       try {
         chatName = parseExportHeader(content);
@@ -426,8 +431,14 @@ export function setupOAuthRoutes(app: Express, port: number): void {
         return;
       }
 
+      // Prune expired entries to prevent unbounded memory growth
+      const now = Date.now();
+      for (const [k, v] of pendingFiles) {
+        if (v.expires < now) pendingFiles.delete(k);
+      }
+
       const fileRefId = crypto.randomUUID();
-      pendingFiles.set(fileRefId, { content, chatName, expires: Date.now() + 3_600_000 });
+      pendingFiles.set(fileRefId, { content, chatName, mid, expires: Date.now() + 3_600_000 });
 
       res.json({ file_ref_id: fileRefId, chat_name: chatName });
     },

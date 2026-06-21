@@ -417,12 +417,21 @@ server.registerTool(
   },
   async () => {
     const req = requestStore.getStore();
+    const authData = authStore.getStore();
     if (!req) {
       return { content: [{ type: 'text' as const, text: 'Request context unavailable.' }], isError: true };
     }
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
+    // Prune expired upload tokens to prevent unbounded memory growth
+    const nowMs = Date.now();
+    for (const [k, v] of pendingUploads) {
+      if (v.expires < nowMs) pendingUploads.delete(k);
+    }
     const token = crypto.randomUUID();
-    pendingUploads.set(token, { expires: Date.now() + 900_000 }); // 15 min
-    const base = `${req.protocol}://${req.get('host')}`;
+    pendingUploads.set(token, { mid: authData.mid, expires: Date.now() + 900_000 }); // 15 min
+    const base = process.env['PUBLIC_URL']?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host')}`;
     const uploadUrl = `${base}/import-upload?token=${token}`;
     return {
       content: [{
@@ -460,6 +469,9 @@ server.registerTool(
         content: [{ type: 'text' as const, text: 'Import session expired or not found. Call initiate_import to start again.' }],
         isError: true,
       };
+    }
+    if (fileEntry.mid !== authData.mid) {
+      return { content: [{ type: 'text' as const, text: 'File ref does not belong to this user.' }], isError: true };
     }
 
     if (!timezone) {
