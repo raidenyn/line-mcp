@@ -1,15 +1,18 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { AsyncLocalStorage } from 'async_hooks';
+import crypto from 'crypto';
 import express from 'express';
+import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
-import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData } from './oauth';
+import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
 import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema, NamedTemplate } from './template-store';
+import { parseExportFile } from './export-parser';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -23,6 +26,7 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
 
 const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
 const authStore = new AsyncLocalStorage<AuthData>();
+const requestStore = new AsyncLocalStorage<ExpressRequest>();
 let sharedCache: MessageCache;
 
 server.registerTool(
@@ -401,6 +405,164 @@ server.registerTool(
   },
 );
 
+server.registerTool(
+  'initiate_import',
+  {
+    description:
+      'Start a LINE chat export import. Returns a one-time upload URL (valid 15 minutes). ' +
+      'After receiving the URL, upload the export .txt file with: ' +
+      'curl -X POST --data-binary @/path/to/file.txt -H "Content-Type: text/plain" "<upload_url>" ' +
+      'The response includes a file_ref_id to use with complete_import.',
+    inputSchema: {},
+  },
+  async () => {
+    const req = requestStore.getStore();
+    if (!req) {
+      return { content: [{ type: 'text' as const, text: 'Request context unavailable.' }], isError: true };
+    }
+    const token = crypto.randomUUID();
+    pendingUploads.set(token, { expires: Date.now() + 900_000 }); // 15 min
+    const base = `${req.protocol}://${req.get('host')}`;
+    const uploadUrl = `${base}/import-upload?token=${token}`;
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({ upload_url: uploadUrl }),
+      }],
+    };
+  },
+);
+
+server.registerTool(
+  'complete_import',
+  {
+    description:
+      'Complete a LINE chat export import started with initiate_import. ' +
+      'Always ask the user for their timezone (IANA name, e.g. "Asia/Bangkok") before calling if not already known. ' +
+      'Returns status "needs_info" when chat_mid or timezone are required — ask the user and retry. ' +
+      'Returns status "success" with import count and date range when done.',
+    inputSchema: {
+      file_ref_id: z.string().describe('From the curl response after uploading to upload_url'),
+      timezone: z.string().optional().describe('IANA timezone name, e.g. "Asia/Bangkok". Ask the user explicitly.'),
+      chat_mid: z.string().optional().describe('Override auto-detection. Use when complete_import returns candidates.'),
+    },
+  },
+  async ({ file_ref_id, timezone, chat_mid }) => {
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
+
+    const fileEntry = pendingFiles.get(file_ref_id);
+    if (!fileEntry || fileEntry.expires < Date.now()) {
+      pendingFiles.delete(file_ref_id);
+      return {
+        content: [{ type: 'text' as const, text: 'Import session expired or not found. Call initiate_import to start again.' }],
+        isError: true,
+      };
+    }
+
+    if (!timezone) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            status: 'needs_info',
+            missing: ['timezone'],
+            message: 'What timezone are these messages in? e.g. "Asia/Bangkok", "UTC", "Europe/London"',
+          }),
+        }],
+      };
+    }
+
+    // Validate timezone
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+    } catch {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Invalid timezone "${timezone}". Use an IANA timezone name, e.g. "Asia/Bangkok", "UTC", "America/New_York".`,
+        }],
+        isError: true,
+      };
+    }
+
+    let resolvedMid = chat_mid;
+    const { content, chatName } = fileEntry;
+
+    if (!resolvedMid) {
+      try {
+        const client = makeLineClient(authData);
+        const chats = await client.listChats();
+        const lower = chatName.toLowerCase();
+        const matches = chats.filter(c => c.name.toLowerCase() === lower);
+        if (matches.length === 0) {
+          const available = chats.map(c => c.name).join(', ');
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                status: 'needs_info',
+                missing: ['chat_mid'],
+                message: `No chat found matching "${chatName}". Available chats: ${available}. Provide chat_mid explicitly.`,
+              }),
+            }],
+          };
+        }
+        if (matches.length > 1) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: JSON.stringify({
+                status: 'needs_info',
+                missing: ['chat_mid'],
+                candidates: matches.map(c => ({ chat_mid: c.mid, name: c.name })),
+                message: `Multiple chats match "${chatName}". Please provide chat_mid from the candidates list.`,
+              }),
+            }],
+          };
+        }
+        resolvedMid = matches[0].mid;
+      } catch (err) {
+        return {
+          content: [{ type: 'text' as const, text: `Failed to list chats: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
+
+    try {
+      const messages = parseExportFile(content, resolvedMid, timezone);
+      sharedCache.upsertMessages(resolvedMid, messages);
+      pendingFiles.delete(file_ref_id); // clean up after success
+
+      const timestamps = messages.map(m => parseInt(m.createdTime, 10)).filter(Number.isFinite);
+      const dateRange = timestamps.length > 0
+        ? { from: new Date(Math.min(...timestamps)).toISOString(), to: new Date(Math.max(...timestamps)).toISOString() }
+        : null;
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            status: 'success',
+            imported: messages.length,
+            chat_mid: resolvedMid,
+            chat_name: chatName,
+            date_range: dateRange,
+          }),
+        }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Import failed: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
 function makeLineClient(authData: AuthData): CachingLineClient {
   return new CachingLineClient(
     new LineClient(authData, globalThis.fetch, () => {
@@ -450,11 +612,13 @@ async function main() {
       return;
     }
 
-    await authStore.run(authData, async () => {
-      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      res.on('close', () => { transport.close().catch(() => {}); });
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
+    await requestStore.run(req, async () => {
+      await authStore.run(authData, async () => {
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        res.on('close', () => { transport.close().catch(() => {}); });
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+      });
     });
   });
 
