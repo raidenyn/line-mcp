@@ -297,6 +297,11 @@ server.registerTool(
           return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
         }
       }
+      if (until) {
+        if (!Number.isFinite(new Date(until).getTime())) {
+          return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
+        }
+      }
       const client = makeLineClient(authData);
       const messages = since
         ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
