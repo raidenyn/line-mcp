@@ -26,7 +26,11 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 ### Source files (`src/`)
 
-**`index.ts`** — entry point. Creates an Express app, registers five tools (`list_chats`, `get_messages`, `get_image`, `get_transactions`, `summarize_transactions`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Creates `LineClient` via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
+**`index.ts`** — entry point. Creates an Express app, registers seven tools (`list_chats`, `get_messages`, `get_image`, `sample_messages`, `manage_templates`, `get_transactions`, `summarize_transactions`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Creates `LineClient` via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
+
+- `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first) so Claude can identify anchor strings before writing regex templates.
+- `manage_templates` — CRUD for named regex templates; delegates to `template-store.ts`. Actions: `upsert`, `delete`, `list`.
+- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `.line-templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. Returns a zero-match hint when saved templates exist but nothing matched.
 
 **`oauth.ts`** — OAuth 2.0 authorization server. Provides:
 - `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
@@ -46,6 +50,16 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - **Token refresh**: LINE access tokens are refreshed when less than 24 hours from expiry. Uses a static `refreshLocks = Map<mid, Promise>` so concurrent requests for the same user share one in-flight refresh rather than racing. The `onTokenRefreshed` constructor callback is fired once per refresh so callers can persist the updated credentials.
 - **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
 - **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
+
+**`template-store.ts`** — file-based persistence for named transaction templates. Stores one JSON file per chat MID under `.line-templates/<chatMid>.json`. Exports:
+- `loadTemplates(chatMid)` → `{ templates, warning? }` — reads file; returns `[]` on absence or corruption (with warning).
+- `upsertTemplate(chatMid, template)` — inserts or replaces by `name`.
+- `deleteTemplate(chatMid, name)` → `boolean`.
+- `listTemplates(chatMid)` → `NamedTemplate[]`.
+- `filterByTime(templates, timestampMs)` — keeps entries where `timestampMs` falls within `[valid_from, valid_until]`; used per-message in `get_transactions` so time-bounded templates apply correctly across format changes.
+- `NamedTemplateSchema` — extends `TransactionTemplateSchema` with `name` (required), `valid_from`, `valid_until` (ISO 8601 with timezone offset).
+- Path traversal guard: chatMid validated against `/^[a-zA-Z0-9_-]+$/` before any I/O.
+- All functions accept an optional `storeDir` parameter (default: `<cwd>/.line-templates`) for test isolation without mocking.
 
 **`transaction-parser.ts`** — template-driven transaction parser. Exports `parseTransaction(message, templates)` which applies an ordered list of caller-supplied regex patterns (named capture groups: `amount`, `currency`, `merchant`, `date`, `balance`, `account`) to a single message and returns a `Transaction` or `null`. Also exports `summarize(transactions, groupBy, since, until)` for pure-math aggregation. No LINE API calls; used directly by the `get_transactions` and `summarize_transactions` tool handlers in `index.ts`. Key design: `currency` must always be an explicit named capture group — no fallbacks. The `'s'` (dotAll) flag is applied to all patterns so `.` matches newlines in bilingual messages (e.g. UOB Thai + English in one blob).
 
