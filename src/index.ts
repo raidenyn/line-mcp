@@ -208,6 +208,48 @@ server.registerTool(
 );
 
 server.registerTool(
+  'sample_messages',
+  {
+    description:
+      'Fetch raw text messages from a LINE chat for regex template derivation. ' +
+      'Use this BEFORE writing transaction templates — it shows raw message content with UTC timestamps ' +
+      'so you can identify anchor strings, field boundaries, and when the bank changed its message format. ' +
+      'Returns only text messages (images, stickers, and other non-text content are excluded), ' +
+      'sorted oldest-first so format evolution is visible top-to-bottom.',
+    inputSchema: {
+      chatMid: z.string().describe('Chat MID from list_chats'),
+      count: z.number().int().min(1).max(50).default(20).describe('Number of recent text messages to return'),
+    },
+  },
+  async ({ chatMid, count }) => {
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
+    try {
+      const client = makeLineClient(authData);
+      const messages = await client.getMessages(chatMid, count, false);
+      const textMessages = messages
+        .filter((m) => m.contentType === 0 && m.text)
+        .sort((a, b) => parseInt(a.createdTime, 10) - parseInt(b.createdTime, 10));
+      if (textMessages.length === 0) {
+        return { content: [{ type: 'text' as const, text: 'No text messages found.' }] };
+      }
+      const lines = textMessages.map((m) => {
+        const time = new Date(parseInt(m.createdTime, 10)).toISOString();
+        return `[${time}] ${m.text}`;
+      });
+      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+    } catch (err) {
+      return {
+        content: [{ type: 'text' as const, text: `Failed to sample messages: ${(err as Error).message}` }],
+        isError: true,
+      };
+    }
+  },
+);
+
+server.registerTool(
   'get_transactions',
   {
     description:
