@@ -9,31 +9,50 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | `list_chats` | List recent LINE chats |
 | `get_messages` | Fetch messages from a chat |
 | `get_image` | Download and return an image from a message |
-| `get_transactions` | Parse bank notification messages into structured transactions using caller-supplied regex templates |
+| `sample_messages` | Fetch raw text messages with timestamps — use before writing regex templates |
+| `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `.line-templates/`) |
+| `get_transactions` | Parse bank notifications into structured transactions; auto-loads saved templates |
 | `summarize_transactions` | Aggregate transactions into totals grouped by month or merchant |
 
 ### Transaction tools
 
 Some LINE channels (e.g. UOB Thai, CardX Thailand, SCB Connect) deliver bank notifications as templated messages. The transaction tools let Claude extract structured data from them without any hardcoded parsers.
 
-**How it works:**
-1. Claude calls `get_messages` on a bank chat to inspect a few example messages
-2. Claude derives a regex template with named capture groups (`amount`, `currency`, `merchant`, `date`, `balance`, `account`)
-3. Claude calls `get_transactions` with that template — the server applies it to all messages and returns structured JSON; promotional/non-matching messages are silently dropped
-4. Claude calls `summarize_transactions` to get totals grouped by month or merchant
+Templates are saved per-chat on the server and loaded automatically — no need to re-derive patterns each session.
 
-**Example template for UOB Thailand:**
+**Workflow (first time for a new bank chat):**
+1. Call `sample_messages` to inspect raw message text and identify anchor strings and field positions
+2. Call `manage_templates` (`action: upsert`) to save a named regex template with capture groups
+3. Call `get_transactions` with no `templates` argument — saved templates are loaded automatically
+4. Call `summarize_transactions` to get totals grouped by month or merchant
+
+**Workflow (subsequent sessions):**
+- Just call `get_transactions` — templates are already saved.
+
+Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that old messages are handled by old templates and new messages by new ones when a bank changes its format.
+
+**Example — UOB Thai** (bilingual Thai+English messages, non-breaking spaces around "Available credit"):
 ```json
-[
-  {
-    "pattern": "You have spent (?<currency>\\w+) (?<amount>[\\d,]+\\.?\\d*) using UOB card \\(ending (?<account>[^)]+)\\) at (?<merchant>.+?) on (?<date>\\d{2}/\\d{2})\\. Available credit: THB (?<balance>[\\d,]+\\.?\\d*)",
-    "amount_sign": "debit",
-    "date_format": "DD/MM"
-  }
-]
+{
+  "name": "uob-debit",
+  "pattern": "You\\s+have\\s+spent\\s+(?<currency>THB)\\s+(?<amount>[\\d,]+\\.?\\d*)\\s+using\\s+UOB\\s+card\\s+\\(ending\\s+(?<account>[^)]+)\\)\\s+at\\s+(?<merchant>.+?)\\s+on\\s+(?<date>\\d{2}/\\d{2})\\.\\s+Available\\s+credit:\\s+THB\\s+(?<balance>[\\d,]+\\.?\\d*)",
+  "amount_sign": "debit",
+  "date_format": "DD/MM"
+}
 ```
 
-When a bank changes its message format, Claude can derive a new template from a single example — no code changes needed.
+**Example — CardX Thailand** (English-only, date format "9 Jun 26"):
+```json
+{
+  "name": "cardx-debit",
+  "pattern": "CardX\\s+would\\s+like\\s+to\\s+inform\\s+that\\s+you\\s+have\\s+made\\s+transaction\\s+via\\s+card\\s+ending\\s+with\\s+(?<account>\\d+)\\s+at\\s+(?<merchant>.+?)\\s+in\\s+the\\s+amount\\s+of\\s+(?<amount>[\\d,]+\\.?\\d*)\\s+(?<currency>[A-Z]+)\\s+on\\s+(?<date>.+?)\\.\\s+You\\s+have\\s+available\\s+credit\\s+limit\\s+(?<balance>[\\d,]+\\.?\\d*)",
+  "amount_sign": "debit"
+}
+```
+
+> **Tip:** Use `\\s+` instead of a literal space throughout patterns. LINE bank messages frequently contain non-breaking spaces (U+00A0) that look identical but break literal-space matches.
+
+When a bank changes its message format, save a new template with an appropriate `valid_from` date — no code changes needed.
 
 ## How it works
 
