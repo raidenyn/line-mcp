@@ -253,19 +253,23 @@ server.registerTool(
   'get_transactions',
   {
     description:
-      'Fetch messages from a LINE chat and parse them into structured transactions using caller-supplied regex templates. ' +
-      'Non-matching messages (promotions, alerts) are silently dropped. ' +
-      'Results are sorted oldest→newest. ' +
-      'Call get_messages first to inspect a few examples and derive the templates.',
+      'Fetch messages from a LINE chat and parse them into structured transactions using regex templates. ' +
+      'Non-matching messages (promotions, alerts) are silently dropped. Results are sorted oldest→newest. ' +
+      'If templates is omitted, saved templates for this chat are loaded automatically from .line-templates/<chatMid>.json ' +
+      'and filtered per message by valid_from/valid_until, so bank format changes across time are handled transparently. ' +
+      'Use manage_templates to save templates and sample_messages to inspect raw messages before writing patterns.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
-      templates: z.array(TransactionTemplateSchema).min(1).describe('Ordered list of patterns to try per message; first match wins'),
+      templates: z.array(TransactionTemplateSchema).min(1).optional().describe(
+        'Ordered list of patterns to try per message; first match wins. ' +
+        'Omit to auto-load saved templates for this chat.'
+      ),
       limit: z.number().int().min(1).max(200).default(100).describe('Max messages to fetch from LINE'),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
     },
   },
-  async ({ chatMid, templates, limit, since, until }) => {
+  async ({ chatMid, templates: suppliedTemplates, limit, since, until }) => {
     const authData = authStore.getStore();
     if (!authData) {
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
@@ -274,15 +278,61 @@ server.registerTool(
       const client = makeLineClient(authData);
       const messages = await client.getMessages(chatMid, limit, false);
 
+      const warnings: string[] = [];
+      let savedTemplates: NamedTemplate[] | null = null;
+
+      if (!suppliedTemplates) {
+        const loaded = loadTemplates(chatMid);
+        if (loaded.warning) warnings.push(loaded.warning);
+        savedTemplates = loaded.templates;
+
+        if (savedTemplates.length === 0) {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: 'No templates provided and none saved for this chat. ' +
+                'Call sample_messages to inspect messages, then manage_templates (action: upsert) to save patterns.',
+            }],
+            isError: true,
+          };
+        }
+
+        for (const t of savedTemplates) {
+          if (t.valid_from && !Number.isFinite(new Date(t.valid_from).getTime())) {
+            warnings.push(`Template "${t.name}": valid_from "${t.valid_from}" could not be parsed — treating as always-valid.`);
+          }
+          if (t.valid_until && !Number.isFinite(new Date(t.valid_until).getTime())) {
+            warnings.push(`Template "${t.name}": valid_until "${t.valid_until}" could not be parsed — treating as always-valid.`);
+          }
+        }
+      }
+
       let transactions = messages
-        .map((msg) => parseTransaction(msg, templates))
+        .map((msg) => {
+          const templatesForMsg = savedTemplates
+            ? filterByTime(savedTemplates, parseInt(msg.createdTime, 10))
+            : suppliedTemplates!;
+          return parseTransaction(msg, templatesForMsg);
+        })
         .filter((tx) => tx !== null);
 
       if (since) transactions = transactions.filter((tx) => tx.date >= since);
       if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
       transactions.sort((a, b) => a.date.localeCompare(b.date));
 
-      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) }] };
+      const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
+
+      if (savedTemplates !== null && transactions.length === 0 && messages.length > 0) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: '0 transactions matched. Check that saved templates cover the message timestamps — ' +
+              'use manage_templates (action: list) to review validity ranges.' + warningBlock,
+          }],
+        };
+      }
+
+      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock }] };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to get transactions: ${(err as Error).message}` }],
