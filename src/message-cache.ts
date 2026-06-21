@@ -43,7 +43,16 @@ export class MessageCache {
     if (untilMs != null) { conditions.push('created_time <= ?'); params.push(untilMs); }
     const sql = `SELECT raw_json FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_time ASC`;
     const rows = (this.db.prepare(sql).all(...params)) as { raw_json: string }[];
-    return rows.map(r => JSON.parse(r.raw_json) as Message);
+    const messages = rows.map(r => JSON.parse(r.raw_json) as Message);
+    // Deduplicate export-vs-API overlap: same non-empty text within the same minute = same message
+    const seen = new Set<string>();
+    return messages.filter(m => {
+      if (!m.text) return true;
+      const key = `${Math.floor(parseInt(m.createdTime, 10) / 60000)}:${m.text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   latestTimestamp(chatMid: string): number | null {
