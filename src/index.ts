@@ -219,18 +219,23 @@ server.registerTool(
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
       count: z.number().int().min(1).max(50).default(20).describe('Number of recent messages to fetch (text messages returned; images/stickers excluded from output)'),
+      since: z.string().optional().describe('ISO date — fetch messages from this date onwards (enables full history pagination)'),
+      until: z.string().optional().describe('ISO date — exclude messages after this date'),
     },
   },
-  async ({ chatMid, count }) => {
+  async ({ chatMid, count, since, until }) => {
     const authData = authStore.getStore();
     if (!authData) {
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
       const client = makeLineClient(authData);
-      const messages = await client.getMessages(chatMid, count, false);
+      const messages = since
+        ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
+        : await client.getMessages(chatMid, count, false);
       const textMessages = messages
         .filter((m) => m.contentType === 0 && m.text)
+        .filter((m) => !until || parseInt(m.createdTime, 10) <= new Date(until).getTime())
         .sort((a, b) => parseInt(a.createdTime, 10) - parseInt(b.createdTime, 10));
       if (textMessages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No text messages found.' }] };
@@ -264,19 +269,20 @@ server.registerTool(
         'Ordered list of patterns to try per message; first match wins. ' +
         'Omit to auto-load saved templates for this chat.'
       ),
-      limit: z.number().int().min(1).max(200).default(100).describe('Max messages to fetch from LINE'),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
     },
   },
-  async ({ chatMid, templates: suppliedTemplates, limit, since, until }) => {
+  async ({ chatMid, templates: suppliedTemplates, since, until }) => {
     const authData = authStore.getStore();
     if (!authData) {
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
       const client = makeLineClient(authData);
-      const messages = await client.getMessages(chatMid, limit, false);
+      const messages = since
+        ? await client.getMessagesInRange(chatMid, new Date(since).getTime(), false)
+        : await client.getMessages(chatMid, 200, false);
 
       const warnings: string[] = [];
       let savedTemplates: NamedTemplate[] | null = null;
@@ -332,7 +338,8 @@ server.registerTool(
         };
       }
 
-      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock }] };
+      const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
+      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock + rangeNote }] };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to get transactions: ${(err as Error).message}` }],
