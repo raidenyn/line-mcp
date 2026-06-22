@@ -192,8 +192,17 @@ export function summarize(
     byGroup[key].count++;
   }
 
-  const effectiveCurrencies = [...new Set(filtered.map((tx) => tx.currency !== undefined ? tx.currency : tx.original_currency))];
-  const currency = effectiveCurrencies.length === 0 ? 'none' : effectiveCurrencies.length === 1 ? effectiveCurrencies[0] : 'mixed';
+  const currencies = [
+    ...new Set(
+      filtered.map((tx) =>
+        tx.amount !== undefined
+          ? (tx.currency ?? tx.original_currency)
+          : tx.original_currency,
+      ),
+    ),
+  ];
+  const currency =
+    currencies.length === 0 ? 'none' : currencies.length === 1 ? currencies[0] : 'mixed';
 
   return {
     total_debit,
@@ -203,4 +212,22 @@ export function summarize(
     currency,
     transactions_count: filtered.length,
   };
+}
+
+export function applyBalanceDiffs(transactions: Transaction[]): void {
+  const groups = new Map<string, Transaction[]>();
+  for (const tx of transactions) {
+    const key = tx.account ?? '';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(tx);
+  }
+  for (const group of groups.values()) {
+    let prevBalance: number | undefined;
+    for (const tx of group) {
+      if (tx.amount === undefined && tx.balance !== undefined && prevBalance !== undefined) {
+        tx.amount = tx.balance - prevBalance;
+      }
+      if (tx.balance !== undefined) prevBalance = tx.balance;
+    }
+  }
 }

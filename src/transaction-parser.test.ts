@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTransaction, summarize, expandUntilBound, TransactionTemplate } from './transaction-parser';
+import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, Transaction } from './transaction-parser';
 
 const UOB_DEBIT_MSG = {
   id: 'm1',
@@ -224,5 +224,59 @@ describe('summarize', () => {
     ];
     const result = summarize(mixed, 'month');
     expect(result.currency).toBe('mixed');
+  });
+});
+
+describe('applyBalanceDiffs', () => {
+  it('leaves first transaction amount undefined when no prior balance', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[0].amount).toBeUndefined();
+    expect(txs[1].amount).toBe(-200);
+  });
+
+  it('does not overwrite an explicit amount', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'USD', balance: 9800, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[0].amount).toBe(-1750);
+    expect(txs[1].amount).toBe(-200);
+  });
+
+  it('skips diff when current tx has no balance; uses last known balance for later txs', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'THB', rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[1].amount).toBeUndefined();
+    expect(txs[2].amount).toBe(-200);
+  });
+
+  it('groups by account to avoid cross-account balance diffs', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', account: 'acc-A', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', account: 'acc-B', balance: 5000, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -300, original_currency: 'THB', account: 'acc-A', balance: 9700, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[0].amount).toBeUndefined();
+    expect(txs[1].amount).toBeUndefined();
+    expect(txs[2].amount).toBe(-300);
+  });
+
+  it('groups transactions with no account together (empty-string key)', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[1].amount).toBe(-200);
   });
 });
