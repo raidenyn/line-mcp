@@ -10,7 +10,7 @@ import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
-import { parseTransaction, summarize, expandUntilBound, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
+import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema, NamedTemplate } from './template-store';
 import { parseExportFile } from './export-parser';
 
@@ -160,8 +160,10 @@ server.registerTool(
       ),
       template: NamedTemplateSchema.optional().describe(
         'Required for action: upsert. Pattern rules: ' +
-        'Use named capture groups — (?<currency>...) and (?<amount>...) are REQUIRED; ' +
-        '(?<merchant>...), (?<date>...), (?<balance>...), (?<account>...) are optional. ' +
+        'Use named capture groups — (?<original_amount>...) and (?<original_currency>...) are REQUIRED; ' +
+        '(?<amount>...), (?<currency>...), (?<merchant>...), (?<date>...), (?<balance>...), (?<account>...) are optional. ' +
+        '(?<amount>) captures native-currency amount directly; if absent, it is computed from consecutive balance diffs. ' +
+        '(?<currency>) captures the account default currency (e.g. "THB"); (?<original_currency>) captures the transaction currency (e.g. "USD" for foreign spends). ' +
         'Pattern is compiled with the "s" flag (dotAll) — . matches newlines, enabling one pattern for bilingual messages. ' +
         'Backslashes must be doubled in JSON strings: \\\\d, \\\\s, \\\\. — but / does NOT need escaping. ' +
         'Bank messages often use non-breaking spaces (U+00A0) — use \\\\s+ instead of a literal space at word boundaries. ' +
@@ -355,6 +357,7 @@ server.registerTool(
       if (since) transactions = transactions.filter((tx) => tx.date >= since);
       if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
       transactions.sort((a, b) => a.date.localeCompare(b.date));
+      applyBalanceDiffs(transactions);
 
       const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
       const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
