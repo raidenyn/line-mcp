@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -19,13 +19,13 @@ afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const TMPL_A: NamedTemplate = {
   name: 'uob-debit-v1',
-  pattern: 'spent\\s+(?<currency>THB)\\s+(?<amount>[\\d,.]+)',
+  pattern: 'spent\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,.]+)',
   amount_sign: 'debit',
   valid_until: '2025-02-28T23:59:59+07:00',
 };
 const TMPL_B: NamedTemplate = {
   name: 'uob-debit-v2',
-  pattern: 'deducted\\s+(?<currency>THB)\\s+(?<amount>[\\d,.]+)',
+  pattern: 'deducted\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,.]+)',
   amount_sign: 'debit',
   valid_from: '2025-03-01T00:00:00+07:00',
 };
@@ -104,18 +104,18 @@ describe('filterByTime', () => {
   });
 
   it('returns all templates when no validity range set', () => {
-    const noRange: NamedTemplate = { name: 'open', pattern: '(?<currency>THB) (?<amount>[\\d.]+)' };
+    const noRange: NamedTemplate = { name: 'open', pattern: '(?<original_currency>THB) (?<original_amount>[\\d.]+)' };
     expect(filterByTime([noRange], beforeCutover)).toEqual([noRange]);
     expect(filterByTime([noRange], afterCutover)).toEqual([noRange]);
   });
 
   it('treats unparseable valid_from as always-valid', () => {
-    const bad: NamedTemplate = { name: 'bad', pattern: '(?<currency>THB) (?<amount>[\\d.]+)', valid_from: 'not-a-date' };
+    const bad: NamedTemplate = { name: 'bad', pattern: '(?<original_currency>THB) (?<original_amount>[\\d.]+)', valid_from: 'not-a-date' };
     expect(filterByTime([bad], beforeCutover)).toEqual([bad]);
   });
 
   it('treats unparseable valid_until as always-valid', () => {
-    const bad: NamedTemplate = { name: 'bad', pattern: '(?<currency>THB) (?<amount>[\\d.]+)', valid_until: 'not-a-date' };
+    const bad: NamedTemplate = { name: 'bad', pattern: '(?<original_currency>THB) (?<original_amount>[\\d.]+)', valid_until: 'not-a-date' };
     expect(filterByTime([bad], afterCutover)).toEqual([bad]);
   });
 });
@@ -127,5 +127,79 @@ describe('path traversal guard', () => {
 
   it('throws for chatMid with dot', () => {
     expect(() => loadTemplates('mid.123', dir)).toThrow('Invalid chatMid');
+  });
+});
+
+describe('loadTemplates migration', () => {
+  it('migrates old (?<amount>) and (?<currency>) group names to new names on load', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({
+        templates: [
+          {
+            name: 'old-tmpl',
+            pattern: 'spent\\s+(?<currency>THB)\\s+(?<amount>[\\d,.]+)',
+            amount_sign: 'debit',
+          },
+        ],
+      }),
+    );
+
+    const result = loadTemplates('mid123', dir);
+    expect(result.templates[0].pattern).toBe(
+      'spent\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,.]+)',
+    );
+    expect(result.warning).toBeUndefined();
+  });
+
+  it('rewrites the file so subsequent loads return the migrated pattern', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({
+        templates: [{ name: 'old', pattern: 'pay (?<currency>\\w+) (?<amount>[\\d.]+)' }],
+      }),
+    );
+
+    loadTemplates('mid123', dir); // triggers migration + rewrite
+    const reloaded = loadTemplates('mid123', dir);
+    expect(reloaded.templates[0].pattern).toBe('pay (?<original_currency>\\w+) (?<original_amount>[\\d.]+)');
+  });
+
+  it('preserves other named groups during migration', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({
+        templates: [
+          {
+            name: 'complex',
+            pattern: 'spent (?<currency>\\w+) (?<amount>[\\d.]+) at (?<merchant>.+)',
+          },
+        ],
+      }),
+    );
+
+    const result = loadTemplates('mid123', dir);
+    expect(result.templates[0].pattern).toBe(
+      'spent (?<original_currency>\\w+) (?<original_amount>[\\d.]+) at (?<merchant>.+)',
+    );
+  });
+
+  it('does not migrate patterns that already use new group names', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({
+        templates: [
+          {
+            name: 'new-tmpl',
+            pattern: 'spent (?<original_currency>\\w+) (?<original_amount>[\\d.]+)',
+          },
+        ],
+      }),
+    );
+
+    const result = loadTemplates('mid123', dir);
+    expect(result.templates[0].pattern).toBe(
+      'spent (?<original_currency>\\w+) (?<original_amount>[\\d.]+)',
+    );
   });
 });

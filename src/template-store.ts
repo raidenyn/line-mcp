@@ -32,7 +32,20 @@ export function loadTemplates(
   if (!existsSync(path)) return { templates: [] };
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
-    return { templates: raw.templates ?? [] };
+    const rawTemplates: NamedTemplate[] = raw.templates ?? [];
+    const migrated = rawTemplates.map((t) => {
+      const newPattern = t.pattern
+        .replace(/\(\?<amount>/g, '(?<original_amount>')
+        .replace(/\(\?<currency>/g, '(?<original_currency>');
+      return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
+    });
+    if (migrated.some((t, i) => t !== rawTemplates[i])) {
+      writeFileSync(path, JSON.stringify({ templates: migrated }, null, 2));
+      process.stderr.write(
+        `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
+      );
+    }
+    return { templates: migrated };
   } catch {
     return { templates: [], warning: `Template file for ${chatMid} is corrupt or unreadable — returning empty list.` };
   }
