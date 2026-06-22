@@ -291,11 +291,6 @@ async function fetchParsedTransactions(
     return { error: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` };
   }
 
-  const client = makeLineClient(authData);
-  const messages = since
-    ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
-    : await client.getMessages(chatMid, 200);
-
   const warnings: string[] = [];
   const loaded = loadTemplates(chatMid);
   if (loaded.warning) warnings.push(loaded.warning);
@@ -317,6 +312,11 @@ async function fetchParsedTransactions(
       warnings.push(`Template "${t.name}": valid_until "${t.valid_until}" could not be parsed — treating as always-valid.`);
     }
   }
+
+  const client = makeLineClient(authData);
+  const messages = since
+    ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
+    : await client.getMessages(chatMid, 200);
 
   let transactions = messages
     .map((msg) => {
