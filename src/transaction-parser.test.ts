@@ -62,7 +62,7 @@ describe('parseTransaction', () => {
     expect(tx!.original_amount).toBe(-50);
     expect(tx!.original_currency).toBe('USD');
     expect(tx!.currency).toBe('THB');
-    expect(tx!.amount).toBe(1750);
+    expect(tx!.amount).toBe(-1750);
     expect(tx!.balance).toBe(50000);
   });
 

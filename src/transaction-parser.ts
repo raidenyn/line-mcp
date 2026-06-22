@@ -36,6 +36,7 @@ function getRegex(pattern: string): RegExp | null {
       if (NESTED_QUANTIFIER_RE.test(pattern)) {
         regexCache.set(pattern, null);
       } else {
+        // 's' flag: dot matches newlines — needed for bilingual messages (Thai + English in one blob)
         regexCache.set(pattern, new RegExp(pattern, 's'));
       }
     } catch {
@@ -121,7 +122,14 @@ export function parseTransaction(
     };
 
     if (g.currency) tx.currency = g.currency.trim();
-    if (g.amount) tx.amount = parseNumeric(g.amount);
+    if (g.amount) {
+      let amount = parseNumeric(g.amount);
+      if (tmpl.amount_sign && !/^[\s]*[+\-−]/.test(g.amount)) {
+        if (tmpl.amount_sign === 'debit') amount = -Math.abs(amount);
+        else if (tmpl.amount_sign === 'credit') amount = Math.abs(amount);
+      }
+      tx.amount = amount;
+    }
     if (g.merchant) tx.merchant = g.merchant.trim();
     if (g.account) tx.account = g.account.trim();
     if (g.balance) tx.balance = parseNumeric(g.balance);
