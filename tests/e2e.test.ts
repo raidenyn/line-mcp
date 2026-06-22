@@ -159,3 +159,16 @@ it('get_image returns isError for a bad URL', async () => {
   expect(result.isError).toBe(true);
   expect(extractText(result)).toMatch(/Failed to fetch image/);
 });
+
+it('summarize_transactions accepts chatMid directly', async () => {
+  expect(firstChatMid).toBeTruthy();
+  const result = await mcpClient.callTool({
+    name: 'summarize_transactions',
+    arguments: { chatMid: firstChatMid, group_by: 'month' },
+  });
+  // Either a valid summary or "no saved templates" — both prove the new interface is wired
+  const text = extractText(result);
+  const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
+  expect(isValidSummary || isNoTemplatesError).toBe(true);
+});

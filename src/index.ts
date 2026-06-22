@@ -10,8 +10,8 @@ import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
-import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, TransactionSchema } from './transaction-parser';
-import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema, NamedTemplate } from './template-store';
+import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, Transaction } from './transaction-parser';
+import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema } from './template-store';
 import { parseExportFile } from './export-parser';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
@@ -275,6 +275,68 @@ server.registerTool(
   },
 );
 
+async function fetchParsedTransactions(
+  authData: AuthData,
+  chatMid: string,
+  since?: string,
+  until?: string,
+): Promise<
+  | { transactions: Transaction[]; warnings: string[]; rangeNote: string }
+  | { error: string }
+> {
+  if (since && !Number.isFinite(new Date(since).getTime())) {
+    return { error: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` };
+  }
+  if (until && !Number.isFinite(new Date(until).getTime())) {
+    return { error: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` };
+  }
+
+  const client = makeLineClient(authData);
+  const messages = since
+    ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
+    : await client.getMessages(chatMid, 200);
+
+  const warnings: string[] = [];
+  const loaded = loadTemplates(chatMid);
+  if (loaded.warning) warnings.push(loaded.warning);
+  const savedTemplates = loaded.templates;
+
+  if (savedTemplates.length === 0) {
+    return {
+      error:
+        'No templates provided and none saved for this chat. ' +
+        'Call sample_messages to inspect messages, then manage_templates (action: upsert) to save patterns.',
+    };
+  }
+
+  for (const t of savedTemplates) {
+    if (t.valid_from && !Number.isFinite(new Date(t.valid_from).getTime())) {
+      warnings.push(`Template "${t.name}": valid_from "${t.valid_from}" could not be parsed — treating as always-valid.`);
+    }
+    if (t.valid_until && !Number.isFinite(new Date(t.valid_until).getTime())) {
+      warnings.push(`Template "${t.name}": valid_until "${t.valid_until}" could not be parsed — treating as always-valid.`);
+    }
+  }
+
+  let transactions = messages
+    .map((msg) => {
+      const templatesForMsg = filterByTime(savedTemplates, parseInt(msg.createdTime, 10));
+      return parseTransaction(msg, templatesForMsg);
+    })
+    .filter((tx) => tx !== null);
+
+  if (since) transactions = transactions.filter((tx) => tx.date >= since);
+  if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
+  transactions.sort((a, b) => a.date.localeCompare(b.date));
+  applyBalanceDiffs(transactions);
+
+  const rangeNote = since
+    ? ''
+    : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
+
+  return { transactions, warnings, rangeNote };
+}
+
 server.registerTool(
   'get_transactions',
   {
@@ -300,69 +362,38 @@ server.registerTool(
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      if (since) {
-        const sinceMs = new Date(since).getTime();
-        if (!Number.isFinite(sinceMs)) {
+      if (suppliedTemplates) {
+        // Inline-template path — unchanged from before
+        if (since && !Number.isFinite(new Date(since).getTime())) {
           return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
         }
-      }
-      if (until) {
-        if (!Number.isFinite(new Date(until).getTime())) {
+        if (until && !Number.isFinite(new Date(until).getTime())) {
           return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
         }
-      }
-      const client = makeLineClient(authData);
-      const messages = since
-        ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
-        : await client.getMessages(chatMid, 200);
-
-      const warnings: string[] = [];
-      let savedTemplates: NamedTemplate[] | null = null;
-
-      if (!suppliedTemplates) {
-        const loaded = loadTemplates(chatMid);
-        if (loaded.warning) warnings.push(loaded.warning);
-        savedTemplates = loaded.templates;
-
-        if (savedTemplates.length === 0) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: 'No templates provided and none saved for this chat. ' +
-                'Call sample_messages to inspect messages, then manage_templates (action: upsert) to save patterns.',
-            }],
-            isError: true,
-          };
-        }
-
-        for (const t of savedTemplates) {
-          if (t.valid_from && !Number.isFinite(new Date(t.valid_from).getTime())) {
-            warnings.push(`Template "${t.name}": valid_from "${t.valid_from}" could not be parsed — treating as always-valid.`);
-          }
-          if (t.valid_until && !Number.isFinite(new Date(t.valid_until).getTime())) {
-            warnings.push(`Template "${t.name}": valid_until "${t.valid_until}" could not be parsed — treating as always-valid.`);
-          }
-        }
+        const client = makeLineClient(authData);
+        const messages = since
+          ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
+          : await client.getMessages(chatMid, 200);
+        let transactions = messages
+          .map((msg) => parseTransaction(msg, suppliedTemplates))
+          .filter((tx) => tx !== null);
+        if (since) transactions = transactions.filter((tx) => tx.date >= since);
+        if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
+        transactions.sort((a, b) => a.date.localeCompare(b.date));
+        applyBalanceDiffs(transactions);
+        const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
+        return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + rangeNote }] };
       }
 
-      let transactions = messages
-        .map((msg) => {
-          const templatesForMsg = savedTemplates
-            ? filterByTime(savedTemplates, parseInt(msg.createdTime, 10))
-            : suppliedTemplates!;
-          return parseTransaction(msg, templatesForMsg);
-        })
-        .filter((tx) => tx !== null);
-
-      if (since) transactions = transactions.filter((tx) => tx.date >= since);
-      if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
-      transactions.sort((a, b) => a.date.localeCompare(b.date));
-      applyBalanceDiffs(transactions);
-
+      // Saved-templates path — delegate to helper
+      const fetched = await fetchParsedTransactions(authData, chatMid, since, until);
+      if ('error' in fetched) {
+        return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
+      }
+      const { transactions, warnings, rangeNote } = fetched;
       const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
-      const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
 
-      if (savedTemplates !== null && transactions.length === 0 && messages.length > 0) {
+      if (transactions.length === 0) {
         return {
           content: [{
             type: 'text' as const,
@@ -385,20 +416,30 @@ server.registerTool(
   'summarize_transactions',
   {
     description:
-      'Aggregate a list of transactions (from get_transactions) into totals and per-group breakdowns. ' +
-      'Pure arithmetic — no LINE API calls. ' +
-      'When transactions span multiple currencies the totals are labelled "mixed"; filter to one currency before calling if you need meaningful totals.',
+      'Fetch transactions from a LINE chat and aggregate them into totals and per-group breakdowns. ' +
+      'Uses saved templates (set up via manage_templates). ' +
+      'When transactions span multiple currencies the totals are labelled "mixed".',
     inputSchema: {
-      transactions: z.array(TransactionSchema).describe('Transaction list from get_transactions'),
+      chatMid: z.string().describe('Chat MID from list_chats'),
       group_by: z.enum(['month', 'merchant']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name'),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
     },
   },
-  async ({ transactions, group_by, since, until }) => {
+  async ({ chatMid, group_by, since, until }) => {
+    const authData = authStore.getStore();
+    if (!authData) {
+      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+    }
     try {
+      const fetched = await fetchParsedTransactions(authData, chatMid, since, until);
+      if ('error' in fetched) {
+        return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
+      }
+      const { transactions, warnings, rangeNote } = fetched;
       const result = summarize(transactions, group_by, since, until);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) + warningBlock + rangeNote }] };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to summarize: ${(err as Error).message}` }],
