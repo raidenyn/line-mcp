@@ -11,7 +11,7 @@ const UOB_DEBIT_MSG = {
 const UOB_TEMPLATES: TransactionTemplate[] = [
   {
     pattern:
-      'You have spent (?<currency>\\w+) (?<amount>[\\d,]+\\.?\\d*) using UOB card \\(ending (?<account>[^)]+)\\) at (?<merchant>.+?) on (?<date>\\d{2}/\\d{2})\\. Available credit: THB (?<balance>[\\d,]+\\.?\\d*)',
+      'You have spent (?<original_currency>\\w+) (?<original_amount>[\\d,]+\\.?\\d*) using UOB card \\(ending (?<account>[^)]+)\\) at (?<merchant>.+?) on (?<date>\\d{2}/\\d{2})\\. Available credit: THB (?<balance>[\\d,]+\\.?\\d*)',
     amount_sign: 'debit',
     date_format: 'DD/MM',
   },
@@ -43,6 +43,29 @@ describe('parseTransaction', () => {
     expect(tx!.id).toBe('m1');
   });
 
+  it('captures currency and amount from optional groups', () => {
+    const msg = {
+      id: 'fx1',
+      createdTime: '1749999600000',
+      contentType: 0,
+      text: 'FX spend USD 50 (THB 1750) at Starbucks. Balance: THB 50000',
+    };
+    const templates: TransactionTemplate[] = [
+      {
+        pattern:
+          'FX spend (?<original_currency>\\w+) (?<original_amount>[\\d.]+) \\((?<currency>\\w+) (?<amount>[\\d.]+)\\) at (?<merchant>.+?)\\. Balance: \\w+ (?<balance>[\\d.]+)',
+        amount_sign: 'debit',
+      },
+    ];
+    const tx = parseTransaction(msg, templates);
+    expect(tx).not.toBeNull();
+    expect(tx!.original_amount).toBe(-50);
+    expect(tx!.original_currency).toBe('USD');
+    expect(tx!.currency).toBe('THB');
+    expect(tx!.amount).toBe(1750);
+    expect(tx!.balance).toBe(50000);
+  });
+
   it('returns null for a promotional message', () => {
     expect(parseTransaction(PROMO_MSG, UOB_TEMPLATES)).toBeNull();
   });
@@ -51,9 +74,16 @@ describe('parseTransaction', () => {
     expect(parseTransaction(IMAGE_MSG, UOB_TEMPLATES)).toBeNull();
   });
 
-  it('returns null when pattern is missing required currency group', () => {
+  it('returns null when pattern is missing required original_amount group', () => {
     const badTemplates: TransactionTemplate[] = [
-      { pattern: 'spent (?<amount>[\\d.]+)', amount_sign: 'debit' },
+      { pattern: 'spent (?<original_currency>\\w+)', amount_sign: 'debit' },
+    ];
+    expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
+  });
+
+  it('returns null when pattern is missing required original_currency group', () => {
+    const badTemplates: TransactionTemplate[] = [
+      { pattern: 'spent (?<original_amount>[\\d.]+)', amount_sign: 'debit' },
     ];
     expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
   });
@@ -63,28 +93,27 @@ describe('parseTransaction', () => {
     expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
   });
 
-  it('returns null (not throw) for DD/MM format with non-numeric date capture', () => {
+  it('returns result (not throw) for DD/MM format with non-numeric date capture', () => {
     const msg = { ...UOB_DEBIT_MSG, text: 'spent 100 THB on ab/cd' };
     const templates: TransactionTemplate[] = [
-      { pattern: 'spent (?<amount>[\\d]+) (?<currency>\\w+) on (?<date>.+)', date_format: 'DD/MM' },
+      { pattern: 'spent (?<original_amount>[\\d]+) (?<original_currency>\\w+) on (?<date>.+)', date_format: 'DD/MM' },
     ];
     expect(() => parseTransaction(msg, templates)).not.toThrow();
     const tx = parseTransaction(msg, templates);
     expect(tx).not.toBeNull();
-    // fallback to message createdTime
     expect(tx!.date).toBe(new Date(parseInt(UOB_DEBIT_MSG.createdTime, 10)).toISOString());
   });
 
   it('returns null for a pattern with nested quantifiers (ReDoS guard)', () => {
     const dangerous: TransactionTemplate[] = [
-      { pattern: '(\\w+\\s*)+(end)?(?<amount>\\d+) (?<currency>\\w+)', amount_sign: 'debit' },
+      { pattern: '(\\w+\\s*)+(end)?(?<original_amount>\\d+) (?<original_currency>\\w+)', amount_sign: 'debit' },
     ];
     expect(parseTransaction(UOB_DEBIT_MSG, dangerous)).toBeNull();
   });
 
   it('tries subsequent templates when first does not match', () => {
     const templates: TransactionTemplate[] = [
-      { pattern: 'NOMATCH (?<amount>[\\d]+) (?<currency>\\w+)', amount_sign: 'debit' },
+      { pattern: 'NOMATCH (?<original_amount>[\\d]+) (?<original_currency>\\w+)', amount_sign: 'debit' },
       ...UOB_TEMPLATES,
     ];
     const tx = parseTransaction(UOB_DEBIT_MSG, templates);
@@ -167,5 +196,33 @@ describe('summarize', () => {
     const result = summarize(txs, 'month', undefined, '2026-06');
     expect(result.transactions_count).toBe(3);
     expect(Object.keys(result.by_group)).toEqual(['2026-06']);
+  });
+
+  it('uses amount and currency fields when present', () => {
+    const fxTxs = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, currency: 'THB', rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'USD', amount: -3500, currency: 'THB', rawText: '' },
+    ];
+    const result = summarize(fxTxs, 'month');
+    expect(result.total_debit).toBe(5250);
+    expect(result.currency).toBe('THB');
+  });
+
+  it('falls back to original_amount when amount is absent', () => {
+    const domTxs = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', rawText: '' },
+    ];
+    const result = summarize(domTxs, 'month');
+    expect(result.total_debit).toBe(100);
+    expect(result.currency).toBe('THB');
+  });
+
+  it('reports mixed when amount-present and amount-absent transactions have different effective currencies', () => {
+    const mixed = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, currency: 'THB', rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'USD', rawText: '' },
+    ];
+    const result = summarize(mixed, 'month');
+    expect(result.currency).toBe('mixed');
   });
 });

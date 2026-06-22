@@ -1,8 +1,8 @@
 import { z } from 'zod';
 
 export const TransactionTemplateSchema = z.object({
-  pattern: z.string().describe('JS regex with named capture groups: amount, currency (required); merchant, date, balance, account (optional)'),
-  amount_sign: z.enum(['debit', 'credit']).optional().describe('Sign to apply when not captured by the pattern'),
+  pattern: z.string().describe('JS regex with named capture groups: original_amount, original_currency (required); amount, currency, merchant, date, balance, account (optional)'),
+  amount_sign: z.enum(['debit', 'credit']).optional().describe('Sign to apply to original_amount when not already signed in the captured value'),
   date_format: z.string().optional().describe('Format hint for the captured date group, e.g. "DD/MM" or "DD/MM/YYYY HH:mm"'),
 });
 export type TransactionTemplate = z.infer<typeof TransactionTemplateSchema>;
@@ -12,6 +12,8 @@ export const TransactionSchema = z.object({
   date: z.string(),
   original_amount: z.number(),
   original_currency: z.string(),
+  currency: z.string().optional(),
+  amount: z.number().optional(),
   account: z.string().optional(),
   merchant: z.string().optional(),
   balance: z.number().optional(),
@@ -95,7 +97,6 @@ export function parseTransaction(
   if (message.contentType !== 0 || !message.text) return null;
 
   for (const tmpl of templates) {
-    // 's' flag: dot matches newlines — needed for bilingual messages (Thai + English in one blob)
     const regex = getRegex(tmpl.pattern);
     if (!regex) continue;
 
@@ -103,22 +104,24 @@ export function parseTransaction(
     if (!match?.groups) continue;
 
     const g = match.groups;
-    if (!g.amount || !g.currency) continue;
+    if (!g.original_amount || !g.original_currency) continue;
 
-    let amount = parseNumeric(g.amount);
-    if (tmpl.amount_sign && !/^[\s]*[+\-−]/.test(g.amount)) {
-      if (tmpl.amount_sign === 'debit') amount = -Math.abs(amount);
-      else if (tmpl.amount_sign === 'credit') amount = Math.abs(amount);
+    let original_amount = parseNumeric(g.original_amount);
+    if (tmpl.amount_sign && !/^[\s]*[+\-−]/.test(g.original_amount)) {
+      if (tmpl.amount_sign === 'debit') original_amount = -Math.abs(original_amount);
+      else if (tmpl.amount_sign === 'credit') original_amount = Math.abs(original_amount);
     }
 
     const tx: Transaction = {
       id: message.id,
       date: parseDate(g.date, tmpl.date_format, message.createdTime),
-      original_amount: amount,
-      original_currency: g.currency.trim(),
+      original_amount,
+      original_currency: g.original_currency.trim(),
       rawText: message.text,
     };
 
+    if (g.currency) tx.currency = g.currency.trim();
+    if (g.amount) tx.amount = parseNumeric(g.amount);
     if (g.merchant) tx.merchant = g.merchant.trim();
     if (g.account) tx.account = g.account.trim();
     if (g.balance) tx.balance = parseNumeric(g.balance);
@@ -167,20 +170,22 @@ export function summarize(
         ? tx.date.slice(0, 7) // "YYYY-MM"
         : (tx.merchant ?? 'unknown');
 
+    const effectiveAmount = tx.amount !== undefined ? tx.amount : tx.original_amount;
+
     if (!byGroup[key]) byGroup[key] = { debit: 0, credit: 0, count: 0 };
-    if (tx.original_amount < 0) {
-      const abs = Math.abs(tx.original_amount);
+    if (effectiveAmount < 0) {
+      const abs = Math.abs(effectiveAmount);
       byGroup[key].debit += abs;
       total_debit += abs;
     } else {
-      byGroup[key].credit += tx.original_amount;
-      total_credit += tx.original_amount;
+      byGroup[key].credit += effectiveAmount;
+      total_credit += effectiveAmount;
     }
     byGroup[key].count++;
   }
 
-  const currencies = [...new Set(filtered.map((tx) => tx.original_currency))];
-  const currency = currencies.length === 0 ? 'none' : currencies.length === 1 ? currencies[0] : 'mixed';
+  const effectiveCurrencies = [...new Set(filtered.map((tx) => tx.currency !== undefined ? tx.currency : tx.original_currency))];
+  const currency = effectiveCurrencies.length === 0 ? 'none' : effectiveCurrencies.length === 1 ? effectiveCurrencies[0] : 'mixed';
 
   return {
     total_debit,
