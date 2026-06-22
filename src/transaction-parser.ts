@@ -222,10 +222,25 @@ export function applyBalanceDiffs(transactions: Transaction[]): void {
     groups.get(key)!.push(tx);
   }
   for (const group of groups.values()) {
+    // Infer balance currency: the dominant original_currency in the group.
+    // If two currencies tie, we cannot determine balance currency → leave undefined → 'mixed' in summarize.
+    const counts = new Map<string, number>();
+    for (const tx of group) counts.set(tx.original_currency, (counts.get(tx.original_currency) ?? 0) + 1);
+    let balanceCurrency: string | undefined;
+    if (counts.size === 1) {
+      balanceCurrency = counts.keys().next().value as string;
+    } else {
+      const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+      if (sorted[0][1] > sorted[1][1]) balanceCurrency = sorted[0][0];
+    }
+
     let prevBalance: number | undefined;
     for (const tx of group) {
       if (tx.amount === undefined && tx.balance !== undefined && prevBalance !== undefined) {
         tx.amount = tx.balance - prevBalance;
+        if (tx.currency === undefined && balanceCurrency !== undefined) {
+          tx.currency = balanceCurrency;
+        }
       }
       if (tx.balance !== undefined) prevBalance = tx.balance;
     }

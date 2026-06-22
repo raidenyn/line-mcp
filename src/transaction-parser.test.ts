@@ -279,4 +279,45 @@ describe('applyBalanceDiffs', () => {
     applyBalanceDiffs(txs);
     expect(txs[1].amount).toBe(-200);
   });
+
+  it('stamps balance currency on balance-derived amounts (single currency group)', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[0].currency).toBeUndefined(); // first tx: no amount computed, no stamp
+    expect(txs[1].currency).toBe('THB');
+  });
+
+  it('stamps dominant currency for mixed-original-currency group (domestic card with FX spend)', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 8200, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[1].currency).toBe('THB');
+    expect(txs[2].currency).toBe('THB'); // FX spend: amount is balance diff in THB
+  });
+
+  it('does not stamp currency when currencies tie (truly mixed account)', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'USD', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'EUR', balance: 9900, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[1].currency).toBeUndefined();
+  });
+
+  it('does not stamp currency on transactions with an explicit amount', () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, balance: 8250, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 8050, rawText: '' },
+    ];
+    applyBalanceDiffs(txs);
+    expect(txs[1].currency).toBeUndefined(); // explicit amount — not touched by diff pass
+    expect(txs[2].currency).toBe('THB'); // balance-derived — stamped
+  });
 });
