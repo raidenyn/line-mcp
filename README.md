@@ -22,7 +22,7 @@ Templates are saved per-chat on the server and loaded automatically — no need 
 
 **Workflow (first time for a new bank chat):**
 1. Call `sample_messages` to inspect raw message text — pass `since` to reach older messages if the bank changed its format months ago
-2. Call `manage_templates` (`action: upsert`) to save a named regex template with capture groups
+2. Call `manage_templates` (`action: upsert`) to save a named regex template — required capture groups are `(?<original_amount>...)` and `(?<original_currency>...)`; add `(?<balance>...)` to enable automatic native-currency `amount` calculation from balance diffs
 3. Call `get_transactions` with no `templates` argument — saved templates are loaded automatically
 4. Call `summarize_transactions` to get totals grouped by month or merchant
 
@@ -35,7 +35,7 @@ Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that 
 ```json
 {
   "name": "uob-debit",
-  "pattern": "You\\s+have\\s+spent\\s+(?<currency>THB)\\s+(?<amount>[\\d,]+\\.?\\d*)\\s+using\\s+UOB\\s+card\\s+\\(ending\\s+(?<account>[^)]+)\\)\\s+at\\s+(?<merchant>.+?)\\s+on\\s+(?<date>\\d{2}/\\d{2})\\.\\s+Available\\s+credit:\\s+THB\\s+(?<balance>[\\d,]+\\.?\\d*)",
+  "pattern": "You\\s+have\\s+spent\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+using\\s+UOB\\s+card\\s+\\(ending\\s+(?<account>[^)]+)\\)\\s+at\\s+(?<merchant>.+?)\\s+on\\s+(?<date>\\d{2}/\\d{2})\\.\\s+Available\\s+credit:\\s+THB\\s+(?<balance>[\\d,]+\\.?\\d*)",
   "amount_sign": "debit",
   "date_format": "DD/MM"
 }
@@ -45,7 +45,7 @@ Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that 
 ```json
 {
   "name": "cardx-debit",
-  "pattern": "CardX\\s+would\\s+like\\s+to\\s+inform\\s+that\\s+you\\s+have\\s+made\\s+transaction\\s+via\\s+card\\s+ending\\s+with\\s+(?<account>\\d+)\\s+at\\s+(?<merchant>.+?)\\s+in\\s+the\\s+amount\\s+of\\s+(?<amount>[\\d,]+\\.?\\d*)\\s+(?<currency>[A-Z]+)\\s+on\\s+(?<date>.+?)\\.\\s+You\\s+have\\s+available\\s+credit\\s+limit\\s+(?<balance>[\\d,]+\\.?\\d*)",
+  "pattern": "CardX\\s+would\\s+like\\s+to\\s+inform\\s+that\\s+you\\s+have\\s+made\\s+transaction\\s+via\\s+card\\s+ending\\s+with\\s+(?<account>\\d+)\\s+at\\s+(?<merchant>.+?)\\s+in\\s+the\\s+amount\\s+of\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>[A-Z]+)\\s+on\\s+(?<date>.+?)\\.\\s+You\\s+have\\s+available\\s+credit\\s+limit\\s+(?<balance>[\\d,]+\\.?\\d*)",
   "amount_sign": "debit"
 }
 ```
