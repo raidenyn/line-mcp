@@ -10,7 +10,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | `get_messages` | Fetch messages from a chat |
 | `get_image` | Download and return an image from a message |
 | `sample_messages` | Fetch raw text messages with timestamps; accepts optional `since`/`until` for historical ranges — use before writing regex templates |
-| `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `.line-templates/`) |
+| `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `data/templates/`) |
 | `get_transactions` | Parse bank notifications into structured transactions; paginates the full history when `since` is given; auto-loads saved templates |
 | `summarize_transactions` | Aggregate transactions into totals grouped by month or merchant |
 
@@ -66,9 +66,9 @@ The server runs as an HTTP server using the [Streamable HTTP MCP transport](http
 3. Enter the PIN if prompted (skipped on repeat logins using a saved certificate)
 4. Claude Code receives tokens automatically and retries the tool call
 
-**Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `.line-mcp-secret`. LINE access tokens are refreshed transparently when they near expiry.
+**Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `data/secret`. LINE access tokens are refreshed transparently when they near expiry.
 
-**Message cache:** Every message fetched from LINE is automatically stored in a local SQLite database (`.line-cache/messages.db`). On subsequent calls, the server reads from the cache first and only fetches messages newer than the latest cached entry from LINE. This means history older than LINE's ~2-week API window remains accessible indefinitely — `since` dates from months ago work without any special configuration.
+**Message cache:** Every message fetched from LINE is automatically stored in a local SQLite database (`data/cache/messages.db`). On subsequent calls, the server reads from the cache first and only fetches messages newer than the latest cached entry from LINE. This means history older than LINE's ~2-week API window remains accessible indefinitely — `since` dates from months ago work without any special configuration.
 
 ## Usage
 
@@ -110,6 +110,6 @@ Tests require a valid LINE session. Export your auth data to `.line-auth.json` i
 
 ## Security notes
 
-- `.line-mcp-secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates all issued tokens.
+- `data/secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates all issued tokens.
 - `.line-auth.json` — contains live LINE credentials. Keep it out of version control (it is in `.gitignore`).
 - The server binds to `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost.

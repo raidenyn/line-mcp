@@ -30,7 +30,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 - `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first). Accepts optional `since`/`until` ISO date strings; when `since` is provided, calls `getMessagesInRange` to paginate the full history back to that date.
 - `manage_templates` — CRUD for named regex templates; delegates to `template-store.ts`. Actions: `upsert`, `delete`, `list`.
-- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `.line-templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. When `since` is provided, calls `getMessagesInRange()` to paginate backwards through LINE history until that date; without `since`, fetches the latest 200 messages and appends a note recommending `since` for full-range accuracy. After parsing, calls `applyBalanceDiffs()` to populate the `amount` and `currency` fields from consecutive balance diffs for transactions that did not capture them explicitly. Returns a zero-match hint when saved templates exist but nothing matched.
+- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `data/templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. When `since` is provided, calls `getMessagesInRange()` to paginate backwards through LINE history until that date; without `since`, fetches the latest 200 messages and appends a note recommending `since` for full-range accuracy. After parsing, calls `applyBalanceDiffs()` to populate the `amount` and `currency` fields from consecutive balance diffs for transactions that did not capture them explicitly. Returns a zero-match hint when saved templates exist but nothing matched.
 
 **`oauth.ts`** — OAuth 2.0 authorization server. Provides:
 - `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
@@ -39,7 +39,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - `GET /authorize/poll?sid=<id>` — JSON status endpoint polled by the authorize page
 - `POST /token` — PKCE code exchange and refresh-token rotation; issues self-contained signed MCP tokens
 - In-memory stores: `loginSessions`, `pendingCodes` (ephemeral login state only)
-- `SERVER_SECRET` — loaded from `.line-mcp-secret` on startup (created automatically if absent); used to HMAC-sign all tokens
+- `SERVER_SECRET` — loaded from `data/secret` on startup (created automatically if absent); used to HMAC-sign all tokens
 - `validateBearerToken(token)` — verifies HMAC, checks expiry, returns embedded `AuthData`; also checks `latestAuthData` for a fresher LINE credential for the same `mid`
 - `latestAuthData` — `Map<mid, AuthData>` updated via `onTokenRefreshed` callback when LINE tokens refresh mid-request; consulted on MCP token refresh so rotated LINE credentials propagate into new tokens
 - `seedTestToken(token, authData)` — bypass map for e2e tests (not used in production)
@@ -51,7 +51,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
 - **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
 
-**`template-store.ts`** — file-based persistence for named transaction templates. Stores one JSON file per chat MID under `.line-templates/<chatMid>.json`. Exports:
+**`template-store.ts`** — file-based persistence for named transaction templates. Stores one JSON file per chat MID under `data/templates/<chatMid>.json`. Exports:
 - `loadTemplates(chatMid)` → `{ templates, warning? }` — reads file; automatically migrates old `(?<amount>...)` and `(?<currency>...)` capture group names to `(?<original_amount>...)` and `(?<original_currency>...)` and rewrites the file in place on first load; returns `[]` on absence or corruption (with warning).
 - `upsertTemplate(chatMid, template)` — inserts or replaces by `name`.
 - `deleteTemplate(chatMid, name)` → `boolean`.
@@ -59,11 +59,11 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - `filterByTime(templates, timestampMs)` — keeps entries where `timestampMs` falls within `[valid_from, valid_until]`; used per-message in `get_transactions` so time-bounded templates apply correctly across format changes.
 - `NamedTemplateSchema` — extends `TransactionTemplateSchema` with `name` (required), `valid_from`, `valid_until` (ISO 8601 with timezone offset).
 - Path traversal guard: chatMid validated against `/^[a-zA-Z0-9_-]+$/` before any I/O.
-- All functions accept an optional `storeDir` parameter (default: `<cwd>/.line-templates`) for test isolation without mocking.
+- All functions accept an optional `storeDir` parameter (default: `<cwd>/data/templates`) for test isolation without mocking.
 
 **`transaction-parser.ts`** — template-driven transaction parser. Exports `parseTransaction(message, templates)` which applies an ordered list of caller-supplied regex patterns (named capture groups: `original_amount`, `original_currency` (required); `amount`, `currency`, `merchant`, `date`, `balance`, `account` (optional)) to a single message and returns a `Transaction` or `null`. The `amount` group captures the native-currency amount explicitly; if absent, `applyBalanceDiffs()` computes it from consecutive balance diffs after the full list is built. `currency` captures the account default currency (e.g. "THB"); `original_currency` captures the transaction currency (e.g. "USD" for foreign spends). Also exports `summarize(transactions, groupBy, since, until)` for pure-math aggregation — uses `amount`/`currency` when present, falls back to `original_amount`/`original_currency` per transaction. Exports `applyBalanceDiffs(transactions)` which mutates a sorted array in place: groups by `account`, then fills `amount = balance - prevBalance` for transactions missing an explicit `amount`, and stamps `currency` = the dominant `original_currency` in the group (most-common wins; tie → no stamp → `summarize` reports "mixed"). No LINE API calls; used directly by the `get_transactions` and `summarize_transactions` tool handlers in `index.ts`. The `'s'` (dotAll) flag is applied to all patterns so `.` matches newlines in bilingual messages (e.g. UOB Thai + English in one blob).
 
-**`message-cache.ts`** — SQLite-backed message cache. Wraps `better-sqlite3` with a single `messages` table (`chat_mid`, `message_id`, `created_time INTEGER`, `raw_json`). `INSERT OR REPLACE` deduplicates on re-fetch. Index on `(chat_mid, created_time)` for fast range queries. Key methods: `upsertMessages`, `getMessages(sinceMs?, untilMs?)` (oldest-first), `latestTimestamp(chatMid)` (returns highest `created_time` or `null`). Database file lives at `.line-cache/messages.db` (created automatically); `:memory:` accepted for tests.
+**`message-cache.ts`** — SQLite-backed message cache. Wraps `better-sqlite3` with a single `messages` table (`chat_mid`, `message_id`, `created_time INTEGER`, `raw_json`). `INSERT OR REPLACE` deduplicates on re-fetch. Index on `(chat_mid, created_time)` for fast range queries. Key methods: `upsertMessages`, `getMessages(sinceMs?, untilMs?)` (oldest-first), `latestTimestamp(chatMid)` (returns highest `created_time` or `null`). Database file lives at `data/cache/messages.db` (created automatically); `:memory:` accepted for tests.
 
 **`caching-line-client.ts`** — `CachingLineClient` wraps a `LineClient` and a `MessageCache`. Overrides `getMessages` and `getMessagesInRange`: fetches only messages newer than `cache.latestTimestamp()` from LINE (topping up the cache), then reads the full requested range from SQLite. Always resolves sender names before writing to cache so cached messages always carry display names. All other `LineClient` methods (`listChats`, `getImageBuffer`, `waitForPin`, `waitForCompletion`, `getCompletedAuth`) are forwarded directly.
 
@@ -92,7 +92,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 **Token lifecycle:**
 - MCP tokens are self-contained HMAC-SHA256-signed blobs embedding the user's `AuthData` and expiry — the server is stateless and holds no token maps
-- The signing key lives in `.line-mcp-secret` (auto-created on first run, persisted across restarts); tokens issued before a restart remain valid as long as the file is not deleted
+- The signing key lives in `data/secret` (auto-created on first run, persisted across restarts); tokens issued before a restart remain valid as long as the file is not deleted
 - MCP tokens expire after 24 hours; Claude Code refreshes them proactively via `POST /token` with `grant_type=refresh_token`; the server verifies the refresh token's signature, looks up any fresher LINE credentials in `latestAuthData`, and issues new signed tokens
 - LINE access tokens are refreshed on-demand inside `LineClient.refreshIfExpired()` when < 24 h remain; the `onTokenRefreshed` callback updates `latestAuthData` so the next MCP token refresh embeds the latest LINE credentials
 - Multiple independent LINE accounts are supported: each user's `AuthData` is embedded in their own MCP tokens and never shared with other users

@@ -73,6 +73,12 @@ line-qr.png
 # LINE MCP runtime data (secret, auth, templates, cache)
 data/
 
+# Legacy data paths (pre-reorganization, kept for safety)
+.line-mcp-secret
+auth/
+.line-templates/
+.line-cache/
+
 # dotenv environment variable files
 .env
 .env.*
