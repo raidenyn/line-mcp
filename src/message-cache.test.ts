@@ -112,3 +112,19 @@ describe('MessageCache.latestTimestamp', () => {
     expect(cache.latestTimestamp('chat1')).toBe(1000);
   });
 });
+
+describe('MessageCache.getDistinctChatMids', () => {
+  it('returns empty array when cache is empty', () => {
+    const cache = new MessageCache(':memory:');
+    expect(cache.getDistinctChatMids()).toEqual([]);
+  });
+
+  it('returns each chat mid exactly once', () => {
+    const cache = new MessageCache(':memory:');
+    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    cache.upsertMessages('chat2', [msg('2', '2000')]);
+    cache.upsertMessages('chat1', [msg('3', '3000')]); // second insert for chat1
+    const mids = cache.getDistinctChatMids();
+    expect(mids.sort()).toEqual(['chat1', 'chat2']);
+  });
+});

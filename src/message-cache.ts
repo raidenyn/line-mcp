@@ -61,4 +61,9 @@ export class MessageCache {
     ).get(chatMid) as { ts: number | null };
     return row.ts ?? null;
   }
+
+  getDistinctChatMids(): string[] {
+    const rows = this.db.prepare('SELECT DISTINCT chat_mid FROM messages').all() as { chat_mid: string }[];
+    return rows.map(r => r.chat_mid);
+  }
 }
