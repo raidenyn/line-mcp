@@ -155,5 +155,9 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 
+# Claude
+settings.local.json
+.superpowers
+
 # Sensetive examples
 /specs/chat_export_examples
