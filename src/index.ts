@@ -13,6 +13,7 @@ import { MessageCache } from './message-cache';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, Transaction } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema } from './template-store';
 import { parseExportFile } from './export-parser';
+import { startSyncLoop } from './sync';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -647,6 +648,7 @@ function seedTestToken(): void {
 
 async function main() {
   sharedCache = new MessageCache('.line-cache/messages.db');
+  startSyncLoop(sharedCache);
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const WWW_AUTH = makeWwwAuthenticate(PORT);
   seedTestToken();
