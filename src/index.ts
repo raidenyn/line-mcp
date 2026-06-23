@@ -14,6 +14,7 @@ import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, Trans
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema } from './template-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
+import { cacheDbPath } from './data-dir';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -149,7 +150,7 @@ server.registerTool(
   {
     description:
       'Create, update, delete, or list saved transaction regex templates for a LINE chat. ' +
-      'Templates are persisted in .line-templates/<chatMid>.json and auto-loaded by get_transactions. ' +
+      'Templates are persisted in data/templates/<chatMid>.json and auto-loaded by get_transactions. ' +
       'Recommended workflow: call sample_messages first to inspect raw message text, ' +
       'then upsert templates here, then call get_transactions with no templates argument.',
     inputSchema: {
@@ -344,7 +345,7 @@ server.registerTool(
     description:
       'Fetch messages from a LINE chat and parse them into structured transactions using regex templates. ' +
       'Non-matching messages (promotions, alerts) are silently dropped. Results are sorted oldest→newest. ' +
-      'If templates is omitted, saved templates for this chat are loaded automatically from .line-templates/<chatMid>.json ' +
+      'If templates is omitted, saved templates for this chat are loaded automatically from data/templates/<chatMid>.json ' +
       'and filtered per message by valid_from/valid_until, so bank format changes across time are handled transparently. ' +
       'Use manage_templates to save templates and sample_messages to inspect raw messages before writing patterns.',
     inputSchema: {
@@ -647,7 +648,7 @@ function seedTestToken(): void {
 }
 
 async function main() {
-  sharedCache = new MessageCache('.line-cache/messages.db');
+  sharedCache = new MessageCache(cacheDbPath());
   startSyncLoop(sharedCache);
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const WWW_AUTH = makeWwwAuthenticate(PORT);
