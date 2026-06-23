@@ -68,15 +68,10 @@ web_modules/
 # LINE auth token cache
 .line-auth.json
 .line-mcp-tokens.json
-.line-mcp-secret
 line-qr.png
-auth/
 
-# LINE MCP saved templates
-.line-templates/
-
-# LINE MCP message cache (SQLite)
-.line-cache/
+# LINE MCP runtime data (secret, auth, templates, cache)
+data/
 
 # dotenv environment variable files
 .env
