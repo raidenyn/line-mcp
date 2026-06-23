@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { z } from 'zod';
 import { TransactionTemplateSchema } from './transaction-parser';
+import { templatesDir } from './data-dir';
 
 export const NamedTemplateSchema = TransactionTemplateSchema.extend({
   name: z.string().min(1).describe('Unique name for this template within the chat'),
@@ -16,7 +17,6 @@ export const NamedTemplateSchema = TransactionTemplateSchema.extend({
 });
 export type NamedTemplate = z.infer<typeof NamedTemplateSchema>;
 
-const DEFAULT_STORE_DIR = join(process.cwd(), '.line-templates');
 const SAFE_MID_RE = /^[a-zA-Z0-9_-]+$/;
 
 function safeFilePath(chatMid: string, storeDir: string): string {
@@ -26,7 +26,7 @@ function safeFilePath(chatMid: string, storeDir: string): string {
 
 export function loadTemplates(
   chatMid: string,
-  storeDir = DEFAULT_STORE_DIR,
+  storeDir = templatesDir(),
 ): { templates: NamedTemplate[]; warning?: string } {
   const path = safeFilePath(chatMid, storeDir);
   if (!existsSync(path)) return { templates: [] };
@@ -56,7 +56,7 @@ function writeTemplates(chatMid: string, templates: NamedTemplate[], storeDir: s
   writeFileSync(safeFilePath(chatMid, storeDir), JSON.stringify({ templates }, null, 2));
 }
 
-export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir = DEFAULT_STORE_DIR): void {
+export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir = templatesDir()): void {
   const { templates } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === template.name);
   if (idx >= 0) templates[idx] = template;
@@ -64,7 +64,7 @@ export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDi
   writeTemplates(chatMid, templates, storeDir);
 }
 
-export function deleteTemplate(chatMid: string, name: string, storeDir = DEFAULT_STORE_DIR): boolean {
+export function deleteTemplate(chatMid: string, name: string, storeDir = templatesDir()): boolean {
   const { templates } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === name);
   if (idx < 0) return false;
@@ -73,7 +73,7 @@ export function deleteTemplate(chatMid: string, name: string, storeDir = DEFAULT
   return true;
 }
 
-export function listTemplates(chatMid: string, storeDir = DEFAULT_STORE_DIR): NamedTemplate[] {
+export function listTemplates(chatMid: string, storeDir = templatesDir()): NamedTemplate[] {
   return loadTemplates(chatMid, storeDir).templates;
 }
 
