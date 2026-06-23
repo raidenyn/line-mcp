@@ -4,6 +4,7 @@ import { AuthData, LineClient } from './line-client';
 import { MessageCache } from './message-cache';
 import { CachingLineClient } from './caching-line-client';
 import { latestAuthData, persistAuthData } from './oauth';
+import { authDir as getAuthDir } from './data-dir';
 
 type SyncClient = { getMessagesInRange(chatMid: string, sinceMs: number): Promise<unknown> };
 type MakeClient = (authData: AuthData, cache: MessageCache) => SyncClient;
@@ -23,7 +24,7 @@ export interface SyncOptions {
 }
 
 export async function syncAll(cache: MessageCache, options: SyncOptions = {}): Promise<void> {
-  const authDir = resolve(options.authDir ?? join(process.env.DATA_DIR ?? process.cwd(), 'auth'));
+  const authDir = resolve(options.authDir ?? getAuthDir());
   const makeClient = options.makeClient ?? defaultMakeClient;
 
   let files: string[];

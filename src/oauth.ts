@@ -5,16 +5,18 @@ import * as QRCode from 'qrcode';
 import express, { type Express, type Request, type Response } from 'express';
 import { LineClient, AuthData } from './line-client';
 import { parseExportHeader } from './export-parser';
+import { secretPath, authDir as dataDirAuth } from './data-dir';
 
 // ─── Signing key ──────────────────────────────────────────────────────────────
 
 function loadOrCreateSecret(): string {
-  const secretFile = path.join(process.env.DATA_DIR ?? process.cwd(), '.line-mcp-secret');
+  const file = secretPath();
   try {
-    return fs.readFileSync(secretFile, 'utf8').trim();
+    return fs.readFileSync(file, 'utf8').trim();
   } catch {
     const secret = crypto.randomBytes(32).toString('hex');
-    fs.writeFileSync(secretFile, secret, 'utf8');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, secret, 'utf8');
     return secret;
   }
 }
@@ -64,10 +66,9 @@ function isSafeMid(mid: string): boolean {
 export function persistAuthData(authData: AuthData): void {
   if (!isSafeMid(authData.mid)) return;
   try {
-    const baseDir = process.env.DATA_DIR ?? process.cwd();
-    const dir = path.resolve(baseDir, 'auth');
+    const dir = dataDirAuth();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700); // enforce 0o700 even if dir already existed
+    fs.chmodSync(dir, 0o700);
     const filePath = path.resolve(dir, `${authData.mid}.json`);
     fs.writeFileSync(filePath, JSON.stringify(authData, null, 2), { mode: 0o600 });
   } catch (err) {
@@ -78,10 +79,9 @@ export function persistAuthData(authData: AuthData): void {
 export function loadAuthFromDisk(mid: string): AuthData | null {
   if (!isSafeMid(mid)) return null;
   try {
-    const baseDir = process.env.DATA_DIR ?? process.cwd();
-    const authDir = path.resolve(baseDir, 'auth');
-    const file = path.resolve(authDir, `${mid}.json`);
-    if (!file.startsWith(authDir + path.sep)) return null;
+    const dir = dataDirAuth();
+    const file = path.resolve(dir, `${mid}.json`);
+    if (!file.startsWith(dir + path.sep)) return null;
     const raw = fs.readFileSync(file, 'utf8');
     const authData = JSON.parse(raw) as AuthData;
     if (!authData.mid || authData.mid !== mid || !authData.accessToken) return null;
