@@ -3,12 +3,19 @@ import { join, resolve } from 'path';
 import { AuthData, LineClient } from './line-client';
 import { MessageCache } from './message-cache';
 import { CachingLineClient } from './caching-line-client';
+import { latestAuthData, persistAuthData } from './oauth';
 
 type SyncClient = { getMessagesInRange(chatMid: string, sinceMs: number): Promise<unknown> };
 type MakeClient = (authData: AuthData, cache: MessageCache) => SyncClient;
 
 const defaultMakeClient: MakeClient = (authData, cache) =>
-  new CachingLineClient(new LineClient(authData, globalThis.fetch, () => {}), cache);
+  new CachingLineClient(
+    new LineClient(authData, globalThis.fetch, () => {
+      latestAuthData.set(authData.mid, authData);
+      persistAuthData(authData);
+    }),
+    cache,
+  );
 
 export interface SyncOptions {
   authDir?: string;
@@ -41,6 +48,12 @@ export async function syncAll(cache: MessageCache, options: SyncOptions = {}): P
       process.stderr.write(`[sync] Failed to load auth for ${mid}, skipping\n`);
       continue;
     }
+
+    if (!authData.mid || authData.mid !== mid || !authData.accessToken) {
+      process.stderr.write(`[sync] Invalid or incomplete auth for ${mid}, skipping\n`);
+      continue;
+    }
+    latestAuthData.set(mid, authData);
 
     const client = makeClient(authData, cache);
     let synced = 0;

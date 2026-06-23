@@ -69,7 +69,8 @@ describe('syncAll', () => {
 
     const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
     writeFileSync(join(authDir, 'badusr.json'), 'not-json');
-    const makeClient = vi.fn().mockReturnValue({ getMessagesInRange: vi.fn() });
+    const getMessagesInRange = vi.fn().mockResolvedValue([]);
+    const makeClient = vi.fn().mockReturnValue({ getMessagesInRange });
 
     await syncAll(cache, { authDir, makeClient });
 
