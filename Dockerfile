@@ -12,6 +12,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist/ ./dist/
 COPY src/ltsm ./dist/ltsm
+COPY docs/guide ./docs/guide
 
 ENV PORT=3000
 ENV DATA_DIR=/data
