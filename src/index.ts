@@ -15,6 +15,7 @@ import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTempla
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
+import fs from 'fs';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
   0: 'text',
@@ -30,6 +31,76 @@ const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
 const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
 let sharedCache: MessageCache;
+
+async function readGuideFile(relPath: string, uri: string) {
+  try {
+    const text = await fs.promises.readFile(join(process.cwd(), relPath), 'utf8');
+    return { contents: [{ uri, mimeType: 'text/markdown' as const, text }] };
+  } catch {
+    return { contents: [{ uri, mimeType: 'text/markdown' as const, text: `Guide file not found: ${relPath}` }] };
+  }
+}
+
+server.registerResource(
+  'guide-overview',
+  'line://guide',
+  { description: 'Usage overview: workflow map, tool index, key facts about caching and auth', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/overview.md', 'line://guide'),
+);
+server.registerResource(
+  'guide-list_chats',
+  'line://guide/tools/list_chats',
+  { description: 'When to use list_chats, prerequisites, next steps', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/list_chats.md', 'line://guide/tools/list_chats'),
+);
+server.registerResource(
+  'guide-get_messages',
+  'line://guide/tools/get_messages',
+  { description: 'When to use get_messages, key parameters, workflow position', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/get_messages.md', 'line://guide/tools/get_messages'),
+);
+server.registerResource(
+  'guide-get_image',
+  'line://guide/tools/get_image',
+  { description: 'When to use get_image, URL source requirements', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/get_image.md', 'line://guide/tools/get_image'),
+);
+server.registerResource(
+  'guide-sample_messages',
+  'line://guide/tools/sample_messages',
+  { description: 'When to use sample_messages, since/until params, role before template writing', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/sample_messages.md', 'line://guide/tools/sample_messages'),
+);
+server.registerResource(
+  'guide-manage_templates',
+  'line://guide/tools/manage_templates',
+  { description: 'When to use manage_templates, capture group requirements, time-bounded templates', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/manage_templates.md', 'line://guide/tools/manage_templates'),
+);
+server.registerResource(
+  'guide-get_transactions',
+  'line://guide/tools/get_transactions',
+  { description: 'When to use get_transactions, why since is critical, auto-loaded templates', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/get_transactions.md', 'line://guide/tools/get_transactions'),
+);
+server.registerResource(
+  'guide-summarize_transactions',
+  'line://guide/tools/summarize_transactions',
+  { description: 'When to use summarize_transactions, group_by options, final step in transaction workflow', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/summarize_transactions.md', 'line://guide/tools/summarize_transactions'),
+);
+server.registerResource(
+  'guide-initiate_import',
+  'line://guide/tools/initiate_import',
+  { description: 'When to use initiate_import, upload flow, expiry', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/initiate_import.md', 'line://guide/tools/initiate_import'),
+);
+server.registerResource(
+  'guide-complete_import',
+  'line://guide/tools/complete_import',
+  { description: 'When to use complete_import, timezone requirement, needs_info handling', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/complete_import.md', 'line://guide/tools/complete_import'),
+);
 
 server.registerTool(
   'list_chats',

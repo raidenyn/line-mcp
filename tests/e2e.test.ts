@@ -172,3 +172,33 @@ it('summarize_transactions accepts chatMid directly', async () => {
   const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
   expect(isValidSummary || isNoTemplatesError).toBe(true);
 });
+
+it('resources/list returns all 10 guide URIs', async () => {
+  const result = await mcpClient.listResources();
+  const uris = result.resources.map((r) => r.uri);
+  const expected = [
+    'line://guide',
+    'line://guide/tools/list_chats',
+    'line://guide/tools/get_messages',
+    'line://guide/tools/get_image',
+    'line://guide/tools/sample_messages',
+    'line://guide/tools/manage_templates',
+    'line://guide/tools/get_transactions',
+    'line://guide/tools/summarize_transactions',
+    'line://guide/tools/initiate_import',
+    'line://guide/tools/complete_import',
+  ];
+  for (const uri of expected) {
+    expect(uris).toContain(uri);
+  }
+});
+
+it('resources/read returns non-empty markdown for line://guide', async () => {
+  const result = await mcpClient.readResource({ uri: 'line://guide' });
+  expect(result.contents).toHaveLength(1);
+  const item = result.contents[0];
+  expect(item.mimeType).toBe('text/markdown');
+  if ('text' in item) {
+    expect(item.text.length).toBeGreaterThan(0);
+  }
+});
