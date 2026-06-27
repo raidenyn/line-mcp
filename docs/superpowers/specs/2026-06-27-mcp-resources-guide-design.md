@@ -107,6 +107,14 @@ COPY docs/guide ./docs/guide
 
 This ensures guide files are present at `/app/docs/guide/` in the container, consistent with `WORKDIR /app`.
 
+## CLAUDE.md Maintenance Instruction
+
+`CLAUDE.md` must be updated as part of this implementation to document the resources feature. Additionally, a standing instruction must be added to `CLAUDE.md` that reads:
+
+> **MCP Resources:** When any `docs/guide/` file is added, removed, or substantively changed, update the `CLAUDE.md` description of the resources feature to match. When a new tool is added to `index.ts`, a corresponding `docs/guide/tools/<tool_name>.md` file must also be created and registered as a resource.
+
+This keeps `CLAUDE.md` — the primary reference for Claude Code sessions — accurate as the server evolves.
+
 ## Out of Scope
 
 - Caching file reads in memory (files are small, changes should be visible immediately)
