@@ -32,6 +32,19 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 - `manage_templates` — CRUD for named regex templates; delegates to `template-store.ts`. Actions: `upsert`, `delete`, `list`.
 - `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `data/templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. When `since` is provided, calls `getMessagesInRange()` to paginate backwards through LINE history until that date; without `since`, fetches the latest 200 messages and appends a note recommending `since` for full-range accuracy. After parsing, calls `applyBalanceDiffs()` to populate the `amount` and `currency` fields from consecutive balance diffs for transactions that did not capture them explicitly. Returns a zero-match hint when saved templates exist but nothing matched.
 
+### MCP Resources (`docs/guide/`)
+
+Ten static markdown resources are registered in `index.ts` via `server.registerResource()` and served over the MCP protocol:
+
+| URI | File |
+|-----|------|
+| `line://guide` | `docs/guide/overview.md` |
+| `line://guide/tools/<name>` | `docs/guide/tools/<name>.md` |
+
+Files are read from disk at request time via `fs.promises.readFile`. Missing files return an error string in the content rather than crashing. The `docs/guide/` tree is copied into the Docker image (`COPY docs/guide ./docs/guide` in `Dockerfile`).
+
+**Maintenance rule:** When any `docs/guide/` file is added, removed, or substantively changed, update this CLAUDE.md section to match. When a new tool is added to `index.ts`, also create `docs/guide/tools/<tool_name>.md` and a corresponding `registerResource` call.
+
 **`oauth.ts`** — OAuth 2.0 authorization server. Provides:
 - `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
 - `GET /.well-known/oauth-protected-resource` — resource server metadata (referenced from `WWW-Authenticate`)
