@@ -198,6 +198,7 @@ it('resources/read returns non-empty markdown for line://guide', async () => {
   expect(result.contents).toHaveLength(1);
   const item = result.contents[0];
   expect(item.mimeType).toBe('text/markdown');
+  expect('text' in item).toBe(true);
   if ('text' in item) {
     expect(item.text.length).toBeGreaterThan(0);
   }
