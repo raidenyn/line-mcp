@@ -321,3 +321,40 @@ describe('applyBalanceDiffs', () => {
     expect(txs[2].currency).toBe('THB'); // balance-derived — stamped
   });
 });
+
+describe('parseTransaction currency aliases', () => {
+  const SCB_MSG = {
+    id: 'scb1',
+    createdTime: '1749999600000',
+    contentType: 0,
+    text: '[รายการเงินออก 100.00 บาท จากบัญชี X-1139 วันที่ 15/06/2025 @10:00 ยอดเงินที่ใช้ได้ 1000.00 บาท]',
+  };
+  const SCB_TEMPLATE: TransactionTemplate[] = [{
+    pattern: '\\[รายการเงินออก\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+จากบัญชี\\s+(?<account>\\S+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\s+@\\d{2}:\\d{2}\\s+ยอดเงินที่ใช้ได้\\s+(?<balance>[\\d,]+\\.?\\d*)\\s+บาท\\]',
+    amount_sign: 'debit',
+    date_format: 'DD/MM/YYYY',
+  }];
+
+  it('normalises original_currency via aliases', () => {
+    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, { 'บาท': 'THB' });
+    expect(tx).not.toBeNull();
+    expect(tx!.original_currency).toBe('THB');
+  });
+
+  it('passes through unrecognised currency unchanged', () => {
+    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, { 'บ': 'THB' });
+    expect(tx).not.toBeNull();
+    expect(tx!.original_currency).toBe('บาท');
+  });
+
+  it('applies no aliases when aliases param is omitted', () => {
+    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE);
+    expect(tx).not.toBeNull();
+    expect(tx!.original_currency).toBe('บาท');
+  });
+
+  it('aliases empty string aliases map leaves currency unchanged', () => {
+    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, {});
+    expect(tx!.original_currency).toBe('บาท');
+  });
+});

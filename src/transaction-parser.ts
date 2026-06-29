@@ -94,6 +94,7 @@ function parseDate(captured: string | undefined, format: string | undefined, fal
 export function parseTransaction(
   message: { id: string; createdTime: string; text?: string; contentType: number },
   templates: TransactionTemplate[],
+  aliases: Record<string, string> = {},
 ): Transaction | null {
   if (message.contentType !== 0 || !message.text) return null;
 
@@ -113,11 +114,12 @@ export function parseTransaction(
       else if (tmpl.amount_sign === 'credit') original_amount = Math.abs(original_amount);
     }
 
+    const rawCurrency = g.original_currency.trim();
     const tx: Transaction = {
       id: message.id,
       date: parseDate(g.date, tmpl.date_format, message.createdTime),
       original_amount,
-      original_currency: g.original_currency.trim(),
+      original_currency: aliases[rawCurrency] ?? rawCurrency,
       rawText: message.text,
     };
 
