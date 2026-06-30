@@ -11,7 +11,7 @@ import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, Transaction } from './transaction-parser';
-import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, NamedTemplateSchema } from './template-store';
+import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
@@ -226,10 +226,13 @@ server.registerTool(
       'then upsert templates here, then call get_transactions with no templates argument.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
-      action: z.enum(['upsert', 'delete', 'list']).describe(
+      action: z.enum(['upsert', 'delete', 'list', 'upsert_alias', 'delete_alias', 'list_aliases']).describe(
         '"upsert" — save or replace a template by name. ' +
         '"delete" — remove a named template. ' +
-        '"list" — return all saved templates for this chat (full objects, in insertion order).'
+        '"list" — return all saved templates for this chat (full objects, in insertion order). ' +
+        '"upsert_alias" — save or replace a currency alias (e.g. alias: "บาท", canonical: "THB"). ' +
+        '"delete_alias" — remove a currency alias by its alias string. ' +
+        '"list_aliases" — return all currency aliases for this chat.'
       ),
       template: NamedTemplateSchema.optional().describe(
         'Required for action: upsert. Pattern rules: ' +
@@ -246,9 +249,11 @@ server.registerTool(
         'Messages outside this window skip this template — use when the bank changed its message format.'
       ),
       name: z.string().optional().describe('Template name to remove (required for action: delete)'),
+      alias: z.string().optional().describe('Currency string captured by regex (required for upsert_alias and delete_alias)'),
+      canonical: z.string().optional().describe('Canonical currency code to normalise to, e.g. "THB" (required for upsert_alias)'),
     },
   },
-  async ({ chatMid, action, template, name }) => {
+  async ({ chatMid, action, template, name, alias, canonical }) => {
     if (action === 'upsert') {
       if (!template) {
         return { content: [{ type: 'text' as const, text: 'template is required for action: upsert' }], isError: true };
@@ -273,6 +278,45 @@ server.registerTool(
         return { content: [{ type: 'text' as const, text: `Template '${name}' deleted from chat ${chatMid}.` }] };
       } catch (err) {
         return { content: [{ type: 'text' as const, text: `Failed to delete template: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'upsert_alias') {
+      if (!alias || !canonical) {
+        return { content: [{ type: 'text' as const, text: 'alias and canonical are required for action: upsert_alias' }], isError: true };
+      }
+      try {
+        upsertAlias(chatMid, alias, canonical);
+        return { content: [{ type: 'text' as const, text: `Alias '${alias}' → '${canonical}' saved for chat ${chatMid}.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to save alias: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'delete_alias') {
+      if (!alias) {
+        return { content: [{ type: 'text' as const, text: 'alias is required for action: delete_alias' }], isError: true };
+      }
+      try {
+        const deleted = deleteAlias(chatMid, alias);
+        if (!deleted) {
+          return { content: [{ type: 'text' as const, text: `No alias '${alias}' found for this chat.` }], isError: true };
+        }
+        return { content: [{ type: 'text' as const, text: `Alias '${alias}' deleted from chat ${chatMid}.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to delete alias: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'list_aliases') {
+      try {
+        const aliases = listAliases(chatMid);
+        const text = Object.keys(aliases).length === 0
+          ? `No currency aliases saved for chat ${chatMid}.`
+          : JSON.stringify(aliases, null, 2);
+        return { content: [{ type: 'text' as const, text }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to list aliases: ${(err as Error).message}` }], isError: true };
       }
     }
 
@@ -368,6 +412,7 @@ async function fetchParsedTransactions(
   const loaded = loadTemplates(chatMid);
   if (loaded.warning) warnings.push(loaded.warning);
   const savedTemplates = loaded.templates;
+  const savedAliases = loaded.currency_aliases;
 
   if (savedTemplates.length === 0) {
     return {
@@ -394,7 +439,7 @@ async function fetchParsedTransactions(
   let transactions = messages
     .map((msg) => {
       const templatesForMsg = filterByTime(savedTemplates, parseInt(msg.createdTime, 10));
-      return parseTransaction(msg, templatesForMsg);
+      return parseTransaction(msg, templatesForMsg, savedAliases);
     })
     .filter((tx) => tx !== null);
 
