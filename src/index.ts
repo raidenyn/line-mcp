@@ -325,38 +325,46 @@ server.registerTool(
     }
 
     if (action === 'list_presets') {
-      const presets = loadAllPresets();
-      const list = Object.entries(presets).map(([name, p]) => ({
-        name,
-        description: p.description,
-        template_count: p.templates.length,
-        currency_alias_count: Object.keys(p.currency_aliases).length,
-      }));
-      return { content: [{ type: 'text' as const, text: JSON.stringify(list, null, 2) }] };
+      try {
+        const presets = loadAllPresets();
+        const list = Object.entries(presets).map(([name, p]) => ({
+          name,
+          description: p.description,
+          template_count: p.templates.length,
+          currency_alias_count: Object.keys(p.currency_aliases).length,
+        }));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(list, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to list presets: ${(err as Error).message}` }], isError: true };
+      }
     }
 
     if (action === 'apply_preset') {
       if (!preset_name) {
         return { content: [{ type: 'text' as const, text: 'preset_name is required for action: apply_preset' }], isError: true };
       }
-      const preset = getPreset(preset_name);
-      if (!preset) {
-        const available = Object.keys(loadAllPresets()).join(', ') || 'none';
-        return { content: [{ type: 'text' as const, text: `Preset '${preset_name}' not found. Available presets: ${available}` }], isError: true };
+      try {
+        const preset = getPreset(preset_name);
+        if (!preset) {
+          const available = Object.keys(loadAllPresets()).join(', ') || 'none';
+          return { content: [{ type: 'text' as const, text: `Preset '${preset_name}' not found. Available presets: ${available}` }], isError: true };
+        }
+        for (const template of preset.templates) {
+          upsertTemplate(chatMid, template);
+        }
+        for (const [alias, canonical] of Object.entries(preset.currency_aliases)) {
+          upsertAlias(chatMid, alias, canonical);
+        }
+        const aliasCount = Object.keys(preset.currency_aliases).length;
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Applied preset '${preset_name}': ${preset.templates.length} templates and ${aliasCount} aliases added/updated for chat ${chatMid}.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to apply preset: ${(err as Error).message}` }], isError: true };
       }
-      for (const template of preset.templates) {
-        upsertTemplate(chatMid, template);
-      }
-      for (const [alias, canonical] of Object.entries(preset.currency_aliases)) {
-        upsertAlias(chatMid, alias, canonical);
-      }
-      const aliasCount = Object.keys(preset.currency_aliases).length;
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Applied preset '${preset_name}': ${preset.templates.length} templates and ${aliasCount} aliases added/updated for chat ${chatMid}.`,
-        }],
-      };
     }
 
     // action === 'list'
