@@ -1,0 +1,11 @@
+{
+  "description": "CardX credit card — English spend notifications",
+  "templates": [
+    {
+      "name": "cardx-debit",
+      "pattern": "CardX\\s+would\\s+like\\s+to\\s+inform\\s+that\\s+you\\s+have\\s+made\\s+transaction\\s+via\\s+card\\s+ending\\s+with\\s+(?<account>\\d+)\\s+at\\s+(?<merchant>.+?)\\s+in\\s+the\\s+amount\\s+of\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>[A-Z]+)\\s+on\\s+(?<date>.+?)\\.\\s+You\\s+have\\s+available\\s+credit\\s+limit\\s+(?<balance>[\\d,]+\\.?\\d*)",
+      "amount_sign": "debit"
+    }
+  ],
+  "currency_aliases": {}
+}
