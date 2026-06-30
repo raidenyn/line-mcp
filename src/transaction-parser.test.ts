@@ -357,4 +357,36 @@ describe('parseTransaction currency aliases', () => {
     const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, {});
     expect(tx!.original_currency).toBe('บาท');
   });
+
+  it('normalises currency group via aliases', () => {
+    const msg = {
+      id: 'fx2',
+      createdTime: '1749999600000',
+      contentType: 0 as const,
+      text: 'FX spend USD 50 (บาท 1750) at Starbucks',
+    };
+    const tmpl: TransactionTemplate[] = [{
+      pattern: 'FX spend (?<original_currency>\\w+) (?<original_amount>[\\d.]+) \\((?<currency>บาท) (?<amount>[\\d.]+)\\) at .+',
+      amount_sign: 'debit',
+    }];
+    const tx = parseTransaction(msg, tmpl, { 'บาท': 'THB' });
+    expect(tx).not.toBeNull();
+    expect(tx!.currency).toBe('THB');
+  });
+
+  it('passes through unrecognised currency group unchanged', () => {
+    const msg = {
+      id: 'fx3',
+      createdTime: '1749999600000',
+      contentType: 0 as const,
+      text: 'FX spend USD 50 (บาท 1750) at Starbucks',
+    };
+    const tmpl: TransactionTemplate[] = [{
+      pattern: 'FX spend (?<original_currency>\\w+) (?<original_amount>[\\d.]+) \\((?<currency>บาท) (?<amount>[\\d.]+)\\) at .+',
+      amount_sign: 'debit',
+    }];
+    const tx = parseTransaction(msg, tmpl, { 'บ': 'THB' });
+    expect(tx).not.toBeNull();
+    expect(tx!.currency).toBe('บาท');
+  });
 });

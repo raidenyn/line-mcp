@@ -123,7 +123,7 @@ export function parseTransaction(
       rawText: message.text,
     };
 
-    if (g.currency) tx.currency = g.currency.trim();
+    if (g.currency) tx.currency = aliases[g.currency.trim()] ?? g.currency.trim();
     if (g.amount) {
       let amount = parseNumeric(g.amount);
       if (tmpl.amount_sign && !/^[\s]*[+\-−]/.test(g.amount)) {
