@@ -12,7 +12,7 @@ import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, Transaction } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
-import { loadAllPresets, getPreset } from './preset-store';
+import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
@@ -429,7 +429,24 @@ server.registerTool(
         const time = new Date(parseInt(m.createdTime, 10)).toISOString();
         return `[${time}] ${m.text}`;
       });
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      const { templates: savedTemplates } = loadTemplates(chatMid);
+      const allPresets = loadAllPresets();
+      const presetSuggestions = detectPresets(textMessages, savedTemplates, allPresets);
+
+      let messageText = lines.join('\n');
+      if (presetSuggestions.length > 0) {
+        const hints = presetSuggestions.map(
+          (s) => `${s.matched_count} message(s) matched the '${s.preset_name}' preset but no saved template — run manage_templates with action: apply_preset, preset_name: '${s.preset_name}' to set it up.`,
+        );
+        messageText += '\n\n' + hints.join('\n');
+      }
+
+      return {
+        content: [
+          { type: 'text' as const, text: messageText },
+          { type: 'text' as const, text: JSON.stringify({ preset_suggestions: presetSuggestions }) },
+        ],
+      };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to sample messages: ${(err as Error).message}` }],
