@@ -12,7 +12,7 @@
 
 **Response format:**
 - `content[0].text`: human-readable list of messages, with an appended note when preset suggestions exist.
-- `content[1].text`: JSON object `{ "preset_suggestions": [...] }` — always present. Each entry is `{ preset_name, matched_count, description }`. Empty array means no gaps were detected.
+- `content[1].text`: JSON object `{ "preset_suggestions": [...] }` — present whenever text messages are returned. Not present on the "no text messages found" early return or on error. Each entry is `{ preset_name, matched_count, description }`. Empty array means no gaps were detected.
 
 **Preset suggestion logic:** A preset is suggested when at least one returned message matches a preset pattern but is not matched by any existing saved template for this chat. This detects coverage gaps — messages that look like bank notifications but have no template yet.
 
