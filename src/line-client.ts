@@ -535,11 +535,9 @@ export class LineClient {
   ): Promise<Message[]> {
     await this.ensureAuthenticated();
 
-    let allRaw: RawMessage[] = [];
-
     const firstPage = await this.fetchRawPage(chatMid, pageSize);
     const page0 = firstPage ?? [];
-    allRaw = [...page0];
+    let allRaw: RawMessage[] = [...page0];
 
     let currentPage = page0;
     while (currentPage.length >= pageSize) {
