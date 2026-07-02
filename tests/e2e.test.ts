@@ -34,7 +34,11 @@ async function waitForServer(baseUrl: string, timeoutMs = 30_000): Promise<void>
       await new Promise<void>((resolve, reject) => {
         const req = http.get(`${baseUrl}/.well-known/oauth-authorization-server`, (res) => {
           res.resume();
-          res.statusCode === 200 ? resolve() : reject(new Error(`Status ${res.statusCode}`));
+          if (res.statusCode === 200) {
+            resolve();
+          } else {
+            reject(new Error(`Status ${res.statusCode}`));
+          }
         });
         req.on('error', reject);
         req.setTimeout(500, () => { req.destroy(); reject(new Error('timeout')); });
