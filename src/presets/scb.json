@@ -1,0 +1,57 @@
+{
+  "description": "SCB Connect — Thai baht debit/credit notifications (LINE bot)",
+  "templates": [
+    {
+      "name": "scb-credit-labeled",
+      "pattern": "\\[รายการเงินเข้า:\\s+(?<merchant>.+?)\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+เข้าบัญชี\\s+(?<account>\\S+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\]",
+      "amount_sign": "credit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-credit-standard",
+      "pattern": "\\[รายการเงินเข้า\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+เข้าบัญชี\\s+(?<account>\\S+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\s+@\\d{2}:\\d{2}\\s+ยอดเงินที่ใช้ได้\\s+(?<balance>[\\d,]+\\.?\\d*)\\s+บาท\\]",
+      "amount_sign": "credit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-atm-withdrawal",
+      "pattern": "\\[รายการเงินออก\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+ด้วยบัตรเดบิต\\s+\\S+\\s+จากบัญชี\\s+(?<account>\\S+)\\s+ผ่านตู้\\s+(?<merchant>.+?)\\s+ATM\\s+ค่าธรรมเนียม\\s+[\\d,]+\\.?\\d*\\s+บาท\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\s+@\\d{2}:\\d{2}\\]",
+      "amount_sign": "debit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-debit-standard",
+      "pattern": "\\[รายการเงินออก\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+จากบัญชี\\s+(?<account>\\S+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\s+@\\d{2}:\\d{2}\\s+ยอดเงินที่ใช้ได้\\s+(?<balance>[\\d,]+\\.?\\d*)\\s+บาท\\]",
+      "amount_sign": "debit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-card-payment",
+      "pattern": "\\[ชำระเงิน\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+ด้วยบัตรเดบิต\\s+\\S+\\s+จากบัญชี\\s+(?<account>\\S+)\\s+@(?<merchant>.+?)\\s+ค่าธรรมเนียม\\s+[\\d,]+\\.?\\d*\\s+บาท\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\s+@\\d{2}:\\d{2}\\]",
+      "amount_sign": "debit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-tax-deduction",
+      "pattern": "\\[หักภาษีเงินได้\\s+(?<merchant>.+?)\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บาท)\\s+จากบัญชี\\s+(?<account>\\S+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2}/\\d{4})\\]",
+      "amount_sign": "debit",
+      "date_format": "DD/MM/YYYY"
+    },
+    {
+      "name": "scb-salary-sms",
+      "pattern": "เงินโอน/เงินเดือน\\s+(?<original_amount>[\\d,]+\\.?\\d*)(?<original_currency>บ)\\s+เข้าบ/ชx(?<account>\\d+)\\s+(?<date>\\d{2}/\\d{2})@\\d{2}:\\d{2}",
+      "amount_sign": "credit",
+      "date_format": "DD/MM"
+    },
+    {
+      "name": "scb-fee-sms",
+      "pattern": "หัก(?:ค่าธรรมเนียมอัตโนมัติ|เงินอัตโนมัติ)\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>บ)\\.\\s+(?:จาก\\s+)?บ/ช\\s+x(?<account>\\d+)\\s+วันที่\\s+(?<date>\\d{2}/\\d{2})\\s+เวลา\\s+\\d{2}:\\d{2}",
+      "amount_sign": "debit",
+      "date_format": "DD/MM"
+    }
+  ],
+  "currency_aliases": {
+    "บาท": "THB",
+    "บ": "THB"
+  }
+}

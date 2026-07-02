@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -8,6 +8,9 @@ import {
   deleteTemplate,
   listTemplates,
   filterByTime,
+  upsertAlias,
+  deleteAlias,
+  listAliases,
   NamedTemplate,
 } from './template-store';
 
@@ -201,5 +204,104 @@ describe('loadTemplates migration', () => {
     expect(result.templates[0].pattern).toBe(
       'spent (?<original_currency>\\w+) (?<original_amount>[\\d.]+)',
     );
+  });
+});
+
+describe('loadTemplates currency_aliases', () => {
+  it('returns empty object when key absent', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    expect(loadTemplates('mid123', dir).currency_aliases).toEqual({});
+  });
+
+  it('returns aliases stored in file', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({ templates: [], currency_aliases: { 'บาท': 'THB' } }),
+    );
+    expect(loadTemplates('mid123', dir).currency_aliases).toEqual({ 'บาท': 'THB' });
+  });
+});
+
+describe('upsertAlias', () => {
+  it('creates alias and persists to file', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    expect(listAliases('mid123', dir)).toEqual({ 'บาท': 'THB' });
+  });
+
+  it('replaces existing alias with same key', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    upsertAlias('mid123', 'บาท', 'BAHT', dir);
+    expect(listAliases('mid123', dir)['บาท']).toBe('BAHT');
+  });
+
+  it('does not erase existing templates', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    expect(loadTemplates('mid123', dir).templates).toEqual([TMPL_A]);
+  });
+});
+
+describe('deleteAlias', () => {
+  it('returns false when alias not found', () => {
+    expect(deleteAlias('mid123', 'บาท', dir)).toBe(false);
+  });
+
+  it('removes alias and returns true', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    upsertAlias('mid123', 'บ', 'THB', dir);
+    expect(deleteAlias('mid123', 'บาท', dir)).toBe(true);
+    expect(listAliases('mid123', dir)).toEqual({ 'บ': 'THB' });
+  });
+
+  it('does not erase existing templates', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    deleteAlias('mid123', 'บาท', dir);
+    expect(loadTemplates('mid123', dir).templates).toEqual([TMPL_A]);
+  });
+});
+
+describe('listAliases', () => {
+  it('returns empty object when no aliases saved', () => {
+    expect(listAliases('mid123', dir)).toEqual({});
+  });
+
+  it('returns all aliases', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    upsertAlias('mid123', 'บ', 'THB', dir);
+    expect(listAliases('mid123', dir)).toEqual({ 'บาท': 'THB', 'บ': 'THB' });
+  });
+});
+
+describe('upsertTemplate preserves aliases', () => {
+  it('does not erase aliases when templates are updated', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    upsertTemplate('mid123', TMPL_A, dir);
+    expect(listAliases('mid123', dir)).toEqual({ 'บาท': 'THB' });
+  });
+});
+
+describe('deleteTemplate preserves aliases', () => {
+  it('does not erase aliases when a template is removed', () => {
+    upsertAlias('mid123', 'บาท', 'THB', dir);
+    upsertTemplate('mid123', TMPL_A, dir);
+    deleteTemplate('mid123', TMPL_A.name, dir);
+    expect(listAliases('mid123', dir)).toEqual({ 'บาท': 'THB' });
+  });
+});
+
+describe('migration preserves currency_aliases', () => {
+  it('keeps aliases intact after pattern migration and rewrites file with them', () => {
+    writeFileSync(
+      join(dir, 'mid123.json'),
+      JSON.stringify({
+        templates: [{ name: 'old', pattern: 'pay (?<currency>\\w+) (?<amount>[\\d.]+)' }],
+        currency_aliases: { 'บาท': 'THB' },
+      }),
+    );
+    const result = loadTemplates('mid123', dir);
+    expect(result.currency_aliases).toEqual({ 'บาท': 'THB' });
+    const file = JSON.parse(readFileSync(join(dir, 'mid123.json'), 'utf8'));
+    expect(file.currency_aliases).toEqual({ 'บาท': 'THB' });
   });
 });

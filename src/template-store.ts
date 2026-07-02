@@ -27,11 +27,12 @@ function safeFilePath(chatMid: string, storeDir: string): string {
 export function loadTemplates(
   chatMid: string,
   storeDir = templatesDir(),
-): { templates: NamedTemplate[]; warning?: string } {
+): { templates: NamedTemplate[]; warning?: string; currency_aliases: Record<string, string> } {
   const path = safeFilePath(chatMid, storeDir);
-  if (!existsSync(path)) return { templates: [] };
+  if (!existsSync(path)) return { templates: [], currency_aliases: {} };
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
+    const rawAliases: Record<string, string> = raw.currency_aliases ?? {};
     const rawTemplates: NamedTemplate[] = raw.templates ?? [];
     const migrated = rawTemplates.map((t) => {
       const newPattern = t.pattern
@@ -40,41 +41,71 @@ export function loadTemplates(
       return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
     });
     if (migrated.some((t, i) => t !== rawTemplates[i])) {
-      writeFileSync(path, JSON.stringify({ templates: migrated }, null, 2));
+      writeFileSync(path, JSON.stringify({ templates: migrated, currency_aliases: rawAliases }, null, 2));
       process.stderr.write(
         `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
       );
     }
-    return { templates: migrated };
+    return { templates: migrated, currency_aliases: rawAliases };
   } catch {
-    return { templates: [], warning: `Template file for ${chatMid} is corrupt or unreadable — returning empty list.` };
+    return { templates: [], warning: `Template file for ${chatMid} is corrupt or unreadable — returning empty list.`, currency_aliases: {} };
   }
 }
 
-function writeTemplates(chatMid: string, templates: NamedTemplate[], storeDir: string): void {
+function writeTemplates(chatMid: string, templates: NamedTemplate[], aliases: Record<string, string>, storeDir: string): void {
   if (!existsSync(storeDir)) mkdirSync(storeDir, { recursive: true });
-  writeFileSync(safeFilePath(chatMid, storeDir), JSON.stringify({ templates }, null, 2));
+  writeFileSync(safeFilePath(chatMid, storeDir), JSON.stringify({ templates, currency_aliases: aliases }, null, 2));
 }
 
 export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir = templatesDir()): void {
-  const { templates } = loadTemplates(chatMid, storeDir);
+  const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === template.name);
   if (idx >= 0) templates[idx] = template;
   else templates.push(template);
-  writeTemplates(chatMid, templates, storeDir);
+  writeTemplates(chatMid, templates, currency_aliases, storeDir);
 }
 
 export function deleteTemplate(chatMid: string, name: string, storeDir = templatesDir()): boolean {
-  const { templates } = loadTemplates(chatMid, storeDir);
+  const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === name);
   if (idx < 0) return false;
   templates.splice(idx, 1);
-  writeTemplates(chatMid, templates, storeDir);
+  writeTemplates(chatMid, templates, currency_aliases, storeDir);
   return true;
 }
 
 export function listTemplates(chatMid: string, storeDir = templatesDir()): NamedTemplate[] {
   return loadTemplates(chatMid, storeDir).templates;
+}
+
+export function upsertAlias(
+  chatMid: string,
+  alias: string,
+  canonical: string,
+  storeDir = templatesDir(),
+): void {
+  const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
+  currency_aliases[alias] = canonical;
+  writeTemplates(chatMid, templates, currency_aliases, storeDir);
+}
+
+export function deleteAlias(
+  chatMid: string,
+  alias: string,
+  storeDir = templatesDir(),
+): boolean {
+  const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
+  if (!(alias in currency_aliases)) return false;
+  delete currency_aliases[alias];
+  writeTemplates(chatMid, templates, currency_aliases, storeDir);
+  return true;
+}
+
+export function listAliases(
+  chatMid: string,
+  storeDir = templatesDir(),
+): Record<string, string> {
+  return loadTemplates(chatMid, storeDir).currency_aliases;
 }
 
 export function filterByTime(templates: NamedTemplate[], timestampMs: number): NamedTemplate[] {
