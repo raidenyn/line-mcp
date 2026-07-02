@@ -3,6 +3,8 @@ services:
     build: .
     ports:
       - "3000:3000"
+    environment:
+      - BASE_PATH=/
     volumes:
       - line-mcp-data:/data
 
