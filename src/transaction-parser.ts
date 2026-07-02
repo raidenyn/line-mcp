@@ -169,7 +169,7 @@ export interface SummaryOutput {
 
 export function summarize(
   transactions: Transaction[],
-  groupBy: 'month' | 'merchant',
+  groupBy: 'month' | 'merchant' | 'category',
   since?: string,
   until?: string,
 ): SummaryOutput {
@@ -187,7 +187,9 @@ export function summarize(
     const key =
       groupBy === 'month'
         ? tx.date.slice(0, 7) // "YYYY-MM"
-        : (tx.merchant ?? 'unknown');
+        : groupBy === 'merchant'
+        ? (tx.merchant ?? 'unknown')
+        : (tx.category ?? 'uncategorized');
 
     const effectiveAmount = tx.amount !== undefined ? tx.amount : tx.original_amount;
 

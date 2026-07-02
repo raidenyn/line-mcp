@@ -225,6 +225,18 @@ describe('summarize', () => {
     const result = summarize(mixed, 'month');
     expect(result.currency).toBe('mixed');
   });
+
+  it('groups by category', () => {
+    const categorized = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', category: 'Food', rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', category: 'Transport', rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'THB', rawText: '' },
+    ];
+    const result = summarize(categorized, 'category');
+    expect(result.by_group['Food'].debit).toBe(100);
+    expect(result.by_group['Transport'].debit).toBe(200);
+    expect(result.by_group['uncategorized'].debit).toBe(50);
+  });
 });
 
 describe('applyBalanceDiffs', () => {
