@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import type { Message } from './line-client';
 
 export function parseExportHeader(text: string): string {
+  // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)
   const firstLine = text.replace(/^﻿/, '').split('\n')[0] ?? '';
   const match = firstLine.match(/^Chat history with (.+)$/);
   if (!match) throw new Error('File does not appear to be a LINE chat export.');
@@ -66,6 +67,7 @@ interface Pending {
 }
 
 export function parseExportFile(text: string, chatMid: string, timezone: string): Message[] {
+  // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)
   const lines = text.replace(/^﻿/, '').split('\n');
   const messages: Message[] = [];
   let currentDate: { year: number; month: number; day: number } | null = null;
