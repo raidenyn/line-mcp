@@ -7,6 +7,14 @@ export const TransactionTemplateSchema = z.object({
 });
 export type TransactionTemplate = z.infer<typeof TransactionTemplateSchema>;
 
+export const CategorySchema = z.object({
+  name: z.string().min(1).describe('Unique category name, e.g. "Groceries"'),
+  pattern: z.string().describe(
+    'JS regex tested against merchant (falls back to rawText if merchant is absent). Compiled case-insensitively.'
+  ),
+});
+export type Category = z.infer<typeof CategorySchema>;
+
 export const TransactionSchema = z.object({
   id: z.string(),
   date: z.string(),
@@ -17,6 +25,7 @@ export const TransactionSchema = z.object({
   account: z.string().optional(),
   merchant: z.string().optional(),
   balance: z.number().optional(),
+  category: z.string().optional(),
   rawText: z.string(),
 });
 export type Transaction = z.infer<typeof TransactionSchema>;
@@ -30,20 +39,22 @@ function parseNumeric(str: string): number {
 const NESTED_QUANTIFIER_RE = /\([^)]*[+*][^)]*\)[+*]/;
 
 const regexCache = new Map<string, RegExp | null>();
-function getRegex(pattern: string): RegExp | null {
-  if (!regexCache.has(pattern)) {
+function getRegex(pattern: string, flags: string = 's'): RegExp | null {
+  const cacheKey = `${flags}:${pattern}`;
+  if (!regexCache.has(cacheKey)) {
     try {
       if (NESTED_QUANTIFIER_RE.test(pattern)) {
-        regexCache.set(pattern, null);
+        regexCache.set(cacheKey, null);
       } else {
         // 's' flag: dot matches newlines — needed for bilingual messages (Thai + English in one blob)
-        regexCache.set(pattern, new RegExp(pattern, 's'));
+        // 'i' flag (categories only): case-insensitive merchant matching
+        regexCache.set(cacheKey, new RegExp(pattern, flags));
       }
     } catch {
-      regexCache.set(pattern, null);
+      regexCache.set(cacheKey, null);
     }
   }
-  return regexCache.get(pattern)!;
+  return regexCache.get(cacheKey)!;
 }
 
 function parseDate(captured: string | undefined, format: string | undefined, fallbackMs: string): string {
@@ -160,7 +171,7 @@ export interface SummaryOutput {
 
 export function summarize(
   transactions: Transaction[],
-  groupBy: 'month' | 'merchant',
+  groupBy: 'month' | 'merchant' | 'category',
   since?: string,
   until?: string,
 ): SummaryOutput {
@@ -178,7 +189,9 @@ export function summarize(
     const key =
       groupBy === 'month'
         ? tx.date.slice(0, 7) // "YYYY-MM"
-        : (tx.merchant ?? 'unknown');
+        : groupBy === 'merchant'
+        ? (tx.merchant ?? 'unknown')
+        : (tx.category ?? 'uncategorized');
 
     const effectiveAmount = tx.amount !== undefined ? tx.amount : tx.original_amount;
 
@@ -246,5 +259,20 @@ export function applyBalanceDiffs(transactions: Transaction[]): void {
       }
       if (tx.balance !== undefined) prevBalance = tx.balance;
     }
+  }
+}
+
+export function categorize(transactions: Transaction[], categories: Category[]): void {
+  for (const tx of transactions) {
+    const text = tx.merchant ?? tx.rawText;
+    let matchedName: string | undefined;
+    for (const cat of categories) {
+      const regex = getRegex(cat.pattern, 'is');
+      if (regex && regex.test(text)) {
+        matchedName = cat.name;
+        break;
+      }
+    }
+    tx.category = matchedName ?? 'uncategorized';
   }
 }

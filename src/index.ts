@@ -10,7 +10,8 @@ import { LineClient, AuthData } from './line-client';
 import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
-import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, TransactionTemplateSchema, Transaction } from './transaction-parser';
+import { CategoryStore } from './category-store';
+import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
@@ -32,6 +33,7 @@ const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
 const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
 let sharedCache: MessageCache;
+let categoryStore: CategoryStore;
 
 async function readGuideFile(relPath: string, uri: string) {
   try {
@@ -77,6 +79,12 @@ server.registerResource(
   'line://guide/tools/manage_templates',
   { description: 'When to use manage_templates, capture group requirements, time-bounded templates', mimeType: 'text/markdown' },
   (_uri) => readGuideFile('docs/guide/tools/manage_templates.md', 'line://guide/tools/manage_templates'),
+);
+server.registerResource(
+  'guide-manage_categories',
+  'line://guide/tools/manage_categories',
+  { description: 'When to use manage_categories, pattern matching rules, global scope vs per-chat templates', mimeType: 'text/markdown' },
+  (_uri) => readGuideFile('docs/guide/tools/manage_categories.md', 'line://guide/tools/manage_categories'),
 );
 server.registerResource(
   'guide-get_transactions',
@@ -381,6 +389,66 @@ server.registerTool(
 );
 
 server.registerTool(
+  'manage_categories',
+  {
+    description:
+      'Create, update, delete, or list global spending categories used to automatically tag transactions. ' +
+      'Categories apply across all chats — unlike templates, which are chat-specific. ' +
+      "Each category has a regex `pattern` matched against a transaction's merchant (falling back to its raw message text when no merchant was captured). " +
+      'Patterns are tried in the order categories were created; the first match wins. ' +
+      'get_transactions and summarize_transactions apply categorization automatically — no need to call this before every use, only when adding or changing categories.',
+    inputSchema: {
+      action: z.enum(['upsert', 'delete', 'list']).describe(
+        '"upsert" — save or replace a category by name. "delete" — remove a named category. "list" — return all saved categories in match order.'
+      ),
+      category: CategorySchema.optional().describe(
+        'Required for action: upsert. `pattern` is a JS regex matched case-insensitively against merchant (or rawText when merchant is absent). No named capture groups needed — this is a plain match test.'
+      ),
+      name: z.string().optional().describe('Category name to remove (required for action: delete)'),
+    },
+  },
+  async ({ action, category, name }) => {
+    if (action === 'upsert') {
+      if (!category) {
+        return { content: [{ type: 'text' as const, text: 'category is required for action: upsert' }], isError: true };
+      }
+      try {
+        categoryStore.upsert(category);
+        return { content: [{ type: 'text' as const, text: `Category '${category.name}' saved.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to save category: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'delete') {
+      if (!name) {
+        return { content: [{ type: 'text' as const, text: 'name is required for action: delete' }], isError: true };
+      }
+      try {
+        const deleted = categoryStore.delete(name);
+        if (!deleted) {
+          return { content: [{ type: 'text' as const, text: `No category named '${name}' found.` }], isError: true };
+        }
+        return { content: [{ type: 'text' as const, text: `Category '${name}' deleted.` }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to delete category: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    // action === 'list'
+    try {
+      const categories = categoryStore.list();
+      const text = categories.length === 0
+        ? 'No categories saved.'
+        : JSON.stringify(categories, null, 2);
+      return { content: [{ type: 'text' as const, text }] };
+    } catch (err) {
+      return { content: [{ type: 'text' as const, text: `Failed to list categories: ${(err as Error).message}` }], isError: true };
+    }
+  },
+);
+
+server.registerTool(
   'sample_messages',
   {
     description:
@@ -511,6 +579,7 @@ async function fetchParsedTransactions(
   if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
   transactions.sort((a, b) => a.date.localeCompare(b.date));
   applyBalanceDiffs(transactions);
+  categorize(transactions, categoryStore.list());
 
   const rangeNote = since
     ? ''
@@ -603,7 +672,7 @@ server.registerTool(
       'When transactions span multiple currencies the totals are labelled "mixed".',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
-      group_by: z.enum(['month', 'merchant']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name'),
+      group_by: z.enum(['month', 'merchant', 'category']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name; "category" groups by assigned spending category'),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
     },
@@ -828,7 +897,10 @@ function seedTestToken(): void {
 }
 
 async function main() {
+  // Two separate connections to the same SQLite file — safe since each touches a disjoint table
+  // (messages vs categories) and better-sqlite3 is synchronous, so writes never overlap.
   sharedCache = new MessageCache(cacheDbPath());
+  categoryStore = new CategoryStore(cacheDbPath());
   startSyncLoop(sharedCache);
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const WWW_AUTH = makeWwwAuthenticate(PORT);
