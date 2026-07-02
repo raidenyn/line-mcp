@@ -112,6 +112,9 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
     try { nodeGlobal['fetch'] = wasmFetch; } catch { /* skip */ }
 
     // Load the sandbox — self-executes and registers a DOMContentLoaded listener
+    // Loaded dynamically at runtime after global fetch/window shims are installed above;
+    // cannot be a static import.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     require('./ltsm/ltsmSandbox.js');
 
     // Fire DOMContentLoaded so the sandbox wires up its "message" handler and sends LOADED
