@@ -13,6 +13,7 @@ import { MessageCache } from './message-cache';
 import { CategoryStore } from './category-store';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
+import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
@@ -234,13 +235,15 @@ server.registerTool(
       'then upsert templates here, then call get_transactions with no templates argument.',
     inputSchema: {
       chatMid: z.string().describe('Chat MID from list_chats'),
-      action: z.enum(['upsert', 'delete', 'list', 'upsert_alias', 'delete_alias', 'list_aliases']).describe(
+      action: z.enum(['upsert', 'delete', 'list', 'upsert_alias', 'delete_alias', 'list_aliases', 'list_presets', 'apply_preset']).describe(
         '"upsert" — save or replace a template by name. ' +
         '"delete" — remove a named template. ' +
         '"list" — return all saved templates for this chat (full objects, in insertion order). ' +
         '"upsert_alias" — save or replace a currency alias (e.g. alias: "บาท", canonical: "THB"). ' +
         '"delete_alias" — remove a currency alias by its alias string. ' +
-        '"list_aliases" — return all currency aliases for this chat.'
+        '"list_aliases" — return all currency aliases for this chat. ' +
+        '"list_presets" — list all available built-in bank presets (chatMid is ignored). ' +
+        '"apply_preset" — copy all templates and aliases from a named preset into this chat\'s template file.'
       ),
       template: NamedTemplateSchema.optional().describe(
         'Required for action: upsert. Pattern rules: ' +
@@ -259,9 +262,10 @@ server.registerTool(
       name: z.string().optional().describe('Template name to remove (required for action: delete)'),
       alias: z.string().optional().describe('Currency string captured by regex (required for upsert_alias and delete_alias)'),
       canonical: z.string().optional().describe('Canonical currency code to normalise to, e.g. "THB" (required for upsert_alias)'),
+      preset_name: z.string().optional().describe('Preset name to apply (required for action: apply_preset). Use list_presets to see available names.'),
     },
   },
-  async ({ chatMid, action, template, name, alias, canonical }) => {
+  async ({ chatMid, action, template, name, alias, canonical, preset_name }) => {
     if (action === 'upsert') {
       if (!template) {
         return { content: [{ type: 'text' as const, text: 'template is required for action: upsert' }], isError: true };
@@ -325,6 +329,49 @@ server.registerTool(
         return { content: [{ type: 'text' as const, text }] };
       } catch (err) {
         return { content: [{ type: 'text' as const, text: `Failed to list aliases: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'list_presets') {
+      try {
+        const presets = loadAllPresets();
+        const list = Object.entries(presets).map(([name, p]) => ({
+          name,
+          description: p.description,
+          template_count: p.templates.length,
+          currency_alias_count: Object.keys(p.currency_aliases).length,
+        }));
+        return { content: [{ type: 'text' as const, text: JSON.stringify(list, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to list presets: ${(err as Error).message}` }], isError: true };
+      }
+    }
+
+    if (action === 'apply_preset') {
+      if (!preset_name) {
+        return { content: [{ type: 'text' as const, text: 'preset_name is required for action: apply_preset' }], isError: true };
+      }
+      try {
+        const preset = getPreset(preset_name);
+        if (!preset) {
+          const available = Object.keys(loadAllPresets()).join(', ') || 'none';
+          return { content: [{ type: 'text' as const, text: `Preset '${preset_name}' not found. Available presets: ${available}` }], isError: true };
+        }
+        for (const template of preset.templates) {
+          upsertTemplate(chatMid, template);
+        }
+        for (const [alias, canonical] of Object.entries(preset.currency_aliases)) {
+          upsertAlias(chatMid, alias, canonical);
+        }
+        const aliasCount = Object.keys(preset.currency_aliases).length;
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Applied preset '${preset_name}': ${preset.templates.length} templates and ${aliasCount} aliases added/updated for chat ${chatMid}.`,
+          }],
+        };
+      } catch (err) {
+        return { content: [{ type: 'text' as const, text: `Failed to apply preset: ${(err as Error).message}` }], isError: true };
       }
     }
 
@@ -450,7 +497,24 @@ server.registerTool(
         const time = new Date(parseInt(m.createdTime, 10)).toISOString();
         return `[${time}] ${m.text}`;
       });
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+      const { templates: savedTemplates } = loadTemplates(chatMid);
+      const allPresets = loadAllPresets();
+      const presetSuggestions = detectPresets(textMessages, savedTemplates, allPresets);
+
+      let messageText = lines.join('\n');
+      if (presetSuggestions.length > 0) {
+        const hints = presetSuggestions.map(
+          (s) => `${s.matched_count} message(s) matched the '${s.preset_name}' preset but no saved template — run manage_templates with action: apply_preset, preset_name: '${s.preset_name}' to set it up.`,
+        );
+        messageText += '\n\n' + hints.join('\n');
+      }
+
+      return {
+        content: [
+          { type: 'text' as const, text: messageText },
+          { type: 'text' as const, text: JSON.stringify({ preset_suggestions: presetSuggestions }) },
+        ],
+      };
     } catch (err) {
       return {
         content: [{ type: 'text' as const, text: `Failed to sample messages: ${(err as Error).message}` }],
