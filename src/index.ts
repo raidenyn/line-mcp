@@ -833,6 +833,8 @@ function seedTestToken(): void {
 }
 
 async function main() {
+  // Two separate connections to the same SQLite file — safe since each touches a disjoint table
+  // (messages vs categories) and better-sqlite3 is synchronous, so writes never overlap.
   sharedCache = new MessageCache(cacheDbPath());
   categoryStore = new CategoryStore(cacheDbPath());
   startSyncLoop(sharedCache);
