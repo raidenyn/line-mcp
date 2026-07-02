@@ -118,7 +118,7 @@ Per `CLAUDE.md`'s maintenance rule:
 
 - `src/category-store.test.ts` (new): upsert/delete/list, order preservation across updates, unique-name constraint behavior.
 - `src/transaction-parser.test.ts`: `categorize()` — merchant match, rawText fallback when merchant absent, first-match-wins across multiple candidates, `'uncategorized'` fallback, case-insensitivity; `summarize()` with `group_by: 'category'`.
-- No e2e test changes anticipated (e2e suite exercises live LINE data; `manage_categories` CRUD is adequately covered by unit tests, matching how `manage_templates` is tested today — to be confirmed during implementation).
+- No e2e test changes: the e2e suite exercises live LINE data (chats, messages), and `manage_templates` — the closest existing analog — has no e2e coverage of its own CRUD actions either. Unit tests are sufficient for `manage_categories`.
 
 ## Files changed
 
