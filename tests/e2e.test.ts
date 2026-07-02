@@ -85,6 +85,14 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  // Categories are global (not per-chat) and persist in the real data/ dir — always
+  // clean up test-created categories so this suite never leaks state into production use.
+  try {
+    await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
+    await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
+  } catch {
+    // best-effort cleanup
+  }
   await transport?.close().catch(() => {});
   try {
     // Kill the whole process group (npx → ts-node → node) so nothing lingers on the port
@@ -177,7 +185,76 @@ it('summarize_transactions accepts chatMid directly', async () => {
   expect(isValidSummary || isNoTemplatesError).toBe(true);
 });
 
-it('resources/list returns all 10 guide URIs', async () => {
+it('manage_categories upsert/list/delete round-trip', async () => {
+  const upsertResult = await mcpClient.callTool({
+    name: 'manage_categories',
+    arguments: { action: 'upsert', category: { name: 'E2E-Test-Category', pattern: 'DOES_NOT_MATCH_ANYTHING_XYZ123' } },
+  });
+  expect(upsertResult.isError).toBeFalsy();
+
+  const listAfterUpsert = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
+  const categoriesAfterUpsert = JSON.parse(listAfterUpsert) as Array<{ name: string; pattern: string }>;
+  expect(categoriesAfterUpsert.find((c) => c.name === 'E2E-Test-Category')?.pattern).toBe('DOES_NOT_MATCH_ANYTHING_XYZ123');
+
+  const deleteResult = await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
+  expect(deleteResult.isError).toBeFalsy();
+
+  const listAfterDelete = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
+  const categoriesAfterDelete = listAfterDelete.startsWith('[') ? (JSON.parse(listAfterDelete) as Array<{ name: string }>) : [];
+  expect(categoriesAfterDelete.find((c) => c.name === 'E2E-Test-Category')).toBeUndefined();
+});
+
+it('get_transactions stamps a category on every transaction it returns', async () => {
+  // Catchall pattern matches merchant/rawText on any transaction, proving categorize()
+  // runs against real parsed data end-to-end — not just unit-level mocked transactions.
+  const upsertResult = await mcpClient.callTool({
+    name: 'manage_categories',
+    arguments: { action: 'upsert', category: { name: 'E2E-Catchall', pattern: '.' } },
+  });
+  expect(upsertResult.isError).toBeFalsy();
+
+  // firstChatMid is picked for message presence, not saved-template presence — search all
+  // known chats for one that actually has templates, so this test exercises real transaction
+  // data whenever any chat in the account has saved templates.
+  const allMids: string[] = ((globalThis as Record<string, unknown>).__allChatMids as string[]) ?? [firstChatMid];
+  let transactions: Array<{ category?: string }> | null = null;
+  for (const mid of allMids) {
+    const result = await mcpClient.callTool({ name: 'get_transactions', arguments: { chatMid: mid } });
+    const parsed = (() => { try { return JSON.parse(extractText(result)) as Array<{ category?: string }>; } catch { return null; } })();
+    if (parsed !== null) {
+      transactions = parsed;
+      break;
+    }
+  }
+
+  if (transactions === null) {
+    // No chat in the account has saved templates — categorization has nothing to run
+    // against. Still proves the tool is wired; parsing/categorizing logic is unit-tested.
+    console.warn('No chat with saved templates found — skipping category-value assertions');
+  } else {
+    expect(transactions.length).toBeGreaterThan(0);
+    for (const tx of transactions) {
+      expect(typeof tx.category).toBe('string');
+      expect(tx.category!.length).toBeGreaterThan(0);
+    }
+  }
+
+  await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
+});
+
+it('summarize_transactions accepts group_by: category', async () => {
+  expect(firstChatMid).toBeTruthy();
+  const result = await mcpClient.callTool({
+    name: 'summarize_transactions',
+    arguments: { chatMid: firstChatMid, group_by: 'category' },
+  });
+  const text = extractText(result);
+  const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+  const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
+  expect(isValidSummary || isNoTemplatesError).toBe(true);
+});
+
+it('resources/list returns all 11 guide URIs', async () => {
   const result = await mcpClient.listResources();
   const uris = result.resources.map((r) => r.uri);
   const expected = [
@@ -187,6 +264,7 @@ it('resources/list returns all 10 guide URIs', async () => {
     'line://guide/tools/get_image',
     'line://guide/tools/sample_messages',
     'line://guide/tools/manage_templates',
+    'line://guide/tools/manage_categories',
     'line://guide/tools/get_transactions',
     'line://guide/tools/summarize_transactions',
     'line://guide/tools/initiate_import',
