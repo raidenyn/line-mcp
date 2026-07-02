@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, Transaction } from './transaction-parser';
+import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, categorize, Transaction, Category } from './transaction-parser';
 
 const UOB_DEBIT_MSG = {
   id: 'm1',
@@ -319,6 +319,64 @@ describe('applyBalanceDiffs', () => {
     applyBalanceDiffs(txs);
     expect(txs[1].currency).toBeUndefined(); // explicit amount — not touched by diff pass
     expect(txs[2].currency).toBe('THB'); // balance-derived — stamped
+  });
+});
+
+describe('categorize', () => {
+  function tx(overrides: Partial<Transaction>): Transaction {
+    return {
+      id: 'm1',
+      date: '2026-06-01T00:00:00.000Z',
+      original_amount: -100,
+      original_currency: 'THB',
+      rawText: 'Spent at Starbucks',
+      ...overrides,
+    };
+  }
+
+  it('matches against the merchant field', () => {
+    const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
+    const txs = [tx({ merchant: 'Starbucks Siam' })];
+    categorize(txs, categories);
+    expect(txs[0].category).toBe('Coffee');
+  });
+
+  it('falls back to rawText when merchant is absent', () => {
+    const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
+    const txs = [tx({ rawText: 'You spent THB 120 at Starbucks Siam' })];
+    expect(txs[0].merchant).toBeUndefined();
+    categorize(txs, categories);
+    expect(txs[0].category).toBe('Coffee');
+  });
+
+  it('picks the first matching category in list order', () => {
+    const categories: Category[] = [
+      { name: 'Food', pattern: 'starbucks' },
+      { name: 'Coffee', pattern: 'starbucks' },
+    ];
+    const txs = [tx({ merchant: 'Starbucks Siam' })];
+    categorize(txs, categories);
+    expect(txs[0].category).toBe('Food');
+  });
+
+  it('sets uncategorized when no category matches', () => {
+    const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
+    const txs = [tx({ merchant: 'Grab' })];
+    categorize(txs, categories);
+    expect(txs[0].category).toBe('uncategorized');
+  });
+
+  it('sets uncategorized when no categories are configured', () => {
+    const txs = [tx({ merchant: 'Grab' })];
+    categorize(txs, []);
+    expect(txs[0].category).toBe('uncategorized');
+  });
+
+  it('matches case-insensitively', () => {
+    const categories: Category[] = [{ name: 'Coffee', pattern: 'STARBUCKS' }];
+    const txs = [tx({ merchant: 'starbucks siam' })];
+    categorize(txs, categories);
+    expect(txs[0].category).toBe('Coffee');
   });
 });
 

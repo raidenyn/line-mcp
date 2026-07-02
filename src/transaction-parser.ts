@@ -7,6 +7,14 @@ export const TransactionTemplateSchema = z.object({
 });
 export type TransactionTemplate = z.infer<typeof TransactionTemplateSchema>;
 
+export const CategorySchema = z.object({
+  name: z.string().min(1).describe('Unique category name, e.g. "Groceries"'),
+  pattern: z.string().describe(
+    'JS regex tested against merchant (falls back to rawText if merchant is absent). Compiled case-insensitively.'
+  ),
+});
+export type Category = z.infer<typeof CategorySchema>;
+
 export const TransactionSchema = z.object({
   id: z.string(),
   date: z.string(),
@@ -17,6 +25,7 @@ export const TransactionSchema = z.object({
   account: z.string().optional(),
   merchant: z.string().optional(),
   balance: z.number().optional(),
+  category: z.string().optional(),
   rawText: z.string(),
 });
 export type Transaction = z.infer<typeof TransactionSchema>;
@@ -246,5 +255,37 @@ export function applyBalanceDiffs(transactions: Transaction[]): void {
       }
       if (tx.balance !== undefined) prevBalance = tx.balance;
     }
+  }
+}
+
+const categoryRegexCache = new Map<string, RegExp | null>();
+function getCategoryRegex(pattern: string): RegExp | null {
+  if (!categoryRegexCache.has(pattern)) {
+    try {
+      if (NESTED_QUANTIFIER_RE.test(pattern)) {
+        categoryRegexCache.set(pattern, null);
+      } else {
+        // 'i' for case-insensitive merchant matching, 's' for consistency with template patterns
+        categoryRegexCache.set(pattern, new RegExp(pattern, 'is'));
+      }
+    } catch {
+      categoryRegexCache.set(pattern, null);
+    }
+  }
+  return categoryRegexCache.get(pattern)!;
+}
+
+export function categorize(transactions: Transaction[], categories: Category[]): void {
+  for (const tx of transactions) {
+    const text = tx.merchant ?? tx.rawText;
+    let matchedName: string | undefined;
+    for (const cat of categories) {
+      const regex = getCategoryRegex(cat.pattern);
+      if (regex && regex.test(text)) {
+        matchedName = cat.name;
+        break;
+      }
+    }
+    tx.category = matchedName ?? 'uncategorized';
   }
 }
