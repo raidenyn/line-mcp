@@ -194,7 +194,7 @@ async function monitorLogin(sid: string): Promise<void> {
   }
 }
 
-function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redirectUri: string): string {
+function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redirectUri: string, basePath: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -225,13 +225,14 @@ function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redire
 const sid = ${JSON.stringify(sid)};
 const state = ${JSON.stringify(state)};
 const redirectUri = ${JSON.stringify(redirectUri)};
+const basePath = ${JSON.stringify(basePath)};
 const status = document.getElementById('status');
 const pinBox = document.getElementById('pin-box');
 const pinEl = document.getElementById('pin');
 
 async function poll() {
   try {
-    const res = await fetch('/authorize/poll?sid=' + encodeURIComponent(sid));
+    const res = await fetch(basePath + '/authorize/poll?sid=' + encodeURIComponent(sid));
     const data = await res.json();
     if (data.phase === 'qr') {
       status.textContent = 'Scan the QR code below with your LINE mobile app';
@@ -260,10 +261,10 @@ poll();
 </html>`;
 }
 
-export function setupOAuthRoutes(app: Express, port: number): void {
-  const base = `http://localhost:${port}`;
+export function setupOAuthRoutes(app: Express, port: number, basePath: string): void {
+  const base = `http://localhost:${port}${basePath}`;
 
-  app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+  app.get(`/.well-known/oauth-protected-resource${basePath}`, (_req: Request, res: Response) => {
     res.json({
       resource: `${base}/mcp`,
       authorization_servers: [base],
@@ -272,7 +273,7 @@ export function setupOAuthRoutes(app: Express, port: number): void {
     });
   });
 
-  app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+  app.get(`/.well-known/oauth-authorization-server${basePath}`, (_req: Request, res: Response) => {
     res.json({
       issuer: base,
       authorization_endpoint: `${base}/authorize`,
@@ -287,7 +288,7 @@ export function setupOAuthRoutes(app: Express, port: number): void {
   });
 
   // RFC 7591 Dynamic Client Registration
-  app.post('/register', (req: Request, res: Response) => {
+  app.post(`${basePath}/register`, (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const client_id = crypto.randomBytes(16).toString('hex');
     res.status(201).json({
@@ -302,7 +303,7 @@ export function setupOAuthRoutes(app: Express, port: number): void {
     });
   });
 
-  app.get('/authorize', async (req: Request, res: Response) => {
+  app.get(`${basePath}/authorize`, async (req: Request, res: Response) => {
     const { response_type, client_id, redirect_uri, code_challenge, code_challenge_method, state } = req.query as Record<string, string>;
 
     if (response_type !== 'code' || !client_id || !redirect_uri || !code_challenge) {
@@ -339,13 +340,13 @@ export function setupOAuthRoutes(app: Express, port: number): void {
       });
 
       res.setHeader('Content-Type', 'text/html');
-      res.send(authorizePageHtml(qrDataUrl, sid, state ?? '', redirect_uri));
+      res.send(authorizePageHtml(qrDataUrl, sid, state ?? '', redirect_uri, basePath));
     } catch (err) {
       res.status(500).send(`Failed to start LINE login: ${(err as Error).message}`);
     }
   });
 
-  app.get('/authorize/poll', (req: Request, res: Response) => {
+  app.get(`${basePath}/authorize/poll`, (req: Request, res: Response) => {
     const sid = req.query.sid as string;
     const session = loginSessions.get(sid);
     if (!session) {
@@ -360,7 +361,7 @@ export function setupOAuthRoutes(app: Express, port: number): void {
     });
   });
 
-  app.post('/token', (req: Request, res: Response) => {
+  app.post(`${basePath}/token`, (req: Request, res: Response) => {
     // Accept both JSON and form-encoded per RFC 6749
     const body: Record<string, string> = typeof req.body === 'string'
       ? Object.fromEntries(new URLSearchParams(req.body))
@@ -405,7 +406,7 @@ export function setupOAuthRoutes(app: Express, port: number): void {
   });
 
   app.post(
-    '/import-upload',
+    `${basePath}/import-upload`,
     express.raw({ type: '*/*', limit: '10mb' }),
     (req: Request, res: Response) => {
       const token = typeof req.query['token'] === 'string' ? req.query['token'] : '';
@@ -445,6 +446,6 @@ export function setupOAuthRoutes(app: Express, port: number): void {
   );
 }
 
-export function makeWwwAuthenticate(port: number): string {
-  return `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource"`;
+export function makeWwwAuthenticate(port: number, basePath: string): string {
+  return `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource${basePath}"`;
 }
