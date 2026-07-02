@@ -17,6 +17,7 @@ import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
+import { normalizeBasePath } from './base-path';
 import fs from 'fs';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
@@ -727,7 +728,7 @@ server.registerTool(
     const token = crypto.randomUUID();
     pendingUploads.set(token, { mid: authData.mid, expires: Date.now() + 900_000 }); // 15 min
     const base = process.env['PUBLIC_URL']?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host')}`;
-    const uploadUrl = `${base}/import-upload?token=${token}`;
+    const uploadUrl = `${base}${normalizeBasePath(process.env.BASE_PATH)}/import-upload?token=${token}`;
     return {
       content: [{
         type: 'text' as const,
@@ -903,20 +904,21 @@ async function main() {
   categoryStore = new CategoryStore(cacheDbPath());
   startSyncLoop(sharedCache);
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
-  const WWW_AUTH = makeWwwAuthenticate(PORT);
+  const basePath = normalizeBasePath(process.env.BASE_PATH);
+  const WWW_AUTH = makeWwwAuthenticate(PORT, basePath);
   seedTestToken();
 
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  setupOAuthRoutes(app, PORT);
+  setupOAuthRoutes(app, PORT, basePath);
 
-  app.get('/', (_req, res) => {
+  app.get(`${basePath}/`, (_req, res) => {
     res.sendFile(join(__dirname, 'index.html'));
   });
 
-  app.post('/mcp', async (req, res) => {
+  app.post(`${basePath}/mcp`, async (req, res) => {
     const authHeader = req.headers.authorization ?? '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
     const authData = validateBearerToken(token);
@@ -936,13 +938,13 @@ async function main() {
     });
   });
 
-  app.get('/mcp', (_req, res) => {
+  app.get(`${basePath}/mcp`, (_req, res) => {
     res.status(405).send('Use POST /mcp');
   });
 
   app.listen(PORT, '0.0.0.0', () => {
-    process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}/mcp\n`);
-    process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}/mcp\n`);
+    process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}${basePath}/mcp\n`);
+    process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}${basePath}/mcp\n`);
   });
 }
 
