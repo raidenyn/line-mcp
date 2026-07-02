@@ -25,10 +25,10 @@ export const CategorySchema = z.object({
 export type Category = z.infer<typeof CategorySchema>;
 ```
 
-`Transaction` gains one field:
+`Transaction` gains one optional field, following the same pattern as `amount`/`currency` (populated by a post-processing pass, not by `parseTransaction` itself):
 
 ```ts
-category: z.string(), // always populated: a category name, or "uncategorized"
+category: z.string().optional(), // set by categorize(); a category name, or "uncategorized". Absent when categorize() was not run (see inline-templates path below).
 ```
 
 ## Storage: `src/category-store.ts`
@@ -96,9 +96,9 @@ categorize(transactions, categoryStore.list());
 
 Effects:
 
-- **`get_transactions`** (saved-templates path): every transaction in the JSON output now includes `"category"`.
+- **`get_transactions`** (saved-templates path): every transaction in the JSON output now includes `"category"` (guaranteed present — `categorize()` always sets it, defaulting to `"uncategorized"`).
 - **`get_transactions`** (inline-templates path, where the caller supplies `templates` directly): **not** categorized. This path bypasses `fetchParsedTransactions()` and is meant for ad-hoc template testing, consistent with it also skipping saved aliases today.
-- **`summarize_transactions`**: `group_by` extends to `z.enum(['month', 'merchant', 'category'])`. `summarize()` in `transaction-parser.ts` gets `category` as a third valid `groupBy` key selector (`tx.category`), reusing the existing debit/credit/count aggregation.
+- **`summarize_transactions`**: `group_by` extends to `z.enum(['month', 'merchant', 'category'])`. `summarize()` in `transaction-parser.ts` gets `category` as a third valid `groupBy` key selector — `tx.category ?? 'uncategorized'` (the `?? 'uncategorized'` fallback mirrors the existing `tx.merchant ?? 'unknown'` pattern for the `merchant` groupBy, and only matters if `summarize()` is called directly with transactions that were never run through `categorize()`, since the production path always categorizes first).
 
 ## Error handling
 
