@@ -100,6 +100,7 @@ export class LineClient {
 
   async waitForCompletion(): Promise<void> {
     if (this.pendingLogin) await this.pendingLogin();
+    if (this.pendingLoginError) throw this.pendingLoginError;
   }
 
   private async request<T>(
@@ -341,13 +342,27 @@ export class LineClient {
       this.loginPinResolve?.(pinCode);
       this.loginPinResolve = null;
 
-      // Long-poll until user enters PIN in LINE mobile app
+      // Long-poll until user enters PIN in LINE mobile app. LINE may return 410
+      // when the long-poll window expires without a response — retry in that case.
       process.stderr.write(`[LINE] Waiting for PIN entry...\n`);
-      await this.request(
-        '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified',
-        [{ authSessionId }],
-        { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
-      );
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await this.request(
+            '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified',
+            [{ authSessionId }],
+            { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
+          );
+          break; // confirmed
+        } catch (err) {
+          const msg = (err as Error).message ?? '';
+          // 410 = long-poll window expired but session is still alive — retry
+          if (msg.includes('HTTP 400') && msg.includes('statusCode":410')) {
+            process.stderr.write(`[LINE] checkPinCodeVerified poll expired (attempt ${attempt + 1}), retrying...\n`);
+            continue;
+          }
+          throw err;
+        }
+      }
       process.stderr.write(`[LINE] PIN confirmed\n`);
     } else {
       this.loginPinResolve?.(null);
