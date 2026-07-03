@@ -4,7 +4,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - BASE_PATH=/
+      - BASE_PATH=/line/
     volumes:
       - line-mcp-data:/data
 
