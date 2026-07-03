@@ -22,6 +22,10 @@ describe('normalizeBasePath', () => {
     expect(normalizeBasePath('/line-mcp///')).toBe('/line-mcp');
   });
 
+  it('returns empty string for an all-slash input', () => {
+    expect(normalizeBasePath('///')).toBe('');
+  });
+
   it('adds a leading slash when missing', () => {
     expect(normalizeBasePath('line-mcp')).toBe('/line-mcp');
   });
