@@ -114,12 +114,12 @@ describe('makeWwwAuthenticate', () => {
   it('includes port and resource_metadata URL', () => {
     const header = makeWwwAuthenticate(3001, '');
     expect(header).toContain('Bearer error="invalid_token"');
-    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource');
+    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/mcp');
   });
 
-  it('appends basePath after the well-known segment, not before', () => {
+  it('appends basePath after the well-known segment, not before, and mirrors the /mcp resource path', () => {
     const header = makeWwwAuthenticate(3001, '/line-mcp');
-    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/line-mcp');
+    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/line-mcp/mcp');
     expect(header).not.toContain('/line-mcp/.well-known');
   });
 });
@@ -174,7 +174,7 @@ describe('validateBearerToken', () => {
 
 describe('GET /.well-known/oauth-protected-resource', () => {
   it('returns resource and authorization_servers', async () => {
-    const { status, body } = await req(`${base}/.well-known/oauth-protected-resource`);
+    const { status, body } = await req(`${base}/.well-known/oauth-protected-resource/mcp`);
     expect(status).toBe(200);
     const b = body as Record<string, unknown>;
     expect(b.resource).toMatch(/\/mcp$/);
@@ -529,8 +529,8 @@ describe('validateBearerToken lazy load', () => {
 // ───────────────────────────────────────────────────────────
 
 describe('non-root basePath', () => {
-  it('serves protected-resource metadata at the well-known suffix location', async () => {
-    const { status, body } = await req(`${base2}/.well-known/oauth-protected-resource${BASE_PATH_2}`);
+  it('serves protected-resource metadata at the well-known suffix location mirroring /mcp', async () => {
+    const { status, body } = await req(`${base2}/.well-known/oauth-protected-resource${BASE_PATH_2}/mcp`);
     expect(status).toBe(200);
     const b = body as Record<string, unknown>;
     expect(b.resource).toBe(`${base2}${BASE_PATH_2}/mcp`);
@@ -539,6 +539,11 @@ describe('non-root basePath', () => {
 
   it('does not serve protected-resource metadata at the unprefixed well-known location', async () => {
     const { status } = await req(`${base2}/.well-known/oauth-protected-resource`);
+    expect(status).toBe(404);
+  });
+
+  it('does not serve protected-resource metadata at basePath alone, without the /mcp suffix', async () => {
+    const { status } = await req(`${base2}/.well-known/oauth-protected-resource${BASE_PATH_2}`);
     expect(status).toBe(404);
   });
 

@@ -104,7 +104,7 @@ Files are read from disk at request time via `fs.promises.readFile`. Missing fil
 
 ### Auth flow
 
-**Transport**: Streamable HTTP on `http://localhost:PORT` (default port 3000). Claude Code adds the server as an HTTP MCP connector. All routes are mounted under `BASE_PATH` (default `/`, normalized via `normalizeBasePath()` in `base-path.ts`) — the OAuth discovery routes (`/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource`) are the one exception, where `BASE_PATH` is appended *after* the well-known segment per RFC 8414 rather than prepended.
+**Transport**: Streamable HTTP on `http://localhost:PORT` (default port 3000). Claude Code adds the server as an HTTP MCP connector. All routes are mounted under `BASE_PATH` (default `/`, normalized via `normalizeBasePath()` in `base-path.ts`) — the OAuth discovery routes are the one exception, where the well-known segment is inserted *before* the path per RFC 8414/9728 rather than prepended to it: `/.well-known/oauth-authorization-server${BASE_PATH}` (AS metadata, mirrors the issuer's own path) and `/.well-known/oauth-protected-resource${BASE_PATH}/mcp` (protected-resource metadata, mirrors the full path of the `/mcp` resource it describes — not just `BASE_PATH`).
 
 **First-time setup:**
 1. Start the server: `npm start`

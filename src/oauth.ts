@@ -264,7 +264,9 @@ poll();
 export function setupOAuthRoutes(app: Express, port: number, basePath: string): void {
   const base = `http://localhost:${port}${basePath}`;
 
-  app.get(`/.well-known/oauth-protected-resource${basePath}`, (_req: Request, res: Response) => {
+  // RFC 9728 requires the well-known segment inserted before the *full* path of the
+  // protected resource itself (basePath + /mcp), not just the server's base path.
+  app.get(`/.well-known/oauth-protected-resource${basePath}/mcp`, (_req: Request, res: Response) => {
     res.json({
       resource: `${base}/mcp`,
       authorization_servers: [base],
@@ -447,5 +449,5 @@ export function setupOAuthRoutes(app: Express, port: number, basePath: string): 
 }
 
 export function makeWwwAuthenticate(port: number, basePath: string): string {
-  return `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource${basePath}"`;
+  return `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource${basePath}/mcp"`;
 }
