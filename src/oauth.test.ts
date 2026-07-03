@@ -24,7 +24,7 @@ vi.mock('./line-client', () => {
     waitForCompletion: vi.fn().mockResolvedValue(undefined),
     getCompletedAuth: vi.fn().mockReturnValue(mockAuthData),
   };
-  return { LineClient: vi.fn().mockImplementation(() => mockLineClient) };
+  return { LineClient: vi.fn().mockImplementation(function LineClient() { return mockLineClient; }) };
 });
 
 import { setupOAuthRoutes, latestAuthData, validateBearerToken, seedTestToken, makeWwwAuthenticate } from './oauth';
@@ -33,6 +33,9 @@ import { setupOAuthRoutes, latestAuthData, validateBearerToken, seedTestToken, m
 
 let server: http.Server;
 let base: string;
+let server2: http.Server;
+let base2: string;
+const BASE_PATH_2 = '/line-mcp';
 
 async function req(
   url: string,
@@ -70,13 +73,34 @@ beforeAll(async () => {
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       base = `http://127.0.0.1:${addr.port}`;
-      setupOAuthRoutes(app, addr.port);
+      setupOAuthRoutes(app, addr.port, '');
+      resolve();
+    });
+  });
+
+  const app2 = express();
+  app2.use(express.json());
+  app2.use(express.urlencoded({ extended: false }));
+
+  await new Promise<void>((resolve) => {
+    server2 = http.createServer(app2);
+    // Bind on 'localhost' (not '127.0.0.1'): setupOAuthRoutes hardcodes
+    // `http://localhost:${port}` when building issuer/resource URLs (see oauth.ts),
+    // independent of the actual request host, so base2 must match that scheme
+    // for exact-equality assertions below to hold.
+    server2.listen(0, 'localhost', () => {
+      const addr = server2.address() as { port: number };
+      base2 = `http://localhost:${addr.port}`;
+      setupOAuthRoutes(app2, addr.port, BASE_PATH_2);
       resolve();
     });
   });
 });
 
-afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+afterAll(() => Promise.all([
+  new Promise<void>((resolve) => server.close(() => resolve())),
+  new Promise<void>((resolve) => server2.close(() => resolve())),
+]));
 
 beforeEach(() => {
   latestAuthData.clear();
@@ -88,9 +112,15 @@ beforeEach(() => {
 
 describe('makeWwwAuthenticate', () => {
   it('includes port and resource_metadata URL', () => {
-    const header = makeWwwAuthenticate(3001);
+    const header = makeWwwAuthenticate(3001, '');
     expect(header).toContain('Bearer error="invalid_token"');
     expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource');
+  });
+
+  it('appends basePath after the well-known segment, not before', () => {
+    const header = makeWwwAuthenticate(3001, '/line-mcp');
+    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/line-mcp');
+    expect(header).not.toContain('/line-mcp/.well-known');
   });
 });
 
@@ -491,5 +521,85 @@ describe('validateBearerToken lazy load', () => {
     expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
     // Subsequent access hits in-memory cache (disk loaded into latestAuthData)
     expect(mod.latestAuthData.get(TEST_AUTH.mid)?.accessToken).toBe(FRESH_AUTH.accessToken);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// Non-root basePath ('/line-mcp')
+// ───────────────────────────────────────────────────────────
+
+describe('non-root basePath', () => {
+  it('serves protected-resource metadata at the well-known suffix location', async () => {
+    const { status, body } = await req(`${base2}/.well-known/oauth-protected-resource${BASE_PATH_2}`);
+    expect(status).toBe(200);
+    const b = body as Record<string, unknown>;
+    expect(b.resource).toBe(`${base2}${BASE_PATH_2}/mcp`);
+    expect(b.authorization_servers).toEqual([`${base2}${BASE_PATH_2}`]);
+  });
+
+  it('does not serve protected-resource metadata at the unprefixed well-known location', async () => {
+    const { status } = await req(`${base2}/.well-known/oauth-protected-resource`);
+    expect(status).toBe(404);
+  });
+
+  it('serves AS metadata at the well-known suffix location with prefixed endpoints', async () => {
+    const { status, body } = await req(`${base2}/.well-known/oauth-authorization-server${BASE_PATH_2}`);
+    expect(status).toBe(200);
+    const b = body as Record<string, unknown>;
+    expect(b.issuer).toBe(`${base2}${BASE_PATH_2}`);
+    expect(b.authorization_endpoint).toBe(`${base2}${BASE_PATH_2}/authorize`);
+    expect(b.token_endpoint).toBe(`${base2}${BASE_PATH_2}/token`);
+    expect(b.registration_endpoint).toBe(`${base2}${BASE_PATH_2}/register`);
+  });
+
+  it('does not mount routes at the unprefixed AS well-known location', async () => {
+    const { status } = await req(`${base2}/.well-known/oauth-authorization-server`);
+    expect(status).toBe(404);
+  });
+
+  it('serves /authorize under the prefix, not at root', async () => {
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: 'claude-code',
+      redirect_uri: 'http://localhost:8765/callback',
+      code_challenge: s256('verifier123'),
+      code_challenge_method: 'S256',
+      state: 'st',
+    });
+    const prefixed = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
+    expect(prefixed.status).not.toBe(400);
+
+    const unprefixed = await req(`${base2}/authorize?${params}`);
+    expect(unprefixed.status).toBe(404);
+  });
+
+  it('embeds the basePath in the authorize page poll script', async () => {
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: 'claude-code',
+      redirect_uri: 'http://localhost:8765/callback',
+      code_challenge: s256('verifier123'),
+      code_challenge_method: 'S256',
+      state: 'st',
+    });
+    const { body: html } = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
+    expect(html as string).toContain(`const basePath = ${JSON.stringify(BASE_PATH_2)};`);
+    expect(html as string).toContain(`fetch(basePath + '/authorize/poll?sid='`);
+  });
+
+  it('serves /token under the prefix, not at root', async () => {
+    const prefixed = await req(`${base2}${BASE_PATH_2}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'implicit' }),
+    });
+    expect(prefixed.status).toBe(400); // reaches the handler, rejected for bad grant_type
+
+    const unprefixed = await req(`${base2}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'implicit' }),
+    });
+    expect(unprefixed.status).toBe(404); // route doesn't exist at root
   });
 });

@@ -81,6 +81,8 @@ claude mcp add --transport http --scope user line http://localhost:3000/mcp
 
 Call any LINE tool in Claude — the OAuth flow will trigger automatically on first use.
 
+To run behind a reverse proxy under a URL prefix instead of at the domain root, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp` in `docker-compose.yml`) and include the same prefix in the `claude mcp add` URL (`http://localhost:3000/line-mcp/mcp`).
+
 ### Local development
 
 **Prerequisites:** Node.js 20+

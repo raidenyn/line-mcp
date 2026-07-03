@@ -205,12 +205,13 @@
 </div>
 
 <footer>
-  OAuth 2.0 metadata: <a href="/.well-known/oauth-authorization-server">/.well-known/oauth-authorization-server</a>
+  OAuth 2.0 metadata: <a id="wellknown-link" href="/.well-known/oauth-authorization-server">/.well-known/oauth-authorization-server</a>
 </footer>
 
 <script>
 (function () {
-  var mcpUrl = window.location.origin + '/mcp';
+  var basePath = window.location.pathname.replace(/\/$/, '');
+  var mcpUrl = window.location.origin + basePath + '/mcp';
 
   document.getElementById('endpoint-display').textContent = mcpUrl;
   document.getElementById('cc-cmd').textContent =
@@ -220,6 +221,11 @@
   lmsCfg.textContent = JSON.stringify({ name: 'line', transport: 'http', url: mcpUrl }, null, 2);
 
   document.getElementById('generic-url').textContent = mcpUrl;
+
+  var wellKnownPath = '/.well-known/oauth-authorization-server' + basePath;
+  var wellKnownLink = document.getElementById('wellknown-link');
+  wellKnownLink.textContent = wellKnownPath;
+  wellKnownLink.href = wellKnownPath;
 
   document.querySelectorAll('.copy-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {

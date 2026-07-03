@@ -16,6 +16,7 @@ COPY docs/guide ./docs/guide
 
 ENV PORT=3000
 ENV DATA_DIR=/data
+ENV BASE_PATH=/
 VOLUME ["/data"]
 EXPOSE 3000
 CMD ["node", "dist/index.js"]
