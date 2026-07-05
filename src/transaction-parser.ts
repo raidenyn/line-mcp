@@ -16,6 +16,21 @@ export const CategorySchema = z.object({
 });
 export type Category = z.infer<typeof CategorySchema>;
 
+export const TransactionFilterSchema = z.object({
+  categories: z.array(z.string()).min(1).optional().describe(
+    'Match if tx.category equals any of these (exact, case-sensitive; "uncategorized" is a valid value)'
+  ),
+  original_currencies: z.array(z.string()).min(1).optional().describe(
+    'Match if tx.original_currency equals any of these (case-insensitive)'
+  ),
+  merchants: z.array(z.string()).min(1).optional().describe(
+    'JS regex patterns (case-insensitive); match if any pattern tests true against merchant, falling back to rawText when merchant is absent'
+  ),
+  amount_min: z.number().optional().describe('Inclusive lower bound on abs(amount ?? original_amount)'),
+  amount_max: z.number().optional().describe('Inclusive upper bound on abs(amount ?? original_amount)'),
+});
+export type TransactionFilter = z.infer<typeof TransactionFilterSchema>;
+
 export const TransactionSchema = z.object({
   id: z.string(),
   date: z.string(),
@@ -337,4 +352,42 @@ export function categorize(transactions: Transaction[], categories: Category[]):
     }
     tx.category = matchedName ?? 'uncategorized';
   }
+}
+
+export function validateFilters(filters: TransactionFilter): string | null {
+  if (!filters.merchants) return null;
+  for (const pattern of filters.merchants) {
+    if (!getRegex(pattern, 'is')) {
+      return `Invalid merchant regex: "${pattern}"`;
+    }
+  }
+  return null;
+}
+
+export function filterTransactions(transactions: Transaction[], filters: TransactionFilter): Transaction[] {
+  return transactions.filter((tx) => {
+    if (filters.categories && !filters.categories.includes(tx.category ?? '')) {
+      return false;
+    }
+    if (filters.original_currencies) {
+      const match = filters.original_currencies.some(
+        (c) => c.toLowerCase() === tx.original_currency.toLowerCase(),
+      );
+      if (!match) return false;
+    }
+    if (filters.merchants) {
+      const text = tx.merchant ?? tx.rawText;
+      const match = filters.merchants.some((pattern) => {
+        const regex = getRegex(pattern, 'is');
+        return regex ? regex.test(text) : false;
+      });
+      if (!match) return false;
+    }
+    if (filters.amount_min !== undefined || filters.amount_max !== undefined) {
+      const effectiveAmount = Math.abs(tx.amount !== undefined ? tx.amount : tx.original_amount);
+      if (filters.amount_min !== undefined && effectiveAmount < filters.amount_min) return false;
+      if (filters.amount_max !== undefined && effectiveAmount > filters.amount_max) return false;
+    }
+    return true;
+  });
 }
