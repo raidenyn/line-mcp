@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { getHistoricalRate } from './fx-rates';
 
 export const TransactionTemplateSchema = z.object({
   pattern: z.string().describe('JS regex with named capture groups: original_amount, original_currency (required); amount, currency, merchant, date, balance, account (optional)'),
@@ -22,6 +23,8 @@ export const TransactionSchema = z.object({
   original_currency: z.string(),
   currency: z.string().optional(),
   amount: z.number().optional(),
+  amount_estimated: z.boolean().optional(),
+  amount_gap_suspected: z.boolean().optional(),
   account: z.string().optional(),
   merchant: z.string().optional(),
   balance: z.number().optional(),
@@ -229,13 +232,33 @@ export function summarize(
   };
 }
 
-export function applyBalanceDiffs(transactions: Transaction[]): void {
+type RateFetcher = (date: string, from: string, to: string) => Promise<number | null>;
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+interface FxCandidate {
+  tx: Transaction;
+  diff: number | undefined;
+  date: string;
+  from: string;
+  to: string;
+}
+
+export async function applyBalanceDiffs(
+  transactions: Transaction[],
+  rateFetcher: RateFetcher = getHistoricalRate,
+): Promise<void> {
   const groups = new Map<string, Transaction[]>();
   for (const tx of transactions) {
     const key = tx.account ?? '';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(tx);
   }
+
+  const candidates: FxCandidate[] = [];
+
   for (const group of groups.values()) {
     // Infer balance currency: the dominant original_currency in the group.
     // If two currencies tie, we cannot determine balance currency → leave undefined → 'mixed' in summarize.
@@ -251,13 +274,52 @@ export function applyBalanceDiffs(transactions: Transaction[]): void {
 
     let prevBalance: number | undefined;
     for (const tx of group) {
-      if (tx.amount === undefined && tx.balance !== undefined && prevBalance !== undefined) {
-        tx.amount = tx.balance - prevBalance;
-        if (tx.currency === undefined && balanceCurrency !== undefined) {
+      if (tx.amount === undefined && balanceCurrency !== undefined) {
+        if (tx.original_currency === balanceCurrency) {
+          // Exact — no inference needed, so no untracked gap can be absorbed into it.
+          tx.amount = tx.original_amount;
           tx.currency = balanceCurrency;
+        } else {
+          const diff =
+            tx.balance !== undefined && prevBalance !== undefined ? tx.balance - prevBalance : undefined;
+          candidates.push({ tx, diff, date: tx.date.slice(0, 10), from: tx.original_currency, to: balanceCurrency });
         }
       }
       if (tx.balance !== undefined) prevBalance = tx.balance;
+    }
+  }
+
+  if (candidates.length === 0) return;
+
+  const uniqueLookups = new Map<string, { date: string; from: string; to: string }>();
+  for (const c of candidates) {
+    const key = `${c.date}|${c.from}|${c.to}`;
+    if (!uniqueLookups.has(key)) uniqueLookups.set(key, { date: c.date, from: c.from, to: c.to });
+  }
+  const keys = [...uniqueLookups.keys()];
+  const fetched = await Promise.all(
+    keys.map((k) => {
+      const { date, from, to } = uniqueLookups.get(k)!;
+      return rateFetcher(date, from, to);
+    }),
+  );
+  const rates = new Map<string, number | null>();
+  keys.forEach((k, i) => rates.set(k, fetched[i]));
+
+  for (const c of candidates) {
+    const rate = rates.get(`${c.date}|${c.from}|${c.to}`) ?? null;
+    if (rate !== null) {
+      const amount = round2(c.tx.original_amount * rate);
+      c.tx.amount = amount;
+      c.tx.currency = c.to;
+      c.tx.amount_estimated = true;
+      if (c.diff !== undefined && Math.abs(amount) > 0) {
+        const deviation = Math.abs(Math.abs(c.diff) - Math.abs(amount)) / Math.abs(amount);
+        if (deviation > 0.15) c.tx.amount_gap_suspected = true;
+      }
+    } else if (c.diff !== undefined) {
+      c.tx.amount = c.diff;
+      c.tx.amount_estimated = true;
     }
   }
 }

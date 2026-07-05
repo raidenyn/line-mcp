@@ -240,97 +240,141 @@ describe('summarize', () => {
 });
 
 describe('applyBalanceDiffs', () => {
-  it('leaves first transaction amount undefined when no prior balance', () => {
+  it('uses original_amount directly for same-currency transactions (no diff needed, including the first transaction in a group)', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
       { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
-    expect(txs[0].amount).toBeUndefined();
+    await applyBalanceDiffs(txs);
+    expect(txs[0].amount).toBe(-100);
+    expect(txs[0].currency).toBe('THB');
+    expect(txs[0].amount_estimated).toBeUndefined();
     expect(txs[1].amount).toBe(-200);
+    expect(txs[1].currency).toBe('THB');
   });
 
-  it('does not overwrite an explicit amount', () => {
+  it('does not overwrite an explicit amount', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, balance: 10000, rawText: '' },
       { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'USD', balance: 9800, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
+    await applyBalanceDiffs(txs);
     expect(txs[0].amount).toBe(-1750);
-    expect(txs[1].amount).toBe(-200);
+    expect(txs[1].amount).toBe(-100); // same-currency passthrough (both USD), not a diff
+    expect(txs[1].currency).toBe('USD');
   });
 
-  it('skips diff when current tx has no balance; uses last known balance for later txs', () => {
+  it('leaves amount undefined when cross-currency, no prior balance, and rate lookup fails', async () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 9700, rawText: '' },
+    ];
+    const failingFetcher = async () => null;
+    await applyBalanceDiffs(txs, failingFetcher);
+    expect(txs[0].amount).toBeUndefined();
+    expect(txs[0].amount_estimated).toBeUndefined();
+  });
+
+  it('uses last known balance across a gap when computing the FX diagnostic diff', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
-      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'THB', rawText: '' },
-      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', rawText: '' }, // no balance captured
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 8250, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
-    expect(txs[1].amount).toBeUndefined();
-    expect(txs[2].amount).toBe(-200);
+    const stubFetcher = async () => 33; // 1 USD = 33 THB
+    await applyBalanceDiffs(txs, stubFetcher);
+    // API-derived amount: -50 * 33 = -1650. Diff uses last known balance (10000, from tx1,
+    // since tx2 has none): 8250 - 10000 = -1750. |1750-1650|/1650 ≈ 6% — within tolerance.
+    expect(txs[2].amount).toBe(-1650);
+    expect(txs[2].amount_estimated).toBe(true);
+    expect(txs[2].amount_gap_suspected).toBeUndefined();
   });
 
-  it('groups by account to avoid cross-account balance diffs', () => {
+  it('groups by account to avoid cross-account balance diffs', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', account: 'acc-A', balance: 10000, rawText: '' },
-      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', account: 'acc-B', balance: 5000, rawText: '' },
-      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -300, original_currency: 'THB', account: 'acc-A', balance: 9700, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'USD', account: 'acc-B', balance: 5000, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -20, original_currency: 'THB', account: 'acc-A', balance: 9700, rawText: '' },
+      { id: 'm4', date: '2026-06-04T00:00:00.000Z', original_amount: -50, original_currency: 'USD', account: 'acc-A', balance: 8050, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
-    expect(txs[0].amount).toBeUndefined();
-    expect(txs[1].amount).toBeUndefined();
-    expect(txs[2].amount).toBe(-300);
+    const stubFetcher = async () => 33;
+    await applyBalanceDiffs(txs, stubFetcher);
+    // acc-A's diff for m4 must use acc-A's own prevBalance (9700), not acc-B's (5000):
+    // 8050 - 9700 = -1650, matching the API amount (-50 * 33 = -1650) exactly — no gap flag.
+    expect(txs[3].amount).toBe(-1650);
+    expect(txs[3].amount_estimated).toBe(true);
+    expect(txs[3].amount_gap_suspected).toBeUndefined();
   });
 
-  it('groups transactions with no account together (empty-string key)', () => {
+  it('computes FX amount via the rate fetcher for a foreign spend on a domestic-currency account', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
       { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 8150, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
-    expect(txs[1].amount).toBe(-200);
-  });
-
-  it('stamps balance currency on balance-derived amounts (single currency group)', () => {
-    const txs: Transaction[] = [
-      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
-      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
-    ];
-    applyBalanceDiffs(txs);
-    expect(txs[0].currency).toBeUndefined(); // first tx: no amount computed, no stamp
+    const stubFetcher = async (date: string, from: string, to: string) => {
+      expect(date).toBe('2026-06-03');
+      expect(from).toBe('USD');
+      expect(to).toBe('THB');
+      return 33;
+    };
+    await applyBalanceDiffs(txs, stubFetcher);
     expect(txs[1].currency).toBe('THB');
+    expect(txs[2].currency).toBe('THB');
+    expect(txs[2].amount).toBe(-1650); // -50 * 33
+    expect(txs[2].amount_estimated).toBe(true);
+    expect(txs[2].amount_gap_suspected).toBeUndefined(); // diff (9800-8150=1650) matches exactly
   });
 
-  it('stamps dominant currency for mixed-original-currency group (domestic card with FX spend)', () => {
-    const txs: Transaction[] = [
-      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
-      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 9800, rawText: '' },
-      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 8200, rawText: '' },
-    ];
-    applyBalanceDiffs(txs);
-    expect(txs[1].currency).toBe('THB');
-    expect(txs[2].currency).toBe('THB'); // FX spend: amount is balance diff in THB
-  });
-
-  it('does not stamp currency when currencies tie (truly mixed account)', () => {
+  it('does not stamp currency when currencies tie (truly mixed account)', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'USD', balance: 10000, rawText: '' },
       { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'EUR', balance: 9900, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
+    await applyBalanceDiffs(txs);
     expect(txs[1].currency).toBeUndefined();
+    expect(txs[1].amount).toBeUndefined();
   });
 
-  it('does not stamp currency on transactions with an explicit amount', () => {
+  it('does not stamp currency on transactions with an explicit amount', async () => {
     const txs: Transaction[] = [
       { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 10000, rawText: '' },
       { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'USD', amount: -1750, balance: 8250, rawText: '' },
       { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -200, original_currency: 'THB', balance: 8050, rawText: '' },
     ];
-    applyBalanceDiffs(txs);
-    expect(txs[1].currency).toBeUndefined(); // explicit amount — not touched by diff pass
-    expect(txs[2].currency).toBe('THB'); // balance-derived — stamped
+    await applyBalanceDiffs(txs);
+    expect(txs[1].currency).toBeUndefined(); // explicit amount — not touched
+    expect(txs[2].currency).toBe('THB'); // same-currency passthrough
+  });
+
+  it('flags amount_gap_suspected when the balance diff disagrees with the FX-converted amount by more than 15% (mirrors the real UOB bug)', async () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 960114, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -100, original_currency: 'THB', balance: 960014, rawText: '' },
+      { id: 'm3', date: '2026-06-23T00:00:00.000Z', original_amount: -21.4, original_currency: 'USD', balance: 958014, rawText: '' },
+    ];
+    const stubFetcher = async () => 33; // published rate for the date
+    await applyBalanceDiffs(txs, stubFetcher);
+    // API-derived amount: -21.4 * 33 = -706.20 — trustworthy, independent of the balance sequence.
+    expect(txs[2].amount).toBeCloseTo(-706.2, 2);
+    expect(txs[2].amount_estimated).toBe(true);
+    // Observed diff (960014 - 958014 = 2000) is wildly off from 706.20 — an untracked balance
+    // change happened between these readings, exactly like the real bug report's evidence.
+    expect(txs[2].amount_gap_suspected).toBe(true);
+  });
+
+  it('falls back to diff-based amount when the rate fetcher returns null (API unavailable)', async () => {
+    const txs: Transaction[] = [
+      { id: 'm1', date: '2026-06-01T00:00:00.000Z', original_amount: -50, original_currency: 'THB', balance: 10000, rawText: '' },
+      { id: 'm2', date: '2026-06-02T00:00:00.000Z', original_amount: -50, original_currency: 'THB', balance: 9950, rawText: '' },
+      { id: 'm3', date: '2026-06-03T00:00:00.000Z', original_amount: -50, original_currency: 'USD', balance: 8450, rawText: '' },
+    ];
+    const failingFetcher = async () => null;
+    await applyBalanceDiffs(txs, failingFetcher);
+    expect(txs[2].amount).toBe(-1500); // 8450 - 9950, diff fallback
+    expect(txs[2].amount_estimated).toBe(true);
+    expect(txs[2].amount_gap_suspected).toBeUndefined(); // no rate to compare against, no gap-check performed
   });
 });
 
