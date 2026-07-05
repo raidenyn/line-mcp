@@ -525,6 +525,23 @@ server.registerTool(
   },
 );
 
+function buildAmountWarnings(transactions: Transaction[]): string[] {
+  const warnings: string[] = [];
+  const estimatedCount = transactions.filter((t) => t.amount_estimated).length;
+  if (estimatedCount > 0) {
+    warnings.push(
+      `${estimatedCount} transaction(s) have amount estimated via FX conversion or balance diff — may not match the bank's own applied rate/fees. See amount_estimated field.`,
+    );
+  }
+  const gapSuspectedCount = transactions.filter((t) => t.amount_gap_suspected).length;
+  if (gapSuspectedCount > 0) {
+    warnings.push(
+      `${gapSuspectedCount} transaction(s) show a balance change that doesn't reconcile with their FX-converted amount — there may be other untracked activity nearby. See amount_gap_suspected field.`,
+    );
+  }
+  return warnings;
+}
+
 async function fetchParsedTransactions(
   authData: AuthData,
   chatMid: string,
@@ -579,7 +596,8 @@ async function fetchParsedTransactions(
   if (since) transactions = transactions.filter((tx) => tx.date >= since);
   if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
   transactions.sort((a, b) => a.date.localeCompare(b.date));
-  applyBalanceDiffs(transactions);
+  await applyBalanceDiffs(transactions);
+  warnings.push(...buildAmountWarnings(transactions));
   categorize(transactions, categoryStore.list());
 
   const rangeNote = since
@@ -632,9 +650,11 @@ server.registerTool(
         if (since) transactions = transactions.filter((tx) => tx.date >= since);
         if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
         transactions.sort((a, b) => a.date.localeCompare(b.date));
-        applyBalanceDiffs(transactions);
+        await applyBalanceDiffs(transactions);
+        const inlineWarnings = buildAmountWarnings(transactions);
+        const warningBlock = inlineWarnings.length > 0 ? '\n\nWarnings:\n' + inlineWarnings.join('\n') : '';
         const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
-        return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + rangeNote }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock + rangeNote }] };
       }
 
       // Saved-templates path — delegate to helper
