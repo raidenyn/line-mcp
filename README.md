@@ -11,8 +11,8 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 | `get_image` | Download and return an image from a message |
 | `sample_messages` | Fetch raw text messages with timestamps; accepts optional `since`/`until` for historical ranges — use before writing regex templates |
 | `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `data/templates/`) |
-| `get_transactions` | Parse bank notifications into structured transactions; paginates the full history when `since` is given; auto-loads saved templates |
-| `summarize_transactions` | Aggregate transactions into totals grouped by month or merchant |
+| `get_transactions` | Parse bank notifications into structured transactions; paginates the full history when `since` is given; auto-loads saved templates; supports filtering by category, currency, merchant regex, and amount range |
+| `summarize_transactions` | Aggregate transactions into totals grouped by month, merchant, or category; supports the same filters as `get_transactions` |
 
 ### Transaction tools
 
@@ -53,6 +53,8 @@ Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that 
 > **Tip:** Use `\\s+` instead of a literal space throughout patterns. LINE bank messages frequently contain non-breaking spaces (U+00A0) that look identical but break literal-space matches.
 
 > **Tip:** Pass `since` to `get_transactions` (e.g. `since: "2026-05-01"`) to fetch the complete history for a month. Without `since`, only the latest 200 messages are checked.
+
+> **Tip:** Narrow results with filters instead of fetching everything and filtering client-side. Example — dining spend over 500 THB in June: `get_transactions({ chatMid, since: "2026-06-01", until: "2026-06-30", categories: ["Dining"], amount_min: 500 })`. Filter types combine with AND; multiple values within one type (e.g. `categories: ["Dining", "Coffee"]`) combine with OR.
 
 When a bank changes its message format, save a new template with an appropriate `valid_from` date — no code changes needed.
 
