@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, categorize, Transaction, Category } from './transaction-parser';
+import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, categorize, Transaction, Category, filterTransactions, validateFilters, TransactionFilter } from './transaction-parser';
 
 const UOB_DEBIT_MSG = {
   id: 'm1',
@@ -433,6 +433,149 @@ describe('categorize', () => {
     const txs = [tx({ merchant: 'starbucks siam' })];
     categorize(txs, categories);
     expect(txs[0].category).toBe('Coffee');
+  });
+});
+
+describe('validateFilters', () => {
+  it('returns null when merchants is absent', () => {
+    const filters: TransactionFilter = {};
+    expect(validateFilters(filters)).toBeNull();
+  });
+
+  it('returns null when all merchant patterns compile', () => {
+    expect(validateFilters({ merchants: ['starbucks', 'grab.*'] })).toBeNull();
+  });
+
+  it('returns an error naming the bad pattern', () => {
+    const err = validateFilters({ merchants: ['starbucks', '(unclosed'] });
+    expect(err).not.toBeNull();
+    expect(err).toContain('(unclosed');
+  });
+
+  it('rejects a pattern with catastrophic-backtracking risk', () => {
+    const err = validateFilters({ merchants: ['(\\w+\\s*)+'] });
+    expect(err).not.toBeNull();
+  });
+});
+
+describe('filterTransactions', () => {
+  function tx(overrides: Partial<Transaction>): Transaction {
+    return {
+      id: 'm1',
+      date: '2026-06-01T00:00:00.000Z',
+      original_amount: -100,
+      original_currency: 'THB',
+      rawText: 'Spent at Starbucks',
+      ...overrides,
+    };
+  }
+
+  it('returns all transactions when no filters are given', () => {
+    const txs = [tx({}), tx({ id: 'm2' })];
+    expect(filterTransactions(txs, {})).toHaveLength(2);
+  });
+
+  it('filters by a single category', () => {
+    const txs = [tx({ category: 'Coffee' }), tx({ id: 'm2', category: 'Transport' })];
+    const result = filterTransactions(txs, { categories: ['Coffee'] });
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe('Coffee');
+  });
+
+  it('ORs multiple categories', () => {
+    const txs = [
+      tx({ id: 'm1', category: 'Coffee' }),
+      tx({ id: 'm2', category: 'Transport' }),
+      tx({ id: 'm3', category: 'Dining' }),
+    ];
+    const result = filterTransactions(txs, { categories: ['Coffee', 'Dining'] });
+    expect(result.map((t) => t.id)).toEqual(['m1', 'm3']);
+  });
+
+  it('matches the literal "uncategorized" category', () => {
+    const txs = [tx({ category: 'uncategorized' }), tx({ id: 'm2', category: 'Coffee' })];
+    const result = filterTransactions(txs, { categories: ['uncategorized'] });
+    expect(result).toHaveLength(1);
+    expect(result[0].category).toBe('uncategorized');
+  });
+
+  it('category match is case-sensitive', () => {
+    const txs = [tx({ category: 'Coffee' })];
+    expect(filterTransactions(txs, { categories: ['coffee'] })).toHaveLength(0);
+  });
+
+  it('filters by original_currencies case-insensitively', () => {
+    const txs = [
+      tx({ id: 'm1', original_currency: 'USD' }),
+      tx({ id: 'm2', original_currency: 'THB' }),
+    ];
+    const result = filterTransactions(txs, { original_currencies: ['usd'] });
+    expect(result.map((t) => t.id)).toEqual(['m1']);
+  });
+
+  it('filters by merchant regex against the merchant field', () => {
+    const txs = [
+      tx({ id: 'm1', merchant: 'Starbucks Siam' }),
+      tx({ id: 'm2', merchant: 'Grab' }),
+    ];
+    const result = filterTransactions(txs, { merchants: ['starbucks'] });
+    expect(result.map((t) => t.id)).toEqual(['m1']);
+  });
+
+  it('merchant filter falls back to rawText when merchant is absent', () => {
+    const txs = [tx({ rawText: 'You spent THB 120 at Starbucks Siam' })];
+    expect(txs[0].merchant).toBeUndefined();
+    const result = filterTransactions(txs, { merchants: ['starbucks'] });
+    expect(result).toHaveLength(1);
+  });
+
+  it('ORs multiple merchant patterns', () => {
+    const txs = [
+      tx({ id: 'm1', merchant: 'Starbucks Siam' }),
+      tx({ id: 'm2', merchant: 'Grab' }),
+      tx({ id: 'm3', merchant: 'Netflix' }),
+    ];
+    const result = filterTransactions(txs, { merchants: ['starbucks', 'grab'] });
+    expect(result.map((t) => t.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('filters by amount range using absolute value, matching debits and credits alike', () => {
+    const txs = [
+      tx({ id: 'm1', amount: -500 }),
+      tx({ id: 'm2', amount: 500 }),
+      tx({ id: 'm3', amount: -50 }),
+      tx({ id: 'm4', amount: 5000 }),
+    ];
+    const result = filterTransactions(txs, { amount_min: 100, amount_max: 1000 });
+    expect(result.map((t) => t.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('falls back to original_amount when amount is absent', () => {
+    const txs = [tx({ original_amount: -300, amount: undefined })];
+    const result = filterTransactions(txs, { amount_min: 200, amount_max: 400 });
+    expect(result).toHaveLength(1);
+  });
+
+  it('amount_min alone means "at least"', () => {
+    const txs = [tx({ id: 'm1', amount: -50 }), tx({ id: 'm2', amount: -500 })];
+    const result = filterTransactions(txs, { amount_min: 100 });
+    expect(result.map((t) => t.id)).toEqual(['m2']);
+  });
+
+  it('amount_max alone means "at most"', () => {
+    const txs = [tx({ id: 'm1', amount: -50 }), tx({ id: 'm2', amount: -500 })];
+    const result = filterTransactions(txs, { amount_max: 100 });
+    expect(result.map((t) => t.id)).toEqual(['m1']);
+  });
+
+  it('ANDs across filter types', () => {
+    const txs = [
+      tx({ id: 'm1', category: 'Coffee', original_currency: 'THB', amount: -100 }),
+      tx({ id: 'm2', category: 'Coffee', original_currency: 'USD', amount: -100 }),
+      tx({ id: 'm3', category: 'Transport', original_currency: 'THB', amount: -100 }),
+    ];
+    const result = filterTransactions(txs, { categories: ['Coffee'], original_currencies: ['THB'] });
+    expect(result.map((t) => t.id)).toEqual(['m1']);
   });
 });
 

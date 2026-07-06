@@ -11,7 +11,7 @@ import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
 import { CategoryStore } from './category-store';
-import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction } from './transaction-parser';
+import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction, TransactionFilterSchema, TransactionFilter, validateFilters, filterTransactions } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
@@ -547,6 +547,7 @@ async function fetchParsedTransactions(
   chatMid: string,
   since?: string,
   until?: string,
+  filters: TransactionFilter = {},
 ): Promise<
   | { transactions: Transaction[]; warnings: string[]; rangeNote: string }
   | { error: string }
@@ -556,6 +557,11 @@ async function fetchParsedTransactions(
   }
   if (until && !Number.isFinite(new Date(until).getTime())) {
     return { error: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` };
+  }
+
+  const filterError = validateFilters(filters);
+  if (filterError) {
+    return { error: filterError };
   }
 
   const warnings: string[] = [];
@@ -599,6 +605,7 @@ async function fetchParsedTransactions(
   await applyBalanceDiffs(transactions);
   warnings.push(...buildAmountWarnings(transactions));
   categorize(transactions, categoryStore.list());
+  transactions = filterTransactions(transactions, filters);
 
   const rangeNote = since
     ? ''
@@ -624,9 +631,11 @@ server.registerTool(
       ),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
+      ...TransactionFilterSchema.shape,
     },
   },
-  async ({ chatMid, templates: suppliedTemplates, since, until }) => {
+  async ({ chatMid, templates: suppliedTemplates, since, until, categories, original_currencies, merchants, amount_min, amount_max }) => {
+    const filters: TransactionFilter = { categories, original_currencies, merchants, amount_min, amount_max };
     const authData = authStore.getStore();
     if (!authData) {
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
@@ -640,6 +649,10 @@ server.registerTool(
         if (until && !Number.isFinite(new Date(until).getTime())) {
           return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
         }
+        const filterError = validateFilters(filters);
+        if (filterError) {
+          return { content: [{ type: 'text' as const, text: filterError }], isError: true };
+        }
         const client = makeLineClient(authData);
         const messages = since
           ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
@@ -651,6 +664,8 @@ server.registerTool(
         if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
         transactions.sort((a, b) => a.date.localeCompare(b.date));
         await applyBalanceDiffs(transactions);
+        categorize(transactions, categoryStore.list());
+        transactions = filterTransactions(transactions, filters);
         const inlineWarnings = buildAmountWarnings(transactions);
         const warningBlock = inlineWarnings.length > 0 ? '\n\nWarnings:\n' + inlineWarnings.join('\n') : '';
         const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
@@ -658,7 +673,7 @@ server.registerTool(
       }
 
       // Saved-templates path — delegate to helper
-      const fetched = await fetchParsedTransactions(authData, chatMid, since, until);
+      const fetched = await fetchParsedTransactions(authData, chatMid, since, until, filters);
       if ('error' in fetched) {
         return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
       }
@@ -666,11 +681,14 @@ server.registerTool(
       const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
 
       if (transactions.length === 0) {
+        const filterNote = Object.values(filters).some((v) => v !== undefined)
+          ? ' Filters were applied — check category names via manage_categories (action: list), currency codes, merchant patterns, or the amount range.'
+          : '';
         return {
           content: [{
             type: 'text' as const,
             text: '0 transactions matched. Check that saved templates cover the message timestamps — ' +
-              'use manage_templates (action: list) to review validity ranges.' + warningBlock + rangeNote,
+              'use manage_templates (action: list) to review validity ranges.' + filterNote + warningBlock + rangeNote,
           }],
         };
       }
@@ -696,15 +714,17 @@ server.registerTool(
       group_by: z.enum(['month', 'merchant', 'category']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name; "category" groups by assigned spending category'),
       since: z.string().optional().describe('ISO date — exclude transactions before this date'),
       until: z.string().optional().describe('ISO date — exclude transactions after this date'),
+      ...TransactionFilterSchema.shape,
     },
   },
-  async ({ chatMid, group_by, since, until }) => {
+  async ({ chatMid, group_by, since, until, categories, original_currencies, merchants, amount_min, amount_max }) => {
+    const filters: TransactionFilter = { categories, original_currencies, merchants, amount_min, amount_max };
     const authData = authStore.getStore();
     if (!authData) {
       return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
     }
     try {
-      const fetched = await fetchParsedTransactions(authData, chatMid, since, until);
+      const fetched = await fetchParsedTransactions(authData, chatMid, since, until, filters);
       if ('error' in fetched) {
         return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
       }

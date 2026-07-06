@@ -16,6 +16,7 @@ This MCP server connects to LINE messenger and exposes tools for reading chats, 
 - **Message cache:** Every message fetched is stored in a local SQLite database (`data/cache/messages.db`). The cache persists history beyond LINE's ~2-week API window — `since` dates from months ago work without special configuration.
 - **Templates persist:** Regex templates saved with `manage_templates` are stored per-chat in `data/templates/<chatMid>.json` and loaded automatically by `get_transactions` in all future sessions. No need to re-derive patterns each session.
 - **Categories persist:** Spending categories saved with `manage_categories` are stored globally in `data/cache/messages.db` (not per-chat) and applied automatically to every transaction returned by `get_transactions` and `summarize_transactions`.
+- **Filtering:** `get_transactions` and `summarize_transactions` both accept `categories`, `original_currencies`, `merchants` (regex), `amount_min`, and `amount_max` to narrow results — different filter types AND together, multiple values within one type OR together.
 - **Auth:** On first use, Claude Code opens a browser QR page. Scan with the LINE mobile app. Tokens refresh automatically; no manual intervention is needed after initial setup.
 
 ## Per-Tool Guides
