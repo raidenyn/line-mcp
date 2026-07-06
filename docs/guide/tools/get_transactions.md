@@ -12,7 +12,7 @@
 - `until` (ISO date string): optional end bound; defaults to now
 - `categories` (array of strings, optional): keep only transactions whose `category` exactly matches one of these (case-sensitive; `"uncategorized"` is a valid value)
 - `original_currencies` (array of strings, optional): keep only transactions whose `original_currency` matches one of these (case-insensitive)
-- `merchants` (array of regex strings, optional): keep only transactions whose `merchant` (or `rawText`, if `merchant` is absent) matches any of these patterns (case-insensitive)
+- `merchants` (array of regex strings, optional): keep only transactions whose `merchant` (or `rawText`, if `merchant` is absent) matches any of these patterns (case-insensitive, dotAll)
 - `amount_min` / `amount_max` (numbers, optional): keep only transactions whose absolute amount (`amount` if present, else `original_amount`) falls within this inclusive range
 
 Filters combine with AND across the different filter types above; multiple values within one filter type combine with OR (e.g. `categories: ["Coffee", "Dining"]` matches either).
