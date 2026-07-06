@@ -603,9 +603,9 @@ async function fetchParsedTransactions(
   if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
   transactions.sort((a, b) => a.date.localeCompare(b.date));
   await applyBalanceDiffs(transactions);
-  warnings.push(...buildAmountWarnings(transactions));
   categorize(transactions, categoryStore.list());
   transactions = filterTransactions(transactions, filters);
+  warnings.push(...buildAmountWarnings(transactions));
 
   const rangeNote = since
     ? ''

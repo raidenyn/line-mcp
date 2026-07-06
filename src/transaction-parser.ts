@@ -24,7 +24,7 @@ export const TransactionFilterSchema = z.object({
     'Match if tx.original_currency equals any of these (case-insensitive)'
   ),
   merchants: z.array(z.string()).min(1).optional().describe(
-    'JS regex patterns (case-insensitive); match if any pattern tests true against merchant, falling back to rawText when merchant is absent'
+    'JS regex patterns (case-insensitive, dotAll); match if any pattern tests true against merchant, falling back to rawText when merchant is absent'
   ),
   amount_min: z.number().optional().describe('Inclusive lower bound on abs(amount ?? original_amount)'),
   amount_max: z.number().optional().describe('Inclusive upper bound on abs(amount ?? original_amount)'),
@@ -357,9 +357,11 @@ export function categorize(transactions: Transaction[], categories: Category[]):
 export function validateFilters(filters: TransactionFilter): string | null {
   if (!filters.merchants) return null;
   for (const pattern of filters.merchants) {
-    if (!getRegex(pattern, 'is')) {
-      return `Invalid merchant regex: "${pattern}"`;
+    if (getRegex(pattern, 'is')) continue;
+    if (NESTED_QUANTIFIER_RE.test(pattern)) {
+      return `Merchant regex rejected — unsafe nested quantifier (catastrophic-backtracking risk): "${pattern}"`;
     }
+    return `Invalid merchant regex: "${pattern}"`;
   }
   return null;
 }
