@@ -1,0 +1,9 @@
+node_modules
+.git
+data
+dist
+*.md
+!docs/guide/**
+.env
+.env.*
+coverage
