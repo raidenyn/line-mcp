@@ -5,8 +5,15 @@ services:
       - "3000:3000"
     environment:
       - BASE_PATH=/
+      - PORT=3000
     volumes:
       - line-mcp-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "BP=$${BASE_PATH}; while [ \"$${BP%/}\" != \"$${BP}\" ]; do BP=\"$${BP%/}\"; done; [ -n \"$${BP}\" ] && [ \"$${BP#/}\" = \"$${BP}\" ] && BP=\"/\"$${BP}; wget -qO- http://localhost:$${PORT}$${BP}/healthz || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
 volumes:
   line-mcp-data:

@@ -17,6 +17,12 @@ COPY docs/guide ./docs/guide
 ENV PORT=3000
 ENV DATA_DIR=/data
 ENV BASE_PATH=/
+RUN mkdir -p /data && chown -R node:node /data
 VOLUME ["/data"]
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD BP="$BASE_PATH"; while [ "${BP%/}" != "$BP" ]; do BP="${BP%/}"; done; [ -n "$BP" ] && [ "${BP#/}" = "$BP" ] && BP="/$BP"; wget -qO- "http://localhost:${PORT}${BP}/healthz" || exit 1
+
+USER node
 CMD ["node", "dist/index.js"]

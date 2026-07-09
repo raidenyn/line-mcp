@@ -27,24 +27,24 @@ describe('data-dir helpers', () => {
   it('secretPath is <dataDir>/secret', async () => {
     process.env.DATA_DIR = '/d';
     const { secretPath } = await import('./data-dir');
-    expect(secretPath()).toBe('/d/secret');
+    expect(secretPath()).toBe(path.join('/d', 'secret'));
   });
 
   it('authDir is <dataDir>/auth', async () => {
     process.env.DATA_DIR = '/d';
     const { authDir } = await import('./data-dir');
-    expect(authDir()).toBe('/d/auth');
+    expect(authDir()).toBe(path.join('/d', 'auth'));
   });
 
   it('templatesDir is <dataDir>/templates', async () => {
     process.env.DATA_DIR = '/d';
     const { templatesDir } = await import('./data-dir');
-    expect(templatesDir()).toBe('/d/templates');
+    expect(templatesDir()).toBe(path.join('/d', 'templates'));
   });
 
   it('cacheDbPath is <dataDir>/cache/messages.db', async () => {
     process.env.DATA_DIR = '/d';
     const { cacheDbPath } = await import('./data-dir');
-    expect(cacheDbPath()).toBe('/d/cache/messages.db');
+    expect(cacheDbPath()).toBe(path.join('/d', 'cache', 'messages.db'));
   });
 });

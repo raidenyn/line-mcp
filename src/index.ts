@@ -30,7 +30,8 @@ const CONTENT_TYPE_LABELS: Record<number, string> = {
   22: 'flex',
 };
 
-const server = new McpServer({ name: 'line-mcp', version: '1.0.0' });
+const SERVER_VERSION = '1.0.0';
+const server = new McpServer({ name: 'line-mcp', version: SERVER_VERSION });
 const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
 let sharedCache: MessageCache;
@@ -953,6 +954,10 @@ async function main() {
   app.use(express.urlencoded({ extended: false }));
 
   setupOAuthRoutes(app, PORT, basePath);
+
+  app.get(`${basePath}/healthz`, (_req, res) => {
+    res.status(200).json({ status: 'ok', version: SERVER_VERSION });
+  });
 
   app.get(`${basePath}/`, (_req, res) => {
     res.sendFile(join(__dirname, 'index.html'));
