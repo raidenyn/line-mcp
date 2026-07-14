@@ -18,6 +18,7 @@ import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
 import { normalizeBasePath } from './base-path';
+import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
 
 const CONTENT_TYPE_LABELS: Record<number, string> = {
@@ -478,8 +479,9 @@ server.registerTool(
           return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
         }
       }
+      let untilMs: number | undefined;
       if (until) {
-        const untilMs = new Date(until).getTime();
+        untilMs = parseSampleUntilBound(until);
         if (!Number.isFinite(untilMs)) {
           return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
         }
@@ -488,10 +490,7 @@ server.registerTool(
       const messages = since
         ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
         : await client.getMessages(chatMid, count);
-      const textMessages = messages
-        .filter((m) => m.contentType === 0 && m.text)
-        .filter((m) => !until || parseInt(m.createdTime, 10) <= new Date(until).getTime())
-        .sort((a, b) => parseInt(a.createdTime, 10) - parseInt(b.createdTime, 10));
+      const textMessages = filterSampleMessages(messages, untilMs);
       if (textMessages.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No text messages found.' }] };
       }
