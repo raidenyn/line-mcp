@@ -20,6 +20,13 @@ To run a single test file:
 npx vitest run tests/e2e.test.ts
 ```
 
+## Working Branches
+
+Do not create or offer Git worktrees for this project. For topic-specific
+changes, create a standalone `fix/<topic>` branch from `origin/main` and keep
+unrelated branch changes out of it. If `origin/master` is requested but absent,
+use `origin/main`.
+
 ## Architecture
 
 This is a **LINE MCP server** — an MCP (Model Context Protocol) server that exposes LINE messenger as tools to an AI assistant. It runs as an HTTP server (Streamable HTTP transport) and implements OAuth 2.0 so Claude Code handles authentication natively.
