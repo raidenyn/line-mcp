@@ -77,6 +77,21 @@ describe('syncAll', () => {
     expect(makeClient).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['incomplete', { mid: 'u123', accessToken: 'tok' }],
+    ['mismatched', { ...TEST_AUTH, mid: 'u-other' }],
+  ])('skips %s auth records through shared validation', async (_label, value) => {
+    const cache = new MessageCache(':memory:');
+    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
+    writeFileSync(join(authDir, 'u123.json'), JSON.stringify(value));
+    const makeClient = vi.fn();
+
+    await syncAll(cache, { authDir, makeClient });
+
+    expect(makeClient).not.toHaveBeenCalled();
+  });
+
   it('does nothing when cache has no previously-accessed chats', async () => {
     const cache = new MessageCache(':memory:');
     const authDir = makeAuthDir(TEST_AUTH);

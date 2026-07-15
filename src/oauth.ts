@@ -63,33 +63,113 @@ function isSafeMid(mid: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(mid);
 }
 
-export function persistAuthData(authData: AuthData): void {
-  if (!isSafeMid(authData.mid)) return;
+function maskMid(mid: string): string {
+  return isSafeMid(mid) && mid.length >= 8 ? `${mid.slice(0, 4)}...${mid.slice(-4)}` : 'unknown';
+}
+
+export interface StoredAuthRecord extends AuthData {
+  displayName?: string;
+}
+
+export function authDataFromStoredRecord(record: StoredAuthRecord): AuthData {
+  return {
+    accessToken: record.accessToken,
+    refreshToken: record.refreshToken,
+    certificate: record.certificate,
+    mid: record.mid,
+    wrappedNonce: record.wrappedNonce,
+    kdfParameter1: record.kdfParameter1,
+    kdfParameter2: record.kdfParameter2,
+  };
+}
+
+const AUTH_FIELDS: ReadonlyArray<keyof AuthData> = [
+  'accessToken',
+  'refreshToken',
+  'certificate',
+  'mid',
+  'wrappedNonce',
+  'kdfParameter1',
+  'kdfParameter2',
+];
+
+function parseStoredAuthRecord(value: unknown, expectedMid: string): StoredAuthRecord | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.mid !== expectedMid || !isSafeMid(expectedMid)) return null;
+  if (AUTH_FIELDS.some(field => typeof candidate[field] !== 'string' || candidate[field] === '')) return null;
+  if ('displayName' in candidate &&
+      (typeof candidate.displayName !== 'string' || candidate.displayName.trim() === '')) return null;
+  return candidate as unknown as StoredAuthRecord;
+}
+
+export function loadStoredAuthRecord(
+  mid: string,
+  storeDir = dataDirAuth(),
+): StoredAuthRecord | null {
+  if (!isSafeMid(mid)) return null;
   try {
-    const dir = dataDirAuth();
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
-    const filePath = path.resolve(dir, `${authData.mid}.json`);
-    fs.writeFileSync(filePath, JSON.stringify(authData, null, 2), { mode: 0o600 });
-  } catch (err) {
-    process.stderr.write(`[OAuth] Failed to persist auth for ${authData.mid}: ${err}\n`);
+    const file = path.resolve(storeDir, `${mid}.json`);
+    if (!file.startsWith(path.resolve(storeDir) + path.sep)) return null;
+    return parseStoredAuthRecord(JSON.parse(fs.readFileSync(file, 'utf8')), mid);
+  } catch {
+    return null;
+  }
+}
+
+export function listStoredAuthRecords(storeDir = dataDirAuth()): StoredAuthRecord[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(storeDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const records: StoredAuthRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const mid = entry.name.slice(0, -5);
+    const record = loadStoredAuthRecord(mid, storeDir);
+    if (record) records.push(record);
+    else process.stderr.write(`[OAuth] Ignoring invalid auth record for ${maskMid(mid)}\n`);
+  }
+  return records;
+}
+
+export function persistAuthData(
+  authData: AuthData,
+  displayName?: string,
+  storeDir = dataDirAuth(),
+): void {
+  if (!isSafeMid(authData.mid) || !parseStoredAuthRecord(authData, authData.mid)) {
+    throw new Error('Refusing to persist invalid LINE authentication data');
+  }
+  const existingName = loadStoredAuthRecord(authData.mid, storeDir)?.displayName;
+  const name = displayName?.trim() || existingName;
+  const record: StoredAuthRecord = { ...authData, ...(name ? { displayName: name } : {}) };
+  const dir = path.resolve(storeDir);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(dir, 0o700);
+  const destination = path.resolve(dir, `${authData.mid}.json`);
+  if (!destination.startsWith(dir + path.sep)) throw new Error('Unsafe auth record path');
+  const temporary = path.join(
+    dir,
+    `.${authData.mid}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
+  );
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(record, null, 2), { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, destination);
+  } catch (error) {
+    try { fs.unlinkSync(temporary); } catch { /* no temporary file to remove */ }
+    throw error;
   }
 }
 
 export function loadAuthFromDisk(mid: string): AuthData | null {
-  if (!isSafeMid(mid)) return null;
-  try {
-    const dir = dataDirAuth();
-    const file = path.resolve(dir, `${mid}.json`);
-    if (!file.startsWith(dir + path.sep)) return null;
-    const raw = fs.readFileSync(file, 'utf8');
-    const authData = JSON.parse(raw) as AuthData;
-    if (!authData.mid || authData.mid !== mid || !authData.accessToken) return null;
-    latestAuthData.set(mid, authData);
-    return authData;
-  } catch {
-    return null;
-  }
+  const record = loadStoredAuthRecord(mid);
+  if (!record) return null;
+  const authData = authDataFromStoredRecord(record);
+  latestAuthData.set(mid, authData);
+  return authData;
 }
 
 // ─── Test token bypass (e2e tests only) ──────────────────────────────────────

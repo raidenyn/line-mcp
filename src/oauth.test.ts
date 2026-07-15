@@ -7,6 +7,11 @@ import express from 'express';
 import * as http from 'http';
 import * as crypto from 'crypto';
 
+vi.mock('fs', async importOriginal => {
+  const original = await importOriginal<typeof import('fs')>();
+  return { ...original, renameSync: vi.fn(original.renameSync) };
+});
+
 // Mock LineClient so /authorize doesn't hit the real LINE API
 vi.mock('./line-client', () => {
   const mockAuthData = {
@@ -345,7 +350,7 @@ describe('POST /token', () => {
 });
 
 // ───────────────────────────────────────────────────────────
-// persistAuthData
+// stored auth records
 // ───────────────────────────────────────────────────────────
 
 const TEST_AUTH: AuthData = {
@@ -364,7 +369,7 @@ const FRESH_AUTH: AuthData = {
   refreshToken: 'fresh-refresh-token',
 };
 
-describe('persistAuthData', () => {
+describe('stored auth records', () => {
   let tmpdir: string;
   let mod: typeof import('./oauth');
 
@@ -380,91 +385,93 @@ describe('persistAuthData', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('writes AuthData to DATA_DIR/auth/{mid}.json', () => {
-    mod.persistAuthData(TEST_AUTH);
-    const filePath = path.join(tmpdir, 'auth', `${TEST_AUTH.mid}.json`);
-    expect(fs.existsSync(filePath)).toBe(true);
-    const written = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    expect(written).toEqual(TEST_AUTH);
-  });
-
-  it('creates the auth/ directory if it does not exist', () => {
+  it('atomically writes a complete record with displayName and restrictive modes', () => {
+    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
     const dir = path.join(tmpdir, 'auth');
-    expect(fs.existsSync(dir)).toBe(false);
-    mod.persistAuthData(TEST_AUTH);
-    expect(fs.existsSync(dir)).toBe(true);
+    const file = path.join(dir, `${TEST_AUTH.mid}.json`);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({
+      ...TEST_AUTH,
+      displayName: 'Personal LINE',
+    });
+    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(dir)).toEqual([`${TEST_AUTH.mid}.json`]);
   });
 
-  it('does not throw on write failure', () => {
-    // Block the auth/ subdirectory by placing a file where mkdirSync would create a dir
-    const authPath = path.join(tmpdir, 'auth');
-    fs.writeFileSync(authPath, 'blocking file');
-    // persistAuthData should catch the ENOTDIR/EEXIST error and not propagate it
-    expect(() => mod.persistAuthData(TEST_AUTH)).not.toThrow();
-  });
-
-  it('silently ignores unsafe mid values (path traversal attempt)', () => {
-    const maliciousMid = '../evil';
-    const maliciousAuth = { ...TEST_AUTH, mid: maliciousMid };
-    mod.persistAuthData(maliciousAuth);
-    // No file should be written outside the auth directory
-    expect(fs.existsSync(path.join(tmpdir, 'evil.json'))).toBe(false);
-    expect(fs.existsSync(path.join(tmpdir, '../evil.json'))).toBe(false);
-  });
-});
-
-describe('loadAuthFromDisk', () => {
-  let tmpdir: string;
-  let mod: typeof import('./oauth');
-
-  beforeEach(async () => {
-    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
-    vi.resetModules();
-    process.env.DATA_DIR = tmpdir;
-    mod = await import('./oauth');
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpdir, { recursive: true, force: true });
-    delete process.env.DATA_DIR;
-  });
-
-  it('reads AuthData from disk and populates latestAuthData', () => {
+  it('preserves an existing displayName when refreshed credentials omit it', () => {
+    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
     mod.persistAuthData(FRESH_AUTH);
+
+    expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
+      ...FRESH_AUTH,
+      displayName: 'Personal LINE',
+    });
+  });
+
+  it('throws without replacing the previous record when rename fails', () => {
+    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
+    vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+      throw new Error('rename denied');
+    });
+
+    expect(() => mod.persistAuthData(FRESH_AUTH)).toThrow('rename denied');
+    expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)?.accessToken).toBe(TEST_AUTH.accessToken);
+    expect(fs.readdirSync(path.join(tmpdir, 'auth'))).toEqual([`${TEST_AUTH.mid}.json`]);
+  });
+
+  it('lists valid legacy and named records while isolating invalid files', () => {
+    const dir = path.join(tmpdir, 'auth');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
+    fs.writeFileSync(path.join(dir, 'u-second.json'), JSON.stringify({
+      ...TEST_AUTH,
+      mid: 'u-second',
+      displayName: 'Work LINE',
+    }));
+    fs.writeFileSync(path.join(dir, 'u-corrupt.json'), '{');
+    fs.writeFileSync(path.join(dir, 'u-incomplete.json'), JSON.stringify({ mid: 'u-incomplete' }));
+    fs.writeFileSync(path.join(dir, 'u-mismatch.json'), JSON.stringify({
+      ...TEST_AUTH,
+      mid: 'u-other',
+    }));
+    fs.writeFileSync(path.join(dir, 'u-empty-name.json'), JSON.stringify({
+      ...TEST_AUTH,
+      mid: 'u-empty-name',
+      displayName: '',
+    }));
+
+    expect(mod.listStoredAuthRecords().map(record => record.mid).sort()).toEqual([
+      TEST_AUTH.mid,
+      'u-second',
+    ].sort());
+  });
+
+  it('rejects unsafe MIDs and non-string auth fields', () => {
+    expect(mod.loadStoredAuthRecord('../escape')).toBeNull();
+    const dir = path.join(tmpdir, 'auth');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'u-bad.json'), JSON.stringify({
+      ...TEST_AUTH,
+      mid: 'u-bad',
+      certificate: 42,
+    }));
+    expect(mod.loadStoredAuthRecord('u-bad')).toBeNull();
+  });
+
+  it('does not populate latestAuthData during enumeration', () => {
+    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
     mod.latestAuthData.clear();
-    const result = mod.loadAuthFromDisk(FRESH_AUTH.mid);
-    expect(result).toEqual(FRESH_AUTH);
-    expect(mod.latestAuthData.get(FRESH_AUTH.mid)).toEqual(FRESH_AUTH);
+    mod.listStoredAuthRecords();
+    expect(mod.latestAuthData.size).toBe(0);
   });
 
-  it('returns null when file does not exist', () => {
-    const result = mod.loadAuthFromDisk('u-nonexistent-mid');
-    expect(result).toBeNull();
-  });
+  it('strips selector metadata before caching LINE auth data', () => {
+    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
+    mod.latestAuthData.clear();
 
-  it('returns null and does not throw on corrupt JSON', () => {
-    const dir = path.join(tmpdir, 'auth');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), 'not-valid-json');
-    expect(() => mod.loadAuthFromDisk(TEST_AUTH.mid)).not.toThrow();
-    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toBeNull();
-  });
-
-  it('rejects unsafe mid values (path traversal attempt)', () => {
-    expect(mod.loadAuthFromDisk('../evil')).toBeNull();
-    expect(mod.loadAuthFromDisk('evil/path')).toBeNull();
-    expect(mod.loadAuthFromDisk('')).toBeNull();
-  });
-
-  it('returns null when file mid does not match requested mid', () => {
-    // Write a file for TEST_AUTH.mid but manually swap the mid inside
-    const dir = path.join(tmpdir, 'auth');
-    fs.mkdirSync(dir, { recursive: true });
-    const wrongMidAuth = { ...TEST_AUTH, mid: 'uDIFFERENTMID' };
-    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(wrongMidAuth));
-    // Requesting TEST_AUTH.mid but the file contains a different mid — should be rejected
-    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toBeNull();
-    expect(mod.latestAuthData.has(TEST_AUTH.mid)).toBe(false);
+    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toEqual(TEST_AUTH);
+    expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(TEST_AUTH);
+    expect(mod.latestAuthData.get(TEST_AUTH.mid)).not.toHaveProperty('displayName');
   });
 });
 

@@ -1,9 +1,13 @@
-import { readdirSync, readFileSync } from 'fs';
-import { join, resolve } from 'path';
 import { AuthData, LineClient } from './line-client';
+import { resolve } from 'path';
 import { MessageCache } from './message-cache';
 import { CachingLineClient } from './caching-line-client';
-import { latestAuthData, persistAuthData } from './oauth';
+import {
+  authDataFromStoredRecord,
+  latestAuthData,
+  listStoredAuthRecords,
+  persistAuthData,
+} from './oauth';
 import { authDir as getAuthDir } from './data-dir';
 
 type SyncClient = { getMessagesInRange(chatMid: string, sinceMs: number): Promise<unknown> };
@@ -24,38 +28,17 @@ export interface SyncOptions {
 }
 
 export async function syncAll(cache: MessageCache, options: SyncOptions = {}): Promise<void> {
-  const authDir = resolve(options.authDir ?? getAuthDir());
   const makeClient = options.makeClient ?? defaultMakeClient;
-
-  let files: string[];
-  try {
-    files = readdirSync(authDir).filter(f => f.endsWith('.json'));
-  } catch {
-    process.stderr.write('[sync] auth dir not found or unreadable, skipping\n');
-    return;
-  }
-
   const chatMids = cache.getDistinctChatMids();
   if (chatMids.length === 0) return;
 
-  for (const file of files) {
-    const mid = file.slice(0, -5);
-    if (!/^[A-Za-z0-9_-]+$/.test(mid)) continue;
+  const records = listStoredAuthRecords(resolve(options.authDir ?? getAuthDir()));
+  if (records.length === 0) return;
 
-    let authData: AuthData;
-    try {
-      authData = JSON.parse(readFileSync(join(authDir, file), 'utf8')) as AuthData;
-    } catch {
-      process.stderr.write(`[sync] Failed to load auth for ${mid}, skipping\n`);
-      continue;
-    }
-
-    if (!authData.mid || authData.mid !== mid || !authData.accessToken) {
-      process.stderr.write(`[sync] Invalid or incomplete auth for ${mid}, skipping\n`);
-      continue;
-    }
+  for (const record of records) {
+    const authData = authDataFromStoredRecord(record);
+    const mid = authData.mid;
     latestAuthData.set(mid, authData);
-
     const client = makeClient(authData, cache);
     let synced = 0;
     let errors = 0;
