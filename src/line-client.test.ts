@@ -8,6 +8,7 @@ vi.mock('./ltsm', () => ({
 }));
 
 import { LineClient, AuthData } from './line-client';
+import { getHmac } from './ltsm';
 
 // JWT with exp 10 days from now so refreshIfExpired never triggers
 function makeFakeJwt(expOffsetSec = 86400 * 10): string {
@@ -34,8 +35,8 @@ function apiOk(data: unknown): Response {
   });
 }
 
-function apiErr(code: number, message: string): Response {
-  return new Response(JSON.stringify({ code, message, data: null }), {
+function apiErr(code: number, message: string, data: unknown = null): Response {
+  return new Response(JSON.stringify({ code, message, data }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
@@ -649,7 +650,8 @@ describe('LineClient QR login', () => {
 
   it('uses an explicit certificate, keeps QR bootstrap unauthenticated, and skips PIN when accepted', async () => {
     const { fetchFn, calls } = makeLoginFetch(apiOk({}));
-    const client = new LineClient(null, fetchFn);
+    const client = new LineClient(baseAuth, fetchFn);
+    vi.mocked(getHmac).mockClear();
 
     await client.login('saved-cert');
     await expect(client.waitForPin()).resolves.toBeNull();
@@ -658,14 +660,15 @@ describe('LineClient QR login', () => {
     const bootstrap = calls.filter(call =>
       call.url.includes('createSession') || call.url.includes('createQrCode'));
     expect(bootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    expect(vi.mocked(getHmac).mock.calls.slice(0, 2).every(([input]) => input.accessToken === '')).toBe(true);
     const verify = calls.find(call => call.url.includes('verifyCertificate'))!;
     expect(verify.body).toEqual([{ authSessionId: 'session-1', certificate: 'saved-cert' }]);
     expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
     expect(calls.some(call => call.url.includes('checkPinCodeVerified'))).toBe(false);
   });
 
-  it('falls back to one PIN flow when LINE rejects a stale certificate', async () => {
-    const { fetchFn, calls } = makeLoginFetch(apiErr(401, 'certificate rejected'));
+  it('falls back to one PIN flow for LINE certificate rejection status', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
     const client = new LineClient(null, fetchFn);
 
     await client.login('stale-cert');
@@ -679,7 +682,7 @@ describe('LineClient QR login', () => {
 
   it('delivers a rejected-certificate PIN without writing it to stderr', async () => {
     const pinCode = '123456';
-    const { fetchFn } = makeLoginFetch(apiErr(401, 'certificate rejected'));
+    const { fetchFn } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const client = new LineClient(null, fetchFn);
 
@@ -708,6 +711,16 @@ describe('LineClient QR login', () => {
     await client.login('saved-cert');
     await client.waitForPin();
     await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on an unrelated verifyCertificate client error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(400, 'bad request'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 400');
     expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
   });
 

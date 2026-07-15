@@ -73,6 +73,7 @@ class LineApiError extends Error {
   constructor(
     readonly code: number,
     readonly path: string,
+    readonly nestedCode?: number,
   ) {
     super(`LINE API error ${code} on ${path}`);
   }
@@ -177,7 +178,10 @@ export class LineClient {
     const rawText = await response.text();
     const json = JSON.parse(rawText) as { code: number; message: string; data: T };
     if (json.code !== 0) {
-      throw new LineApiError(json.code, path);
+      const nestedCode = typeof (json.data as { code?: unknown } | null)?.code === 'number'
+        ? (json.data as { code: number }).code
+        : undefined;
+      throw new LineApiError(json.code, path, nestedCode);
     }
     return json.data;
   }
@@ -266,6 +270,8 @@ export class LineClient {
       this.loginAbortController.abort();
     }
     this.loginAbortController = new AbortController();
+    // QR bootstrap must not reuse an existing account credential.
+    this.auth = null;
 
     const { authSessionId } = await this.request<{ authSessionId: string }>(
       '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
@@ -361,10 +367,9 @@ export class LineClient {
       );
       pinRequired = false; // Certificate accepted — skip PIN
     } catch (err) {
-      const isClientRejection =
-        (err instanceof LineHttpError && err.status >= 400 && err.status < 500) ||
-        (err instanceof LineApiError && err.code >= 400 && err.code < 500);
-      if (!isClientRejection) {
+      const isCertificateRejection =
+        err instanceof LineApiError && err.code === 10051 && err.nestedCode === 2;
+      if (!isCertificateRejection) {
         throw err; // Transient network or 5xx — don't silently swallow
       }
       process.stderr.write('[LINE] verifyCertificate: certificate rejected, proceeding with PIN\n');
