@@ -6,7 +6,7 @@ const tseslint = require('typescript-eslint');
 // eslint-disable-next-line no-undef -- module is not declared as a global for this file
 module.exports = tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'package/**', 'src/ltsm/ltsmSandbox.js'],
+    ignores: ['**/dist/**', 'node_modules/**', 'package/**', 'src/ltsm/ltsmSandbox.js'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

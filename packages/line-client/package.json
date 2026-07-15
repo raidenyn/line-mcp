@@ -1,0 +1,22 @@
+{
+  "name": "@raidenyn/line-client",
+  "version": "1.0.0",
+  "description": "LINE Chrome-extension API client: QR login, message fetch, image download.",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "happy-dom": "^20.10.2"
+  }
+}

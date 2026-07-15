@@ -1,0 +1,21 @@
+{
+  // NOTE: overrides module/moduleResolution back to "nodenext"/"node16" (this flat
+  // tree's pre-existing @tsconfig/node20 settings) instead of tsconfig.base.json's
+  // "Node16"/"Node16". Under "module: Node16", `import type { Window } from 'happy-dom'`
+  // in src/ltsm.ts fails with TS1541 (happy-dom is a require()'d package without dual
+  // CJS/ESM "exports" typings, and Node16 is stricter than NodeNext about type-only
+  // imports of such packages). "nodenext" compiles it cleanly, matching current behavior.
+  // Whichever future task (issue #75) moves ltsm.ts into packages/line-client will need
+  // to resolve this the same way, or add a `with { "resolution-mode": "import" }`
+  // attribute to the import, since packages/*/tsconfig.json use tsconfig.base.json as-is.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "node16",
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts"]
+}

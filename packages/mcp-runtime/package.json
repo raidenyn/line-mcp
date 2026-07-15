@@ -1,0 +1,28 @@
+{
+  "name": "@raidenyn/mcp-runtime",
+  "version": "1.0.0",
+  "description": "Shared MCP-over-HTTP scaffolding: Express app wiring, OAuth/bearer plumbing, transport glue.",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6"
+  }
+}

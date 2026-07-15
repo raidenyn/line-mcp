@@ -2,14 +2,17 @@
   "name": "line-mcp",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/index.js",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "test": "vitest run",
-    "test:unit": "vitest run src",
-    "test:e2e": "vitest run tests",
-    "build": "tsc && cp src/index.html dist/index.html && cp -r src/ltsm dist/ltsm && cp -r src/presets dist/presets",
-    "start": "ts-node src/index.ts",
-    "lint": "eslint ."
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test:unit": "vitest run packages src tests/architecture",
+    "test:e2e": "vitest run tests/e2e.test.ts",
+    "lint": "eslint .",
+    "start": "node packages/server/dist/cli.js"
   },
   "keywords": [],
   "author": "",
@@ -22,13 +25,11 @@
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.3",
     "@types/qrcode": "^1.5.6",
-    "@types/qrcode-terminal": "^0.12.2",
     "eslint": "^10.6.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
-    "vitest": "^4.1.8",
-    "wabt": "^1.0.39"
+    "vitest": "^4.1.8"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -36,7 +37,6 @@
     "express": "^5.2.1",
     "happy-dom": "^20.10.2",
     "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0",
     "zod": "^4.4.3"
   }
 }
