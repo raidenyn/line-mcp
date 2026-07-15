@@ -738,6 +738,75 @@ describe('LineClient QR login', () => {
     expect(logs).not.toContain(remoteErrorText);
     expect(logs).toContain('[LINE] HTTP 500');
   });
+
+  it('keeps a newer QR bootstrap unauthenticated when a superseded login completes', async () => {
+    let resolveFirstPoll: (() => void) | undefined;
+    let resolveSecondSession: (() => void) | undefined;
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    let sessionCount = 0;
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) {
+        sessionCount += 1;
+        if (sessionCount === 2) {
+          return new Promise<Response>(resolve => {
+            resolveSecondSession = () => resolve(apiOk({ authSessionId: 'session-2' }));
+          });
+        }
+        return Promise.resolve(apiOk({ authSessionId: 'session-1' }));
+      }
+      if (url.includes('createQrCode')) {
+        const authSessionId = (body[0] as { authSessionId: string }).authSessionId;
+        return Promise.resolve(apiOk({
+          callbackUrl: `https://line.me/R/nv/QRLogin?sid=${authSessionId}`,
+          longPollingMaxCount: 1,
+          longPollingIntervalSec: 1,
+        }));
+      }
+      if (url.includes('checkQrCodeVerified')) {
+        return new Promise<Response>(resolve => {
+          resolveFirstPoll = () => resolve(apiOk({}));
+        });
+      }
+      if (url.includes('verifyCertificate')) return Promise.resolve(apiOk({}));
+      if (url.includes('qrCodeLoginV2')) {
+        return Promise.resolve(apiOk({
+          certificate: 'replacement-cert',
+          tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+          mid: 'u123',
+        }));
+      }
+      if (url.includes('getEncryptedIdentityV3')) return Promise.resolve(apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      }));
+      return Promise.resolve(apiOk({}));
+    });
+    const client = new LineClient(null, fetchFn);
+    vi.mocked(getHmac).mockClear();
+
+    await client.login('certificate-a');
+    const secondLogin = client.login('certificate-b');
+    await vi.waitFor(() => expect(resolveSecondSession).toBeTypeOf('function'));
+    resolveFirstPoll!();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(client.getCompletedAuth()).toBeNull();
+    resolveSecondSession!();
+    await secondLogin;
+
+    const secondBootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'),
+    ).slice(-2);
+    expect(secondBootstrap).toHaveLength(2);
+    expect(secondBootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    const secondBootstrapHmacs = vi.mocked(getHmac).mock.calls
+      .filter(([input]) => input.path.includes('createSession') || input.path.includes('createQrCode'))
+      .slice(-2);
+    expect(secondBootstrapHmacs.every(([input]) => input.accessToken === '')).toBe(true);
+  });
 });
 
 describe('LineClient profile', () => {
