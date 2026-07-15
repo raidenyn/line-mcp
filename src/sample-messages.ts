@@ -2,6 +2,10 @@ import type { Message } from './line-client';
 import { expandUntilBound } from './transaction-parser';
 
 export function parseSampleUntilBound(until: string): number {
+  const monthOnly = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(until);
+  if (monthOnly) {
+    return Date.UTC(Number(monthOnly[1]), Number(monthOnly[2]), 0, 23, 59, 59, 999);
+  }
   return new Date(expandUntilBound(until)).getTime();
 }
 

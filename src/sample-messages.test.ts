@@ -32,6 +32,14 @@ describe('sample message until bounds', () => {
     expect(result.map((item) => item.id)).toEqual(['midday', 'may-end']);
   });
 
+  it('does not include March messages for a February until bound', () => {
+    const result = filterSampleMessages([
+      message('feb-end', '2026-02-28T23:59:59.999Z'),
+      message('march', '2026-03-01T00:00:00.000Z'),
+    ], parseSampleUntilBound('2026-02'));
+    expect(result.map((item) => item.id)).toEqual(['feb-end']);
+  });
+
   it('keeps a complete ISO timestamp as an exact upper bound', () => {
     const result = filterSampleMessages(messages, parseSampleUntilBound('2026-05-31T12:00:00.000Z'));
     expect(result.map((item) => item.id)).toEqual(['midday']);
