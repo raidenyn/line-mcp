@@ -586,6 +586,25 @@ describe('GET /authorize', () => {
     expect(status).not.toBe(400);
     if (status === 400) expect(body as string).not.toContain('loopback');
   });
+
+  // Regression: non-http(s) schemes whose authority is `localhost`/`127.0.0.1`
+  // used to pass isLoopbackRedirectUri() because only the hostname was checked,
+  // never the scheme. After login the authorize page would then navigate the
+  // victim's browser to javascript:/data:/file: URIs — a reflected-XSS /
+  // token-exfiltration vector (issue #34).
+  for (const redirectUri of [
+    'javascript://localhost/evil',
+    'data://localhost',
+    'file://127.0.0.1/x',
+  ]) {
+    it(`rejects ${redirectUri.split(':')[0]}: scheme redirect_uri as non-loopback`, async () => {
+      const params = new URLSearchParams(validParams);
+      params.set('redirect_uri', redirectUri);
+      const { status, body } = await req(`${base}/authorize?${params}`);
+      expect(status).toBe(400);
+      expect(body as string).toContain('loopback');
+    });
+  }
 });
 
 // ───────────────────────────────────────────────────────────
