@@ -6,6 +6,7 @@ import {
   authDataFromStoredRecord,
   latestAuthData,
   listStoredAuthRecords,
+  maskMid,
   persistAuthData,
 } from './oauth';
 import { authDir as getAuthDir } from './data-dir';
@@ -48,12 +49,12 @@ export async function syncAll(cache: MessageCache, options: SyncOptions = {}): P
         await client.getMessagesInRange(chatMid, 0);
         synced++;
       } catch (err) {
-        process.stderr.write(`[sync] Error syncing ${chatMid} for ${mid}: ${(err as Error).message}\n`);
+        process.stderr.write(`[sync] Error syncing ${chatMid} for ${maskMid(mid)}: ${(err as Error).message}\n`);
         errors++;
       }
     }
 
-    process.stderr.write(`[sync] mid=${mid}: ${synced} chats synced, ${errors} errors\n`);
+    process.stderr.write(`[sync] mid=${maskMid(mid)}: ${synced} chats synced, ${errors} errors\n`);
   }
 }
 

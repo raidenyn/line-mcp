@@ -63,6 +63,22 @@ describe('syncAll', () => {
     expect(getMessagesInRange).toHaveBeenCalledTimes(2);
   });
 
+  it('masks account MIDs in sync logs', async () => {
+    const authData = { ...TEST_AUTH, mid: 'u1234567890test' };
+    const cache = new MessageCache(':memory:');
+    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const makeClient = vi.fn().mockReturnValue({
+      getMessagesInRange: vi.fn().mockRejectedValue(new Error('LINE API error')),
+    });
+
+    await syncAll(cache, { authDir: makeAuthDir(authData), makeClient });
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(authData.mid);
+    expect(logs).toContain('u123...test');
+  });
+
   it('skips mid if auth file contains invalid JSON', async () => {
     const cache = new MessageCache(':memory:');
     cache.upsertMessages('chat1', [msg('1', '1000')]);

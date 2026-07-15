@@ -63,7 +63,7 @@ function isSafeMid(mid: string): boolean {
   return /^[A-Za-z0-9_-]+$/.test(mid);
 }
 
-function maskMid(mid: string): string {
+export function maskMid(mid: string): string {
   return isSafeMid(mid) && mid.length >= 8 ? `${mid.slice(0, 4)}...${mid.slice(-4)}` : 'unknown';
 }
 
