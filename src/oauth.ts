@@ -6,6 +6,7 @@ import express, { type Express, type Request, type Response } from 'express';
 import { LineClient, AuthData } from './line-client';
 import { parseExportHeader } from './export-parser';
 import { secretPath, authDir as dataDirAuth } from './data-dir';
+import { getPublicOrigin } from './base-path';
 
 // ─── Signing key ──────────────────────────────────────────────────────────────
 
@@ -463,8 +464,10 @@ export function setupOAuthRoutes(
   port: number,
   basePath: string,
   authStoreDir = dataDirAuth(),
+  publicOrigin?: string,
 ): void {
-  const base = `http://localhost:${port}${basePath}`;
+  const origin = publicOrigin ?? getPublicOrigin(port);
+  const base = `${origin}${basePath}`;
 
   // RFC 9728 requires the well-known segment inserted before the *full* path of the
   // protected resource itself (basePath + /mcp), not just the server's base path.
@@ -684,6 +687,6 @@ export function setupOAuthRoutes(
   );
 }
 
-export function makeWwwAuthenticate(port: number, basePath: string): string {
-  return `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource${basePath}/mcp"`;
+export function makeWwwAuthenticate(publicOrigin: string, basePath: string): string {
+  return `Bearer error="invalid_token", resource_metadata="${publicOrigin}/.well-known/oauth-protected-resource${basePath}/mcp"`;
 }

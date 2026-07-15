@@ -17,7 +17,7 @@ import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { cacheDbPath } from './data-dir';
-import { normalizeBasePath } from './base-path';
+import { normalizeBasePath, getPublicOrigin } from './base-path';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
 
@@ -767,8 +767,8 @@ server.registerTool(
     }
     const token = crypto.randomUUID();
     pendingUploads.set(token, { mid: authData.mid, expires: Date.now() + 900_000 }); // 15 min
-    const base = process.env['PUBLIC_URL']?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host')}`;
-    const uploadUrl = `${base}${normalizeBasePath(process.env.BASE_PATH)}/import-upload?token=${token}`;
+    const origin = getPublicOrigin(parseInt(process.env.PORT ?? '3000', 10));
+    const uploadUrl = `${origin}${normalizeBasePath(process.env.BASE_PATH)}/import-upload?token=${token}`;
     return {
       content: [{
         type: 'text' as const,
@@ -942,14 +942,15 @@ async function main() {
   startSyncLoop(sharedCache);
   const PORT = parseInt(process.env.PORT ?? '3000', 10);
   const basePath = normalizeBasePath(process.env.BASE_PATH);
-  const WWW_AUTH = makeWwwAuthenticate(PORT, basePath);
+  const origin = getPublicOrigin(PORT);
+  const WWW_AUTH = makeWwwAuthenticate(origin, basePath);
   seedTestToken();
 
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  setupOAuthRoutes(app, PORT, basePath);
+  setupOAuthRoutes(app, PORT, basePath, undefined, origin);
 
   app.get(`${basePath}/healthz`, (_req, res) => {
     res.status(200).json({ status: 'ok', version: SERVER_VERSION });

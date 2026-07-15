@@ -250,13 +250,13 @@ beforeEach(async () => {
 
 describe('makeWwwAuthenticate', () => {
   it('includes port and resource_metadata URL', () => {
-    const header = makeWwwAuthenticate(3001, '');
+    const header = makeWwwAuthenticate('http://localhost:3001', '');
     expect(header).toContain('Bearer error="invalid_token"');
     expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/mcp');
   });
 
   it('appends basePath after the well-known segment, not before, and mirrors the /mcp resource path', () => {
-    const header = makeWwwAuthenticate(3001, '/line-mcp');
+    const header = makeWwwAuthenticate('http://localhost:3001', '/line-mcp');
     expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/line-mcp/mcp');
     expect(header).not.toContain('/line-mcp/.well-known');
   });
@@ -1140,5 +1140,49 @@ describe('non-root basePath', () => {
       body: JSON.stringify({ grant_type: 'implicit' }),
     });
     expect(unprefixed.status).toBe(404); // route doesn't exist at root
+  });
+});
+
+describe('well-known with PUBLIC_URL (https origin, non-root base path)', () => {
+  const ORIGINAL = process.env.PUBLIC_URL;
+  let server3: http.Server;
+  let base3: string;
+  let authStoreDir3: string;
+  const BASE_PATH_3 = '/line-mcp';
+  const ORIGIN_3 = 'https://mcp.example.test';
+
+  beforeEach(async () => {
+    authStoreDir3 = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'line-oauth-'));
+    process.env.PUBLIC_URL = ORIGIN_3;
+    const app3 = express();
+    server3 = app3.listen(0, 'localhost', () => {});
+    await new Promise<void>((r) => server3.once('listening', () => r()));
+    const a = (server3.address() as { port: number }).port;
+    base3 = `http://localhost:${a}`;
+    setupOAuthRoutes(app3, a, BASE_PATH_3, authStoreDir3);
+  });
+
+  afterEach(async () => {
+    if (ORIGINAL === undefined) delete process.env.PUBLIC_URL;
+    else process.env.PUBLIC_URL = ORIGINAL;
+    await new Promise<void>((r) => server3?.close(() => r()));
+  });
+
+  it('advertises the https public origin in AS metadata with the base path', async () => {
+    const { status, body } = await req(`${base3}/.well-known/oauth-authorization-server${BASE_PATH_3}`);
+    expect(status).toBe(200);
+    const b = body as Record<string, unknown>;
+    expect(b.issuer).toBe(`${ORIGIN_3}${BASE_PATH_3}`);
+    expect(b.authorization_endpoint).toBe(`${ORIGIN_3}${BASE_PATH_3}/authorize`);
+    expect(b.token_endpoint).toBe(`${ORIGIN_3}${BASE_PATH_3}/token`);
+    expect(b.registration_endpoint).toBe(`${ORIGIN_3}${BASE_PATH_3}/register`);
+  });
+
+  it('advertises the https public origin in the protected-resource metadata', async () => {
+    const { status, body } = await req(`${base3}/.well-known/oauth-protected-resource${BASE_PATH_3}/mcp`);
+    expect(status).toBe(200);
+    const b = body as Record<string, unknown>;
+    expect(b.resource).toBe(`${ORIGIN_3}${BASE_PATH_3}/mcp`);
+    expect((b.authorization_servers as string[])).toEqual([`${ORIGIN_3}${BASE_PATH_3}`]);
   });
 });
