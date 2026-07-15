@@ -374,6 +374,21 @@ describe('GET /authorize', () => {
     expect(__createdClients.at(-1)?.login).toHaveBeenCalledWith(sampleAuthData.certificate);
   });
 
+  it('does not expose login startup errors from authorization requests', async () => {
+    const lineModule = await import('./line-client') as unknown as {
+      LineClient: ReturnType<typeof vi.fn>;
+    };
+    lineModule.LineClient.mockImplementationOnce(function LineClient() {
+      return { login: vi.fn().mockRejectedValue(new Error('secret-token-and-full-mid')) };
+    });
+
+    const response = await req(`${base}/authorize?${validParams}`);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toBe('Failed to start LINE login; please try again.');
+    expect(response.body).not.toContain('secret-token-and-full-mid');
+  });
+
   it('renders human names and opaque choices without starting QR for multiple accounts', async () => {
     writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
     writeRouteAuth('u-work', 'Work LINE', 'work-cert');
@@ -413,6 +428,25 @@ describe('GET /authorize', () => {
       body: form,
     });
     expect(replay.status).toBe(400);
+  });
+
+  it('does not expose login startup errors from account selection', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+    const lineModule = await import('./line-client') as unknown as {
+      LineClient: ReturnType<typeof vi.fn>;
+    };
+    lineModule.LineClient.mockImplementationOnce(function LineClient() {
+      return { login: vi.fn().mockRejectedValue(new Error('secret-token-and-full-mid')) };
+    });
+
+    const response = await postSelection(selectionSession, workChoice);
+
+    expect(response.status).toBe(500);
+    expect(response.body).toBe('Failed to start LINE login; please try again.');
+    expect(response.body).not.toContain('secret-token-and-full-mid');
   });
 
   it('returns 400 for an unknown selection session', async () => {
@@ -598,6 +632,37 @@ describe('OAuth completion persistence', () => {
       expect((await waitForTerminalLogin(serverBase, sid)).phase).toBe('complete');
       expect(JSON.parse(fs.readFileSync(path.join(store, 'umid.json'), 'utf8')).displayName)
         .toBe('Existing Name');
+    });
+  });
+
+  it('does not apply a selected account name to a different completed account', async () => {
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-different-account-'));
+    fs.writeFileSync(path.join(store, 'u-selected.json'), JSON.stringify({
+      ...sampleAuthData,
+      mid: 'u-selected',
+      certificate: 'selected-cert',
+      displayName: 'Personal LINE',
+    }));
+    fs.writeFileSync(path.join(store, 'u-other.json'), JSON.stringify({
+      ...sampleAuthData,
+      mid: 'u-other',
+      certificate: 'other-cert',
+      displayName: 'Work LINE',
+    }));
+    const lineModule = await import('./line-client') as unknown as {
+      __profileLookup: ReturnType<typeof vi.fn>;
+    };
+    lineModule.__profileLookup.mockRejectedValueOnce(new Error('profile unavailable'));
+
+    await withOAuthServer(store, async serverBase => {
+      const selector = await req(`${serverBase}/authorize?${routeParams()}`);
+      const { selectionSession, personalChoice } = parseSelector(bodyAsHtml(selector));
+      const selected = await postSelection(selectionSession, personalChoice, serverBase);
+      const sid = sessionIdFromQrPage(bodyAsHtml(selected));
+
+      expect((await waitForTerminalLogin(serverBase, sid)).phase).toBe('complete');
+      expect(JSON.parse(fs.readFileSync(path.join(store, 'umid.json'), 'utf8')).displayName)
+        .toBeUndefined();
     });
   });
 });

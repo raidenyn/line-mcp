@@ -208,6 +208,7 @@ interface LoginSession {
   redirectUri: string;
   clientId: string;
   authStoreDir: string;
+  selectedMid?: string;
   previousDisplayName?: string;
   phase: 'qr' | 'pin_needed' | 'complete' | 'failed';
   pin?: string;
@@ -305,6 +306,7 @@ async function startQrLogin(
     lineClient,
     ...request,
     authStoreDir,
+    selectedMid: selected?.mid,
     previousDisplayName: selected?.displayName,
     phase: 'qr',
   });
@@ -331,7 +333,9 @@ async function monitorLogin(sid: string): Promise<void> {
     const authData = session.lineClient.getCompletedAuth();
     if (!authData) throw new Error('Login completed but no auth data returned');
 
-    let displayName = session.previousDisplayName;
+    let displayName = session.selectedMid === authData.mid
+      ? session.previousDisplayName
+      : undefined;
     try {
       displayName = await session.lineClient.getProfileDisplayName();
     } catch {
@@ -528,8 +532,9 @@ export function setupOAuthRoutes(
 
     try {
       await startQrLogin(authorizationRequest, records[0] ?? null, authStoreDir, basePath, res);
-    } catch (err) {
-      res.status(500).send(`Failed to start LINE login: ${(err as Error).message}`);
+    } catch {
+      process.stderr.write('[OAuth] Failed to start LINE login\n');
+      res.status(500).send('Failed to start LINE login; please try again.');
     }
   });
 
@@ -551,8 +556,9 @@ export function setupOAuthRoutes(
     }
     try {
       await startQrLogin(selection.request, record, authStoreDir, basePath, res);
-    } catch (err) {
-      res.status(500).send(`Failed to start LINE login: ${(err as Error).message}`);
+    } catch {
+      process.stderr.write('[OAuth] Failed to start LINE login\n');
+      res.status(500).send('Failed to start LINE login; please try again.');
     }
   });
 
