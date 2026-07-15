@@ -59,6 +59,25 @@ interface RawMessage {
   contentMetadata?: Record<string, string>;
 }
 
+class LineHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    readonly apiStatus?: number,
+  ) {
+    super(`HTTP ${status} on ${path}`);
+  }
+}
+
+class LineApiError extends Error {
+  constructor(
+    readonly code: number,
+    readonly path: string,
+  ) {
+    super(`LINE API error ${code} on ${path}`);
+  }
+}
+
 export class LineClient {
   private auth: AuthData | null = null;
   private completedAuth: AuthData | null = null;
@@ -145,13 +164,20 @@ export class LineClient {
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
-      process.stderr.write(`[LINE] HTTP ${response.status} on ${path}: ${errBody}\n`);
-      throw new Error(`HTTP ${response.status} on ${path}: ${errBody}`);
+      let apiStatus: number | undefined;
+      try {
+        const parsed = JSON.parse(errBody) as { statusCode?: unknown };
+        if (typeof parsed.statusCode === 'number') apiStatus = parsed.statusCode;
+      } catch {
+        // Non-JSON error responses have no status metadata beyond HTTP status.
+      }
+      process.stderr.write(`[LINE] HTTP ${response.status} on ${path}\n`);
+      throw new LineHttpError(response.status, path, apiStatus);
     }
     const rawText = await response.text();
     const json = JSON.parse(rawText) as { code: number; message: string; data: T };
     if (json.code !== 0) {
-      throw new Error(`LINE API error ${json.code}: ${json.message} (${path})`);
+      throw new LineApiError(json.code, path);
     }
     return json.data;
   }
@@ -290,7 +316,7 @@ export class LineClient {
       }
       this.loginPinResolve?.(null);
       this.loginPinResolve = null;
-      process.stderr.write(`completeLogin error: ${err.message}\n${err.stack}\n`);
+      process.stderr.write('[LINE] Login completion failed\n');
     });
     const loginCompletion = () => completionPromise;
     this.pendingLogin = loginCompletion;
@@ -315,9 +341,8 @@ export class LineClient {
         );
         break;
       } catch (err) {
-        const msg = (err as Error).message;
-        process.stderr.write(`[LINE] checkQrCodeVerified error: ${msg}\n`);
-        if (msg.includes('HTTP 400') || msg.includes('HTTP 403')) {
+        process.stderr.write('[LINE] checkQrCodeVerified failed\n');
+        if (err instanceof LineHttpError && (err.status === 400 || err.status === 403)) {
           // 400/403 may mean the scan already completed before our poll arrived — proceed anyway
           break;
         }
@@ -336,11 +361,13 @@ export class LineClient {
       );
       pinRequired = false; // Certificate accepted — skip PIN
     } catch (err) {
-      const msg = (err as Error).message ?? '';
-      if (!msg.includes('HTTP 4') && !msg.includes('LINE API error')) {
+      const isClientRejection =
+        (err instanceof LineHttpError && err.status >= 400 && err.status < 500) ||
+        (err instanceof LineApiError && err.code >= 400 && err.code < 500);
+      if (!isClientRejection) {
         throw err; // Transient network or 5xx — don't silently swallow
       }
-      process.stderr.write(`[LINE] verifyCertificate: certificate rejected (${msg}), proceeding with PIN\n`);
+      process.stderr.write('[LINE] verifyCertificate: certificate rejected, proceeding with PIN\n');
     }
 
     if (pinRequired) {
@@ -366,9 +393,8 @@ export class LineClient {
           );
           break; // confirmed
         } catch (err) {
-          const msg = (err as Error).message ?? '';
           // 410 = long-poll window expired but session is still alive — retry
-          if (msg.includes('HTTP 400') && msg.includes('statusCode":410')) {
+          if (err instanceof LineHttpError && err.status === 400 && err.apiStatus === 410) {
             process.stderr.write(`[LINE] checkPinCodeVerified poll expired (attempt ${attempt + 1}), retrying...\n`);
             continue;
           }

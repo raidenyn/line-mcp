@@ -41,8 +41,8 @@ function apiErr(code: number, message: string): Response {
   });
 }
 
-function httpErr(status: number): Response {
-  return new Response('error body', { status });
+function httpErr(status: number, body = 'error body'): Response {
+  return new Response(body, { status });
 }
 
 // ───────────────────────────────────────────────────────────
@@ -685,6 +685,31 @@ describe('LineClient QR login', () => {
     await client.waitForPin();
     await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
     expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate API server error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(500, 'internal server error'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('omits remote error text from login diagnostics', async () => {
+    const remoteErrorText = 'access-token-secret refresh-token-secret certificate-secret identity-secret';
+    const { fetchFn } = makeLoginFetch(httpErr(500, remoteErrorText));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(remoteErrorText);
+    expect(logs).toContain('[LINE] HTTP 500');
   });
 });
 
