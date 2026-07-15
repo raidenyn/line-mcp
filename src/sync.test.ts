@@ -27,6 +27,8 @@ const TEST_AUTH: AuthData = {
 };
 
 describe('syncAll', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
   it('calls getMessagesInRange for each previously-accessed chat', async () => {
     const cache = new MessageCache(':memory:');
     cache.upsertMessages('chat1', [msg('1', '1000')]);
@@ -63,6 +65,27 @@ describe('syncAll', () => {
     expect(getMessagesInRange).toHaveBeenCalledTimes(2);
   });
 
+  it('masks account and chat MIDs and omits sync error text from logs', async () => {
+    const authData = { ...TEST_AUTH, mid: 'u1234567890test' };
+    const chatMid = 'c1234567890test';
+    const errorText = 'injected credential-like error text';
+    const cache = new MessageCache(':memory:');
+    cache.upsertMessages(chatMid, [{ ...msg('1', '1000'), to: chatMid }]);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const makeClient = vi.fn().mockReturnValue({
+      getMessagesInRange: vi.fn().mockRejectedValue(new Error(errorText)),
+    });
+
+    await syncAll(cache, { authDir: makeAuthDir(authData), makeClient });
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(authData.mid);
+    expect(logs).not.toContain(chatMid);
+    expect(logs).not.toContain(errorText);
+    expect(logs).toContain('u123...test');
+    expect(logs).toContain('c123...test');
+  });
+
   it('skips mid if auth file contains invalid JSON', async () => {
     const cache = new MessageCache(':memory:');
     cache.upsertMessages('chat1', [msg('1', '1000')]);
@@ -71,6 +94,21 @@ describe('syncAll', () => {
     writeFileSync(join(authDir, 'badusr.json'), 'not-json');
     const getMessagesInRange = vi.fn().mockResolvedValue([]);
     const makeClient = vi.fn().mockReturnValue({ getMessagesInRange });
+
+    await syncAll(cache, { authDir, makeClient });
+
+    expect(makeClient).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['incomplete', { mid: 'u123', accessToken: 'tok' }],
+    ['mismatched', { ...TEST_AUTH, mid: 'u-other' }],
+  ])('skips %s auth records through shared validation', async (_label, value) => {
+    const cache = new MessageCache(':memory:');
+    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
+    writeFileSync(join(authDir, 'u123.json'), JSON.stringify(value));
+    const makeClient = vi.fn();
 
     await syncAll(cache, { authDir, makeClient });
 
@@ -89,7 +127,10 @@ describe('syncAll', () => {
 });
 
 describe('startSyncLoop', () => {
-  afterEach(() => { vi.useRealTimers(); });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it('runs syncAll immediately on start', async () => {
     const cache = new MessageCache(':memory:');
@@ -104,5 +145,18 @@ describe('startSyncLoop', () => {
     clearInterval(handle);
 
     expect(getMessagesInRange).toHaveBeenCalled();
+  });
+
+  it('omits unexpected sync error text from logs', async () => {
+    const errorText = 'injected unexpected credential-like error';
+    const cache = { getDistinctChatMids: () => { throw new Error(errorText); } } as MessageCache;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const handle = startSyncLoop(cache, 100_000);
+    await new Promise(r => setTimeout(r, 50));
+    clearInterval(handle);
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(errorText);
   });
 });

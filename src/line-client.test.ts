@@ -8,6 +8,7 @@ vi.mock('./ltsm', () => ({
 }));
 
 import { LineClient, AuthData } from './line-client';
+import { getHmac } from './ltsm';
 
 // JWT with exp 10 days from now so refreshIfExpired never triggers
 function makeFakeJwt(expOffsetSec = 86400 * 10): string {
@@ -34,15 +35,15 @@ function apiOk(data: unknown): Response {
   });
 }
 
-function apiErr(code: number, message: string): Response {
-  return new Response(JSON.stringify({ code, message, data: null }), {
+function apiErr(code: number, message: string, data: unknown = null): Response {
+  return new Response(JSON.stringify({ code, message, data }), {
     status: 200,
     headers: { 'content-type': 'application/json' },
   });
 }
 
-function httpErr(status: number): Response {
-  return new Response('error body', { status });
+function httpErr(status: number, body = 'error body'): Response {
+  return new Response(body, { status });
 }
 
 // ───────────────────────────────────────────────────────────
@@ -612,5 +613,218 @@ describe('LineClient — concurrent refresh deduplication', () => {
     await client.listChats();
 
     expect(callback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LineClient QR login', () => {
+  function makeLoginFetch(verifyResponse: Response) {
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      const headers = init?.headers as Record<string, string>;
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) return apiOk({ authSessionId: 'session-1' });
+      if (url.includes('createQrCode')) return apiOk({
+        callbackUrl: 'https://line.me/R/nv/QRLogin?sid=session-1',
+        longPollingMaxCount: 1,
+        longPollingIntervalSec: 1,
+      });
+      if (url.includes('checkQrCodeVerified')) return apiOk({});
+      if (url.includes('verifyCertificate')) return verifyResponse;
+      if (url.includes('createPinCode')) return apiOk({ pinCode: '123456' });
+      if (url.includes('checkPinCodeVerified')) return apiOk({});
+      if (url.includes('qrCodeLoginV2')) return apiOk({
+        certificate: 'replacement-cert',
+        tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+        mid: 'u123',
+      });
+      if (url.includes('getEncryptedIdentityV3')) return apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      });
+      return apiOk({});
+    });
+    return { fetchFn, calls };
+  }
+
+  it('uses an explicit certificate, keeps QR bootstrap unauthenticated, and skips PIN when accepted', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiOk({}));
+    const client = new LineClient(baseAuth, fetchFn);
+    vi.mocked(getHmac).mockClear();
+
+    await client.login('saved-cert');
+    await expect(client.waitForPin()).resolves.toBeNull();
+    await client.waitForCompletion();
+
+    const bootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'));
+    expect(bootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    expect(vi.mocked(getHmac).mock.calls.slice(0, 2).every(([input]) => input.accessToken === '')).toBe(true);
+    const verify = calls.find(call => call.url.includes('verifyCertificate'))!;
+    expect(verify.body).toEqual([{ authSessionId: 'session-1', certificate: 'saved-cert' }]);
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+    expect(calls.some(call => call.url.includes('checkPinCodeVerified'))).toBe(false);
+  });
+
+  it('falls back to one PIN flow for LINE certificate rejection status', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+    await client.waitForCompletion();
+
+    expect(calls.filter(call => call.url.includes('createPinCode'))).toHaveLength(1);
+    expect(calls.filter(call => call.url.includes('checkPinCodeVerified'))).toHaveLength(1);
+    expect(client.getCompletedAuth()?.certificate).toBe('replacement-cert');
+  });
+
+  it('delivers a rejected-certificate PIN without writing it to stderr', async () => {
+    const pinCode = '123456';
+    const { fetchFn } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe(pinCode);
+    await client.waitForCompletion();
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(pinCode);
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate server failure', async () => {
+    const { fetchFn, calls } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate API server error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(500, 'internal server error'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on an unrelated verifyCertificate client error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(400, 'bad request'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 400');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('omits remote error text from login diagnostics', async () => {
+    const remoteErrorText = 'access-token-secret refresh-token-secret certificate-secret identity-secret';
+    const { fetchFn } = makeLoginFetch(httpErr(500, remoteErrorText));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(remoteErrorText);
+    expect(logs).toContain('[LINE] HTTP 500');
+  });
+
+  it('keeps a newer QR bootstrap unauthenticated when a superseded login completes', async () => {
+    let resolveFirstPoll: (() => void) | undefined;
+    let resolveSecondSession: (() => void) | undefined;
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    let sessionCount = 0;
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) {
+        sessionCount += 1;
+        if (sessionCount === 2) {
+          return new Promise<Response>(resolve => {
+            resolveSecondSession = () => resolve(apiOk({ authSessionId: 'session-2' }));
+          });
+        }
+        return Promise.resolve(apiOk({ authSessionId: 'session-1' }));
+      }
+      if (url.includes('createQrCode')) {
+        const authSessionId = (body[0] as { authSessionId: string }).authSessionId;
+        return Promise.resolve(apiOk({
+          callbackUrl: `https://line.me/R/nv/QRLogin?sid=${authSessionId}`,
+          longPollingMaxCount: 1,
+          longPollingIntervalSec: 1,
+        }));
+      }
+      if (url.includes('checkQrCodeVerified')) {
+        return new Promise<Response>(resolve => {
+          resolveFirstPoll = () => resolve(apiOk({}));
+        });
+      }
+      if (url.includes('verifyCertificate')) return Promise.resolve(apiOk({}));
+      if (url.includes('qrCodeLoginV2')) {
+        return Promise.resolve(apiOk({
+          certificate: 'replacement-cert',
+          tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+          mid: 'u123',
+        }));
+      }
+      if (url.includes('getEncryptedIdentityV3')) return Promise.resolve(apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      }));
+      return Promise.resolve(apiOk({}));
+    });
+    const client = new LineClient(null, fetchFn);
+    vi.mocked(getHmac).mockClear();
+
+    await client.login('certificate-a');
+    const secondLogin = client.login('certificate-b');
+    await vi.waitFor(() => expect(resolveSecondSession).toBeTypeOf('function'));
+    resolveFirstPoll!();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(client.getCompletedAuth()).toBeNull();
+    resolveSecondSession!();
+    await secondLogin;
+
+    const secondBootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'),
+    ).slice(-2);
+    expect(secondBootstrap).toHaveLength(2);
+    expect(secondBootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    const secondBootstrapHmacs = vi.mocked(getHmac).mock.calls
+      .filter(([input]) => input.path.includes('createSession') || input.path.includes('createQrCode'))
+      .slice(-2);
+    expect(secondBootstrapHmacs.every(([input]) => input.accessToken === '')).toBe(true);
+  });
+});
+
+describe('LineClient profile', () => {
+  it('returns the authenticated account display name', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(apiOk({
+      mid: baseAuth.mid,
+      displayName: 'Personal LINE',
+    }));
+    const client = new LineClient(baseAuth, fetchFn);
+    await expect(client.getProfileDisplayName()).resolves.toBe('Personal LINE');
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toEqual([2]);
+  });
+
+  it.each([
+    [{ mid: baseAuth.mid, displayName: '' }, 'missing display name'],
+    [{ mid: 'u-other', displayName: 'Wrong Account' }, 'profile MID mismatch'],
+  ])('rejects an invalid authenticated profile', async (profile, message) => {
+    const client = new LineClient(baseAuth, vi.fn().mockResolvedValue(apiOk(profile)));
+    await expect(client.getProfileDisplayName()).rejects.toThrow(message);
   });
 });

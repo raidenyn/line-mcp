@@ -33,7 +33,7 @@ This is a **LINE MCP server** — an MCP (Model Context Protocol) server that ex
 
 ### Source files (`src/`)
 
-**`index.ts`** — entry point. Creates an Express app, registers ten tools (`list_chats`, `get_messages`, `get_image`, `sample_messages`, `manage_templates`, `manage_categories`, `get_transactions`, `summarize_transactions`, `initiate_import`, `complete_import`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Initialises `MessageCache` once at startup (`sharedCache`) and `CategoryStore` (`categoryStore`), which share the same SQLite file, and creates a `CachingLineClient` per request via `makeLineClient()`, which wires the `onTokenRefreshed` callback to update `latestAuthData` in `oauth.ts`.
+**`index.ts`** — entry point. Creates an Express app, registers ten tools (`list_chats`, `get_messages`, `get_image`, `sample_messages`, `manage_templates`, `manage_categories`, `get_transactions`, `summarize_transactions`, `initiate_import`, `complete_import`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Initialises `MessageCache` once at startup (`sharedCache`) and `CategoryStore` (`categoryStore`), which share the same SQLite file, and creates a `CachingLineClient` per request via `makeLineClient()`, which wires `onTokenRefreshed` to `recordRefreshedAuth()` in `oauth.ts`.
 
 - `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first). Accepts optional `since`/`until` ISO date strings; when `since` is provided, calls `getMessagesInRange` to paginate the full history back to that date. Also runs preset-gap detection (`detectPresets()` against saved templates and all built-in presets) and returns a structured `preset_suggestions` field in `content[1]`, plus a human-readable hint appended to `content[0].text` when gaps are found.
 - `manage_templates` — CRUD for named regex templates and currency aliases, plus built-in preset discovery/application; delegates to `template-store.ts` and `preset-store.ts`. Actions: `upsert`, `delete`, `list`, `upsert_alias`, `delete_alias`, `list_aliases`, `list_presets` (lists built-in bank presets with template/alias counts), `apply_preset` (copies a named preset's templates + currency aliases into a chat's template file, additive by name, not a replace-all).
@@ -61,14 +61,17 @@ Files are read from disk at request time via `fs.promises.readFile`. Missing fil
 - `POST /token` — PKCE code exchange and refresh-token rotation; issues self-contained signed MCP tokens
 - In-memory stores: `loginSessions`, `pendingCodes` (ephemeral login state only)
 - `SERVER_SECRET` — loaded from `data/secret` on startup (created automatically if absent); used to HMAC-sign all tokens
-- `validateBearerToken(token)` — verifies HMAC, checks expiry, returns embedded `AuthData`; also checks `latestAuthData` for a fresher LINE credential for the same `mid`
-- `latestAuthData` — `Map<mid, AuthData>` updated via `onTokenRefreshed` callback when LINE tokens refresh mid-request; consulted on MCP token refresh so rotated LINE credentials propagate into new tokens
+- `StoredAuthRecord` — an `AuthData` plus optional profile `displayName`, stored atomically at `data/auth/<mid>.json`; files are `0600` beneath a `0700` directory. Login persists this record before updating memory or issuing an authorization code.
+- Saved records drive the multi-account selector by profile name (falling back to a masked MID); selected accounts initialize QR login with only their saved certificate.
+- `validateBearerToken(token)` — verifies HMAC, checks expiry, returns embedded `AuthData`; it first checks `latestAuthData`, then lazily loads `data/auth/<mid>.json` for a fresher LINE credential.
+- `recordRefreshedAuth(authData)` — updates `latestAuthData` then atomically persists refreshed LINE credentials while preserving the stored display name. Persistence failure is logged but non-fatal because `LineClient` refresh callbacks are synchronous.
+- `latestAuthData` — `Map<mid, AuthData>` consulted on MCP token refresh so rotated LINE credentials propagate into new self-contained tokens.
 - `seedTestToken(token, authData)` — bypass map for e2e tests (not used in production)
 
 **`line-client.ts`** — all LINE API logic. Targets `https://line-chrome-gw.line-apps.com`, impersonating the LINE Chrome extension (`ophjlpahpchlmihnnnihgmmeilfjmjjc`). Key concerns:
 - **Login flow**: QR code → `checkQrCodeVerified` long-poll → `verifyCertificate` (uses saved certificate to skip PIN on repeat logins) → optional PIN confirmation (`checkPinCodeVerified`) → `qrCodeLoginV2` → `getEncryptedIdentityV3`. After completion, `getCompletedAuth()` returns the full `AuthData`.
 - **PIN surfacing for OAuth**: `waitForPin()` and `waitForCompletion()` are public methods used by `oauth.ts` to monitor the background login without going through `ensureAuthenticated()`.
-- **Token refresh**: LINE access tokens are refreshed when less than 24 hours from expiry. Uses a static `refreshLocks = Map<mid, Promise>` so concurrent requests for the same user share one in-flight refresh rather than racing. The `onTokenRefreshed` constructor callback is fired once per refresh so callers can persist the updated credentials.
+- **Token refresh**: LINE access tokens are refreshed when less than 24 hours from expiry. Uses a static `refreshLocks = Map<mid, Promise>` so concurrent requests for the same user share one in-flight refresh rather than racing. The synchronous `onTokenRefreshed` constructor callback is fired once per refresh; callers use non-fatal `recordRefreshedAuth()` to update memory and persist the credentials.
 - **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
 - **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
 
@@ -119,12 +122,12 @@ Files are read from disk at request time via `fs.promises.readFile`. Missing fil
 1. Start the server: `npm start`
 2. Add to Claude Code: `claude mcp add --transport http --scope user line http://localhost:3000/mcp`
 3. Call any tool — Claude Code detects the `401` response, opens the LINE QR page in a browser
-4. Scan the QR code with the LINE mobile app; enter PIN if prompted
+4. If several saved accounts exist, choose one by profile name; scan its QR code with the LINE mobile app and enter PIN only on first login or after certificate rejection
 5. Claude Code receives tokens automatically and retries the tool call
 
 **Token lifecycle:**
 - MCP tokens are self-contained HMAC-SHA256-signed blobs embedding the user's `AuthData` and expiry — the server is stateless and holds no token maps
 - The signing key lives in `data/secret` (auto-created on first run, persisted across restarts); tokens issued before a restart remain valid as long as the file is not deleted
-- MCP tokens expire after 24 hours; Claude Code refreshes them proactively via `POST /token` with `grant_type=refresh_token`; the server verifies the refresh token's signature, looks up any fresher LINE credentials in `latestAuthData`, and issues new signed tokens
-- LINE access tokens are refreshed on-demand inside `LineClient.refreshIfExpired()` when < 24 h remain; the `onTokenRefreshed` callback updates `latestAuthData` so the next MCP token refresh embeds the latest LINE credentials
+- MCP tokens expire after 24 hours; Claude Code refreshes them proactively via `POST /token` with `grant_type=refresh_token`; the server verifies the refresh token's signature, resolves fresher LINE credentials from memory or `data/auth/<mid>.json`, and issues new signed tokens. Refresh tokens remain usable after restart while `data/secret` and that auth record are retained.
+- LINE access tokens are refreshed on-demand inside `LineClient.refreshIfExpired()` when < 24 h remain; `recordRefreshedAuth()` updates memory first and atomically persists the refresh while preserving the account profile name. Persistence errors do not fail the LINE request.
 - Multiple independent LINE accounts are supported: each user's `AuthData` is embedded in their own MCP tokens and never shared with other users

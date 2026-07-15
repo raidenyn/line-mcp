@@ -59,6 +59,26 @@ interface RawMessage {
   contentMetadata?: Record<string, string>;
 }
 
+class LineHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    readonly apiStatus?: number,
+  ) {
+    super(`HTTP ${status} on ${path}`);
+  }
+}
+
+class LineApiError extends Error {
+  constructor(
+    readonly code: number,
+    readonly path: string,
+    readonly nestedCode?: number,
+  ) {
+    super(`LINE API error ${code} on ${path}`);
+  }
+}
+
 export class LineClient {
   private auth: AuthData | null = null;
   private completedAuth: AuthData | null = null;
@@ -74,6 +94,7 @@ export class LineClient {
   private pinAcknowledged = false;
   // Aborts all in-flight fetch calls when a new login() cancels the previous session
   private loginAbortController: AbortController | null = null;
+  private loginGeneration = 0;
 
   // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
   private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
@@ -94,6 +115,18 @@ export class LineClient {
     return this.completedAuth;
   }
 
+  async getProfileDisplayName(): Promise<string> {
+    if (!this.auth) throw new Error('Not authenticated');
+    const profile = await this.request<{ mid: string; displayName: string }>(
+      '/api/talk/thrift/Talk/TalkService/getProfile',
+      [2],
+    );
+    if (profile.mid !== this.auth.mid) throw new Error('LINE profile MID mismatch');
+    const displayName = profile.displayName?.trim();
+    if (!displayName) throw new Error('LINE profile missing display name');
+    return displayName;
+  }
+
   async waitForPin(): Promise<string | null> {
     return this.loginPinPromise;
   }
@@ -106,17 +139,17 @@ export class LineClient {
   private async request<T>(
     path: string,
     args: unknown[],
-    opts: { longPoll?: boolean; sessionId?: string; signal?: AbortSignal } = {},
+    opts: { longPoll?: boolean; sessionId?: string; signal?: AbortSignal; unauthenticated?: boolean } = {},
   ): Promise<T> {
     const body = JSON.stringify(args);
-    const accessToken = this.auth?.accessToken ?? '';
+    const accessToken = opts.unauthenticated ? '' : this.auth?.accessToken ?? '';
     const hmac = await getHmac({ accessToken, path, body });
 
     const headers: Record<string, string> = {
       ...BASE_HEADERS,
       'x-hmac': hmac,
     };
-    if (this.auth?.accessToken) {
+    if (!opts.unauthenticated && this.auth?.accessToken) {
       headers['x-line-access'] = this.auth.accessToken;
     }
     if (opts.longPoll) {
@@ -133,13 +166,23 @@ export class LineClient {
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
-      process.stderr.write(`[LINE] HTTP ${response.status} on ${path}: ${errBody}\n`);
-      throw new Error(`HTTP ${response.status} on ${path}: ${errBody}`);
+      let apiStatus: number | undefined;
+      try {
+        const parsed = JSON.parse(errBody) as { statusCode?: unknown };
+        if (typeof parsed.statusCode === 'number') apiStatus = parsed.statusCode;
+      } catch {
+        // Non-JSON error responses have no status metadata beyond HTTP status.
+      }
+      process.stderr.write(`[LINE] HTTP ${response.status} on ${path}\n`);
+      throw new LineHttpError(response.status, path, apiStatus);
     }
     const rawText = await response.text();
     const json = JSON.parse(rawText) as { code: number; message: string; data: T };
     if (json.code !== 0) {
-      throw new Error(`LINE API error ${json.code}: ${json.message} (${path})`);
+      const nestedCode = typeof (json.data as { code?: unknown } | null)?.code === 'number'
+        ? (json.data as { code: number }).code
+        : undefined;
+      throw new LineApiError(json.code, path, nestedCode);
     }
     return json.data;
   }
@@ -222,16 +265,26 @@ export class LineClient {
     await this.refreshIfExpired();
   }
 
-  async login(): Promise<{ qrUrl: string }> {
+  async login(certificate?: string): Promise<{ qrUrl: string }> {
+    const generation = ++this.loginGeneration;
     // Cancel any in-flight HTTP requests from a previous login session
     if (this.loginAbortController) {
       this.loginAbortController.abort();
     }
-    this.loginAbortController = new AbortController();
+    const abortController = new AbortController();
+    this.loginAbortController = abortController;
+    // QR bootstrap must not reuse an existing account credential.
+    this.auth = null;
+    this.completedAuth = null;
+    this.pendingLogin = null;
+    this.pendingLoginError = null;
+    this.pendingAuthSessionId = null;
+    this.pendingCertificate = null;
 
     const { authSessionId } = await this.request<{ authSessionId: string }>(
       '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
       [{}],
+      { unauthenticated: true },
     );
 
     const { callbackUrl, longPollingMaxCount } = await this.request<{
@@ -241,7 +294,10 @@ export class LineClient {
     }>(
       '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode',
       [{ authSessionId }],
+      { unauthenticated: true },
     );
+
+    if (generation !== this.loginGeneration) return { qrUrl: callbackUrl };
 
     // Generate a valid X25519 (Curve25519) keypair — LINE mobile app performs
     // ECDH with the public key, so it must be a valid curve point.
@@ -256,8 +312,8 @@ export class LineClient {
     qrUrlObj.searchParams.set('e2eeVersion', '1');
     const qrUrl = qrUrlObj.toString();
 
-    // Save certificate for use after QR scan confirmation (spec: verifyCertificate follows checkQrCodeVerified)
-    this.pendingCertificate = this.auth?.certificate ?? null;
+    // Save the caller-selected certificate for verification after QR scan confirmation.
+    this.pendingCertificate = certificate?.trim() ? certificate : null;
 
     this.pendingAuthSessionId = authSessionId;
     this.pendingLongPollingMaxCount = longPollingMaxCount ?? 2;
@@ -271,14 +327,21 @@ export class LineClient {
     // Start the long-poll immediately so it's active while the user scans.
     // completeLogin() blocks on checkQrCodeVerified — must be running before scan.
     this.pendingLoginError = null;
-    const completionPromise = this.completeLogin().catch((err: Error) => {
+    const completionPromise = this.completeLogin(
+      generation,
+      authSessionId,
+      this.pendingCertificate,
+      this.pendingLongPollingMaxCount,
+      abortController,
+    ).catch((err: Error) => {
+      if (generation !== this.loginGeneration) return;
       this.pendingLoginError = err;
       if (this.pendingLogin === loginCompletion) {
         this.pendingLogin = null;
       }
       this.loginPinResolve?.(null);
       this.loginPinResolve = null;
-      process.stderr.write(`completeLogin error: ${err.message}\n${err.stack}\n`);
+      process.stderr.write('[LINE] Login completion failed\n');
     });
     const loginCompletion = () => completionPromise;
     this.pendingLogin = loginCompletion;
@@ -286,30 +349,34 @@ export class LineClient {
     return { qrUrl };
   }
 
-  async completeLogin(): Promise<void> {
-    const authSessionId = this.pendingAuthSessionId;
-    if (!authSessionId) throw new Error('No pending login session');
-    const certificate = this.pendingCertificate;
+  private async completeLogin(
+    generation: number,
+    authSessionId: string,
+    certificate: string | null,
+    longPollingMaxCount: number,
+    abortController: AbortController,
+  ): Promise<void> {
 
     // Long-poll until QR is scanned. A 400 means the session may already be confirmed
     // (race: mobile confirmed before our poll registered) — treat as success and proceed.
-    for (let i = 0; i < this.pendingLongPollingMaxCount; i++) {
+    for (let i = 0; i < longPollingMaxCount; i++) {
       try {
-        process.stderr.write(`[LINE] checkQrCodeVerified attempt ${i + 1}/${this.pendingLongPollingMaxCount}\n`);
+        process.stderr.write(`[LINE] checkQrCodeVerified attempt ${i + 1}/${longPollingMaxCount}\n`);
         await this.request(
           '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified',
           [{ authSessionId }],
-          { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
+          { longPoll: true, sessionId: authSessionId, signal: abortController.signal },
         );
+        if (generation !== this.loginGeneration) return;
         break;
       } catch (err) {
-        const msg = (err as Error).message;
-        process.stderr.write(`[LINE] checkQrCodeVerified error: ${msg}\n`);
-        if (msg.includes('HTTP 400') || msg.includes('HTTP 403')) {
+        process.stderr.write('[LINE] checkQrCodeVerified failed\n');
+        if (generation !== this.loginGeneration) return;
+        if (err instanceof LineHttpError && (err.status === 400 || err.status === 403)) {
           // 400/403 may mean the scan already completed before our poll arrived — proceed anyway
           break;
         }
-        if (i === this.pendingLongPollingMaxCount - 1) throw err;
+        if (i === longPollingMaxCount - 1) throw err;
       }
     }
 
@@ -322,13 +389,16 @@ export class LineClient {
         '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate',
         [{ authSessionId, certificate: certificate ?? '' }],
       );
+      if (generation !== this.loginGeneration) return;
       pinRequired = false; // Certificate accepted — skip PIN
     } catch (err) {
-      const msg = (err as Error).message ?? '';
-      if (!msg.includes('HTTP 4') && !msg.includes('LINE API error')) {
+      if (generation !== this.loginGeneration) return;
+      const isCertificateRejection =
+        err instanceof LineApiError && err.code === 10051 && err.nestedCode === 2;
+      if (!isCertificateRejection) {
         throw err; // Transient network or 5xx — don't silently swallow
       }
-      process.stderr.write(`[LINE] verifyCertificate: certificate rejected (${msg}), proceeding with PIN\n`);
+      process.stderr.write('[LINE] verifyCertificate: certificate rejected, proceeding with PIN\n');
     }
 
     if (pinRequired) {
@@ -337,8 +407,8 @@ export class LineClient {
         '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode',
         [{ authSessionId }],
       );
+      if (generation !== this.loginGeneration) return;
       const pinCode = pinData.pinCode;
-      process.stderr.write(`[LINE] PIN code: ${pinCode}\n`);
       this.loginPinResolve?.(pinCode);
       this.loginPinResolve = null;
 
@@ -350,13 +420,14 @@ export class LineClient {
           await this.request(
             '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified',
             [{ authSessionId }],
-            { longPoll: true, sessionId: authSessionId, signal: this.loginAbortController?.signal },
+            { longPoll: true, sessionId: authSessionId, signal: abortController.signal },
           );
+          if (generation !== this.loginGeneration) return;
           break; // confirmed
         } catch (err) {
-          const msg = (err as Error).message ?? '';
+          if (generation !== this.loginGeneration) return;
           // 410 = long-poll window expired but session is still alive — retry
-          if (msg.includes('HTTP 400') && msg.includes('statusCode":410')) {
+          if (err instanceof LineHttpError && err.status === 400 && err.apiStatus === 410) {
             process.stderr.write(`[LINE] checkPinCodeVerified poll expired (attempt ${attempt + 1}), retrying...\n`);
             continue;
           }
@@ -365,6 +436,7 @@ export class LineClient {
       }
       process.stderr.write(`[LINE] PIN confirmed\n`);
     } else {
+      if (generation !== this.loginGeneration) return;
       this.loginPinResolve?.(null);
       this.loginPinResolve = null;
     }
@@ -379,6 +451,8 @@ export class LineClient {
     );
 
     const { accessToken, refreshToken } = loginData.tokenV3IssueResult;
+
+    if (generation !== this.loginGeneration) return;
 
     // Set auth so HMAC uses accessToken for the identity fetch below
     this.auth = {
@@ -397,12 +471,16 @@ export class LineClient {
       kdfParameter2: string;
     }>('/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3', []);
 
+    if (generation !== this.loginGeneration) return;
+
     await initStorageKey({
       mid: loginData.mid,
       wrappedNonce: identityData.wrappedNonce,
       kdfParameter1: identityData.kdfParameter1,
       kdfParameter2: identityData.kdfParameter2,
     });
+
+    if (generation !== this.loginGeneration) return;
 
     this.completedAuth = {
       accessToken,

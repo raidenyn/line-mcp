@@ -64,11 +64,12 @@ The server runs as an HTTP server using the [Streamable HTTP MCP transport](http
 
 **Auth flow:**
 1. On first use, Claude Code detects a `401` and opens an authorization page in your browser
-2. A QR code is displayed — scan it with the LINE mobile app
-3. Enter the PIN if prompted (skipped on repeat logins using a saved certificate)
-4. Claude Code receives tokens automatically and retries the tool call
+2. If several saved LINE accounts exist, choose the account by its LINE profile name
+3. Scan the QR code with that account
+4. Enter the PIN on first login or when LINE rejects an old saved certificate
+5. Claude Code receives tokens automatically and retries the tool call
 
-**Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `data/secret`. LINE access tokens are refreshed transparently when they near expiry.
+**Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `data/secret`. MCP refresh tokens remain usable across server restarts while `data/secret` and the corresponding `data/auth/<mid>.json` record remain available. LINE access tokens are refreshed transparently when they near expiry. Repeat authorization reuses the saved LINE certificate and normally requires QR confirmation without a PIN.
 
 **Message cache:** Every message fetched from LINE is automatically stored in a local SQLite database (`data/cache/messages.db`). On subsequent calls, the server reads from the cache first and only fetches messages newer than the latest cached entry from LINE. This means history older than LINE's ~2-week API window remains accessible indefinitely — `since` dates from months ago work without any special configuration.
 
@@ -115,5 +116,6 @@ Tests require a valid LINE session. Export your auth data to `.line-auth.json` i
 ## Security notes
 
 - `data/secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates all issued tokens.
+- `data/auth/*.json` — sensitive live LINE credentials, written with `0600` permissions beneath a `0700` directory. Keep them private and out of version control.
 - `.line-auth.json` — contains live LINE credentials. Keep it out of version control (it is in `.gitignore`).
 - The server binds to `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost.
