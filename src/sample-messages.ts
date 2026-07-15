@@ -1,4 +1,4 @@
-import type { Message } from './line-client';
+import type { Message } from '@raidenyn/line-client';
 import { expandUntilBound } from './transaction-parser';
 
 export function parseSampleUntilBound(until: string): number {

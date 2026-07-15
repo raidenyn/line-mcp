@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { AuthData } from './line-client';
+import type { AuthData } from '@raidenyn/line-client';
 import express from 'express';
 import * as http from 'http';
 import * as crypto from 'crypto';
@@ -12,8 +12,11 @@ vi.mock('fs', async importOriginal => {
   return { ...original, renameSync: vi.fn(original.renameSync) };
 });
 
-// Mock LineClient so /authorize doesn't hit the real LINE API
-vi.mock('./line-client', () => {
+// Mock LineClient so /authorize doesn't hit the real LINE API. parseExportHeader
+// is re-exported from the real module so oauth.ts's /import-upload route (which
+// this file doesn't otherwise exercise) still has a working implementation.
+vi.mock('@raidenyn/line-client', async importOriginal => {
+  const original = await importOriginal<typeof import('@raidenyn/line-client')>();
   const mockAuthData = {
     accessToken: 'tok',
     refreshToken: 'rtok',
@@ -43,6 +46,7 @@ vi.mock('./line-client', () => {
     return client;
   });
   return {
+    ...original,
     LineClient,
     __createdClients: createdClients,
     __profileLookup: profileLookup,
@@ -130,7 +134,7 @@ async function postSelection(
 }
 
 async function lastCreatedClient() {
-  const lineModule = await import('./line-client') as unknown as {
+  const lineModule = await import('@raidenyn/line-client') as unknown as {
     __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
   };
   return lineModule.__createdClients.at(-1)!;
@@ -233,7 +237,7 @@ beforeEach(async () => {
   fs.mkdirSync(authStoreDir, { recursive: true });
   fs.rmSync(authStoreDir2, { recursive: true, force: true });
   fs.mkdirSync(authStoreDir2, { recursive: true });
-  const lineModule = await import('./line-client') as unknown as {
+  const lineModule = await import('@raidenyn/line-client') as unknown as {
     LineClient: ReturnType<typeof vi.fn>;
     __createdClients: unknown[];
     __profileLookup: ReturnType<typeof vi.fn>;
@@ -352,7 +356,7 @@ describe('GET /authorize', () => {
   });
 
   it('starts first-time QR login without a certificate when no account is saved', async () => {
-    const { __createdClients } = await import('./line-client') as unknown as {
+    const { __createdClients } = await import('@raidenyn/line-client') as unknown as {
       __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
     };
     const response = await req(`${base}/authorize?${validParams}`);
@@ -387,7 +391,7 @@ describe('GET /authorize', () => {
       ...sampleAuthData,
       displayName: 'Personal LINE',
     }));
-    const { __createdClients } = await import('./line-client') as unknown as {
+    const { __createdClients } = await import('@raidenyn/line-client') as unknown as {
       __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
     };
 
@@ -398,7 +402,7 @@ describe('GET /authorize', () => {
   });
 
   it('does not expose login startup errors from authorization requests', async () => {
-    const lineModule = await import('./line-client') as unknown as {
+    const lineModule = await import('@raidenyn/line-client') as unknown as {
       LineClient: ReturnType<typeof vi.fn>;
     };
     lineModule.LineClient.mockImplementationOnce(function LineClient() {
@@ -415,7 +419,7 @@ describe('GET /authorize', () => {
   it('renders human names and opaque choices without starting QR for multiple accounts', async () => {
     writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
     writeRouteAuth('u-work', 'Work LINE', 'work-cert');
-    const { LineClient } = await import('./line-client');
+    const { LineClient } = await import('@raidenyn/line-client');
 
     const { status, body } = await req(`${base}/authorize?${validParams}`);
     const html = body as string;
@@ -458,7 +462,7 @@ describe('GET /authorize', () => {
     writeRouteAuth('u-work', 'Work LINE', 'work-cert');
     const selector = await req(`${base}/authorize?${validParams}`);
     const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
-    const lineModule = await import('./line-client') as unknown as {
+    const lineModule = await import('@raidenyn/line-client') as unknown as {
       LineClient: ReturnType<typeof vi.fn>;
     };
     lineModule.LineClient.mockImplementationOnce(function LineClient() {
@@ -663,7 +667,7 @@ describe('OAuth completion persistence', () => {
       kdfParameter2: 'old-kdf2',
       displayName: 'Existing Name',
     }));
-    const lineModule = await import('./line-client') as unknown as {
+    const lineModule = await import('@raidenyn/line-client') as unknown as {
       __profileLookup: ReturnType<typeof vi.fn>;
     };
     lineModule.__profileLookup.mockRejectedValueOnce(new Error('profile unavailable'));
@@ -691,7 +695,7 @@ describe('OAuth completion persistence', () => {
       certificate: 'other-cert',
       displayName: 'Work LINE',
     }));
-    const lineModule = await import('./line-client') as unknown as {
+    const lineModule = await import('@raidenyn/line-client') as unknown as {
       __profileLookup: ReturnType<typeof vi.fn>;
     };
     lineModule.__profileLookup.mockRejectedValueOnce(new Error('profile unavailable'));
@@ -1035,7 +1039,7 @@ describe('refresh token after restart', () => {
 
     vi.resetModules();
     const restarted = await import('./oauth');
-    const { LineClient } = await import('./line-client');
+    const { LineClient } = await import('@raidenyn/line-client');
     vi.mocked(LineClient).mockClear();
     await withOAuthServer(path.join(tmpdir, 'auth'), async restartBase => {
       const response = await fetch(`${restartBase}/token`, {

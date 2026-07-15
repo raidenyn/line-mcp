@@ -17,5 +17,9 @@
     "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts"],
+  // src/ now imports @raidenyn/line-client (issue #75, Task 5) — this reference
+  // makes `tsc -b` build that package first so its dist/*.d.ts exists before
+  // this project's files that import it are type-checked.
+  "references": [{ "path": "./packages/line-client" }]
 }

@@ -3,8 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as QRCode from 'qrcode';
 import express, { type Express, type Request, type Response } from 'express';
-import { LineClient, AuthData } from './line-client';
-import { parseExportHeader } from './export-parser';
+import { LineClient, AuthData, parseExportHeader } from '@raidenyn/line-client';
 import { secretPath, authDir as dataDirAuth } from './data-dir';
 
 // ─── Signing key ──────────────────────────────────────────────────────────────

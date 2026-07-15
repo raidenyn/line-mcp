@@ -4,7 +4,15 @@ import type { Window } from 'happy-dom';
 
 const SANDBOX_ID = 'node-ltsm';
 const ORIGIN = 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc';
-const WASM_PATH = path.join(__dirname, 'ltsm/ltsm.wasm');
+
+// Assets live in a sibling `assets/ltsm` directory (not compiled by tsc), so the
+// relative hop from this module up to the package root is the same whether
+// __dirname is the source tree (packages/line-client/src, ts-node/dev) or the
+// compiled output (packages/line-client/dist, since tsconfig rootDir=src strips
+// the "src" segment on emit — both sit exactly one level below the package root).
+const ASSETS_DIR = path.join(__dirname, '..', 'assets', 'ltsm');
+const WASM_PATH = path.join(ASSETS_DIR, 'ltsm.wasm');
+const SANDBOX_PATH = path.join(ASSETS_DIR, 'ltsmSandbox.js');
 
 // sandbox listens on window "message" events; responds via window.parent.postMessage
 const responseHandlers = new Map<string, (msg: unknown) => void>();
@@ -15,33 +23,43 @@ function handleParentPost(msg: unknown): void {
   responseHandlers.get(m.type ?? '')?.(m);
 }
 
-// Serializes all WASM sandbox commands — responseHandlers uses fixed keys, so concurrent
-// sendCommand calls would overwrite each other's handlers. Queue ensures one at a time.
+// Sends a single sandbox command and waits for its response, with no queuing of
+// its own. responseHandlers uses fixed keys ('response'/'error'), so calling
+// this concurrently for two different in-flight commands would let one call's
+// response resolve the other's promise — callers MUST serialize calls to this
+// via enqueue() below.
+function sendCommandNow(win: Window & typeof globalThis, command: string, payload?: unknown): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    responseHandlers.set('response', (m) => {
+      responseHandlers.delete('response');
+      responseHandlers.delete('error');
+      resolve((m as Record<string, unknown>)['data']);
+    });
+    responseHandlers.set('error', (m) => {
+      responseHandlers.delete('response');
+      responseHandlers.delete('error');
+      reject((m as Record<string, unknown>)['data']);
+    });
+    win.dispatchEvent(
+      Object.assign(new win.MessageEvent('message'), {
+        data: { type: 'request', sandboxId: SANDBOX_ID, data: { command, payload } },
+      }),
+    );
+  });
+}
+
+// Serializes all WASM sandbox operations against the shared module-level state
+// (responseHandlers, currentStorageKeyMid). Each call to enqueue() runs its
+// callback to completion — including any number of sendCommandNow() calls
+// inside it — before the next queued callback starts, so a caller that needs
+// to check-and-possibly-reinitialize state before signing (see signForAccount)
+// gets that as one atomic unit with no other account's operation interleaved.
 let commandQueue: Promise<unknown> = Promise.resolve();
 
-function sendCommand(win: Window & typeof globalThis, command: string, payload?: unknown): Promise<unknown> {
-  const next = commandQueue.then(
-    () =>
-      new Promise((resolve, reject) => {
-        responseHandlers.set('response', (m) => {
-          responseHandlers.delete('response');
-          responseHandlers.delete('error');
-          resolve((m as Record<string, unknown>)['data']);
-        });
-        responseHandlers.set('error', (m) => {
-          responseHandlers.delete('response');
-          responseHandlers.delete('error');
-          reject((m as Record<string, unknown>)['data']);
-        });
-        win.dispatchEvent(
-          Object.assign(new win.MessageEvent('message'), {
-            data: { type: 'request', sandboxId: SANDBOX_ID, data: { command, payload } },
-          }),
-        );
-      }),
-  );
-  // Errors must not break the queue chain
-  commandQueue = next.catch(() => {});
+function enqueue<T>(fn: (win: Window & typeof globalThis) => Promise<T>): Promise<T> {
+  const next = commandQueue.then(() => initialize()).then(({ win }) => fn(win));
+  // Errors must not break the queue chain for the next caller.
+  commandQueue = next.then(() => undefined, () => undefined);
   return next;
 }
 
@@ -115,7 +133,7 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
     // Loaded dynamically at runtime after global fetch/window shims are installed above;
     // cannot be a static import.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    require('./ltsm/ltsmSandbox.js');
+    require(SANDBOX_PATH);
 
     // Fire DOMContentLoaded so the sandbox wires up its "message" handler and sends LOADED
     await new Promise<void>((resolve) => {
@@ -126,8 +144,12 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
       win.document.dispatchEvent(new win.Event('DOMContentLoaded', { bubbles: true }));
     });
 
-    // INIT: loads wasm and derives static key from the Chrome extension token
-    await sendCommand(win, 'init');
+    // INIT: loads wasm and derives static key from the Chrome extension token.
+    // Runs directly (not via enqueue()) because initialize() itself is only ever
+    // reached from inside an enqueue() callback (or, on the very first call,
+    // synchronously guarded by initPromise below) — it is already part of the
+    // current queue slot, not a new one.
+    await sendCommandNow(win, 'init');
 
     // Restore global fetch — wasmFetch is only needed during WASM load above
     try { nodeGlobal['fetch'] = originalFetch; } catch { /* skip */ }
@@ -138,33 +160,53 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
   return initPromise;
 }
 
-export async function getHmac(params: {
+export interface StorageKeyMaterial {
+  mid: string;
+  wrappedNonce: string;
+  kdfParameter1: string;
+  kdfParameter2: string;
+}
+
+export interface HmacInput {
   accessToken: string;
   path: string;
   body: string;
-}): Promise<string> {
-  const { win } = await initialize();
-  return sendCommand(win, 'get_hmac', params) as Promise<string>;
 }
 
-export async function initStorageKey(params: {
-  mid: string;
-  wrappedNonce: string;
-  kdfParameter1: string;
-  kdfParameter2: string;
-}): Promise<void> {
-  const { win } = await initialize();
-  const { wrappedNonce, kdfParameter1, kdfParameter2 } = params;
-  await sendCommand(win, 'storage_key_init', { wrappedNonce, kdfParameter1, kdfParameter2 });
+function keyPayload(key: StorageKeyMaterial): { wrappedNonce: string; kdfParameter1: string; kdfParameter2: string } {
+  return { wrappedNonce: key.wrappedNonce, kdfParameter1: key.kdfParameter1, kdfParameter2: key.kdfParameter2 };
+}
+
+// Atomically ensures the sandbox's loaded storage key belongs to `key.mid` and
+// computes the HMAC for `input`, as a single queued operation. This is the fix
+// for a real race: previously "ensure the right storage key is loaded" and
+// "compute get_hmac" were two separately-queued operations, so a concurrent
+// call for a *different* account could enqueue its own storage-key switch in
+// between them, and the HMAC would then be computed against the wrong
+// account's key. Bundling both steps into one enqueue() callback means no
+// other account's signForAccount() call can run until this one fully resolves.
+export function signForAccount(key: StorageKeyMaterial, input: HmacInput): Promise<string> {
+  return enqueue(async win => {
+    if (currentStorageKeyMid !== key.mid) {
+      await sendCommandNow(win, 'storage_key_init', keyPayload(key));
+      currentStorageKeyMid = key.mid;
+    }
+    return sendCommandNow(win, 'get_hmac', input) as Promise<string>;
+  });
+}
+
+export async function getHmac(params: HmacInput): Promise<string> {
+  return enqueue(win => sendCommandNow(win, 'get_hmac', params) as Promise<string>);
+}
+
+export async function initStorageKey(params: StorageKeyMaterial): Promise<void> {
+  await enqueue(async win => {
+    await sendCommandNow(win, 'storage_key_init', keyPayload(params));
+  });
   currentStorageKeyMid = params.mid;
 }
 
-export async function ensureStorageKey(params: {
-  mid: string;
-  wrappedNonce: string;
-  kdfParameter1: string;
-  kdfParameter2: string;
-}): Promise<void> {
+export async function ensureStorageKey(params: StorageKeyMaterial): Promise<void> {
   if (currentStorageKeyMid === params.mid) return;
   await initStorageKey(params);
 }

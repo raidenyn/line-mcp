@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { Message } from './line-client';
+import type { Message } from './client';
 
 export function parseExportHeader(text: string): string {
   // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)

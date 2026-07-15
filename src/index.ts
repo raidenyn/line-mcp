@@ -6,7 +6,7 @@ import express from 'express';
 import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
 import { z } from 'zod';
-import { LineClient, AuthData } from './line-client';
+import { LineClient, AuthData, parseExportFile } from '@raidenyn/line-client';
 import { setupOAuthRoutes, validateBearerToken, recordRefreshedAuth, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
@@ -14,7 +14,6 @@ import { CategoryStore } from './category-store';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction, TransactionFilterSchema, TransactionFilter, validateFilters, filterTransactions } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
-import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
 import { dataDir, authDir } from './data-dir';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
@@ -917,7 +916,9 @@ server.registerTool(
 
 function makeLineClient(authData: AuthData): CachingLineClient {
   return new CachingLineClient(
-    new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
+    // recordRefreshedAuth receives the refreshed AuthData snapshot directly —
+    // LineClient no longer mutates the `authData` object passed in here.
+    new LineClient(authData, globalThis.fetch, (fresh) => recordRefreshedAuth(fresh)),
     sharedCache,
     authData.mid,
   );

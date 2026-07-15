@@ -1,4 +1,4 @@
-import { AuthData, LineClient } from './line-client';
+import { AuthData, LineClient } from '@raidenyn/line-client';
 import { resolve } from 'path';
 import { MessageCache } from './message-cache';
 import { CachingLineClient } from './caching-line-client';
@@ -16,7 +16,9 @@ type MakeClient = (authData: AuthData, cache: MessageCache) => SyncClient;
 
 const defaultMakeClient: MakeClient = (authData, cache) =>
   new CachingLineClient(
-    new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
+    // recordRefreshedAuth receives the refreshed AuthData snapshot directly —
+    // LineClient no longer mutates the `authData` object passed in here.
+    new LineClient(authData, globalThis.fetch, (fresh) => recordRefreshedAuth(fresh)),
     cache,
     authData.mid,
   );

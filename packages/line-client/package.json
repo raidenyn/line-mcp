@@ -13,10 +13,14 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "assets"
   ],
   "type": "commonjs",
   "dependencies": {
     "happy-dom": "^20.10.2"
-  }
+  },
+  "bundledDependencies": [
+    "happy-dom"
+  ]
 }

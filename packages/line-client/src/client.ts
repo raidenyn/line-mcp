@@ -1,5 +1,5 @@
 import * as crypto from 'crypto';
-import { getHmac, initStorageKey, ensureStorageKey } from './ltsm';
+import { getHmac, initStorageKey, signForAccount } from './signer';
 
 const BASE_URL = 'https://line-chrome-gw.line-apps.com';
 
@@ -102,9 +102,13 @@ export class LineClient {
   constructor(
     auth?: AuthData | null,
     private readonly fetchFn: typeof globalThis.fetch = globalThis.fetch,
-    private readonly onTokenRefreshed?: () => void,
+    private readonly onTokenRefreshed?: (snapshot: Readonly<AuthData>) => void | Promise<void>,
   ) {
-    if (auth) this.auth = auth;
+    // Clone rather than store the caller's reference: refreshIfExpired() mutates
+    // this.auth in place, and doing that on the caller's own object would be a
+    // hidden side effect on state the caller still holds a reference to. The
+    // refreshed data is instead surfaced explicitly via onTokenRefreshed below.
+    if (auth) this.auth = { ...auth };
   }
 
   isAuthenticated(): boolean {
@@ -143,7 +147,26 @@ export class LineClient {
   ): Promise<T> {
     const body = JSON.stringify(args);
     const accessToken = opts.unauthenticated ? '' : this.auth?.accessToken ?? '';
-    const hmac = await getHmac({ accessToken, path, body });
+    // Once the account's real storage-key material is known (wrappedNonce is
+    // populated), sign via signForAccount(): it checks the loaded storage key
+    // and computes the HMAC as one atomic queued operation, so a concurrent
+    // request for a *different* account can't swap the loaded storage key out
+    // from under this one between the check and the sign (see signer.ts).
+    // Unauthenticated calls and the brief in-flight window during login (after
+    // qrCodeLoginV2 but before getEncryptedIdentityV3 resolves the identity,
+    // when wrappedNonce is still '') fall back to plain getHmac, exactly as
+    // before — there is no account-scoped storage key to coordinate yet.
+    const hmac = !opts.unauthenticated && this.auth?.wrappedNonce
+      ? await signForAccount(
+          {
+            mid: this.auth.mid,
+            wrappedNonce: this.auth.wrappedNonce,
+            kdfParameter1: this.auth.kdfParameter1,
+            kdfParameter2: this.auth.kdfParameter2,
+          },
+          { accessToken, path, body },
+        )
+      : await getHmac({ accessToken, path, body });
 
     const headers: Record<string, string> = {
       ...BASE_HEADERS,
@@ -216,7 +239,9 @@ export class LineClient {
         const data = await response.json() as { accessToken: string; refreshToken?: string };
         auth.accessToken = data.accessToken;
         if (data.refreshToken) auth.refreshToken = data.refreshToken;
-        this.onTokenRefreshed?.();
+        // Pass an immutable snapshot rather than relying on the caller having
+        // kept a reference to the (now-mutated) internal `auth` object.
+        await this.onTokenRefreshed?.({ ...auth });
         return data;
       })().finally(() => { LineClient.refreshLocks.delete(mid); });
       LineClient.refreshLocks.set(mid, p);
@@ -256,12 +281,10 @@ export class LineClient {
     if (!this.auth) {
       throw new Error('Not authenticated. Call the login tool first and scan the QR code.');
     }
-    await ensureStorageKey({
-      mid: this.auth.mid,
-      wrappedNonce: this.auth.wrappedNonce,
-      kdfParameter1: this.auth.kdfParameter1,
-      kdfParameter2: this.auth.kdfParameter2,
-    });
+    // Storage-key selection now happens inside request() itself, atomically with
+    // the HMAC computation (see signForAccount in signer.ts) — no separate
+    // ensure-then-sign pair of queued operations that a concurrent request for
+    // another account could interleave with.
     await this.refreshIfExpired();
   }
 

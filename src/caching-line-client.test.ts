@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
-import type { Message, LineClient } from './line-client';
+import type { Message, LineClient } from '@raidenyn/line-client';
 
 const OWNER = 'owner1';
 

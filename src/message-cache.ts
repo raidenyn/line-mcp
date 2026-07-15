@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { Message } from './line-client';
+import type { Message } from '@raidenyn/line-client';
 
 export class MessageCache {
   private db: Database.Database;

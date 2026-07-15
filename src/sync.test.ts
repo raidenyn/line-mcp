@@ -4,7 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { MessageCache } from './message-cache';
 import { syncAll, startSyncLoop } from './sync';
-import type { AuthData } from './line-client';
+import type { AuthData } from '@raidenyn/line-client';
 
 function msg(id: string, createdTime: string) {
   return { id, from: 'u1', to: 'chat1', toType: 1, createdTime, contentType: 0, hasContent: false };

@@ -3,6 +3,13 @@ import * as path from 'path';
 
 // Must be const so vitest's vi.mock hoisting can close over it without TDZ errors.
 const trackedCalls = { storageKeyInit: 0 };
+// Records the order sandbox commands actually run in, as [command, label] pairs,
+// so the atomic-interleaving test below can assert that two concurrent
+// signForAccount() calls for different accounts never interleave their
+// storage_key_init/get_hmac pairs. `label` is the wrappedNonce (for
+// storage_key_init) or accessToken (for get_hmac) — both of which the tests
+// set to the account's id so the trace directly names the account.
+const commandTrace: Array<[string, string]> = [];
 
 const SANDBOX_ID = 'node-ltsm';
 
@@ -87,25 +94,41 @@ vi.mock('happy-dom', () => {
         if (!msg || msg.sandboxId !== SANDBOX_ID || msg.type !== 'request') return;
 
         const { command, payload } = msg.data;
-        try {
-          let data: unknown = null;
-          switch (command) {
-            case 'init': break;
-            case 'get_hmac': {
-              const { accessToken, path, body } = payload as Record<string, string>;
-              data = `HMAC(${accessToken}|${path}|${body})`;
-              break;
+        // Process asynchronously (a macrotask, not just a microtask) so that if
+        // the caller-side queue ever failed to serialize two concurrent
+        // operations, their sandbox commands would provably interleave here
+        // rather than happening to run back-to-back due to synchronous
+        // execution. This is what makes the atomic-interleaving test below a
+        // real test of signForAccount()'s queuing rather than one that would
+        // pass trivially.
+        setTimeout(() => {
+          try {
+            let data: unknown = null;
+            switch (command) {
+              case 'init': break;
+              case 'get_hmac': {
+                const { accessToken, path, body } = payload as Record<string, string>;
+                if (accessToken === 'FORCE_FAIL') {
+                  throw new Error('forced get_hmac failure');
+                }
+                commandTrace.push(['get_hmac', accessToken]);
+                data = `HMAC(${accessToken}|${path}|${body})`;
+                break;
+              }
+              case 'storage_key_init': {
+                const { wrappedNonce } = payload as Record<string, string>;
+                trackedCalls.storageKeyInit++;
+                commandTrace.push(['storage_key_init', wrappedNonce]);
+                break;
+              }
+              default:
+                throw new Error(`Unknown sandbox command: ${command}`);
             }
-            case 'storage_key_init':
-              trackedCalls.storageKeyInit++;
-              break;
-            default:
-              throw new Error(`Unknown sandbox command: ${command}`);
+            this.parent.postMessage({ sandboxId: SANDBOX_ID, type: 'response', data });
+          } catch (err) {
+            this.parent.postMessage({ sandboxId: SANDBOX_ID, type: 'error', data: String(err) });
           }
-          this.parent.postMessage({ sandboxId: SANDBOX_ID, type: 'response', data });
-        } catch (err) {
-          this.parent.postMessage({ sandboxId: SANDBOX_ID, type: 'error', data: String(err) });
-        }
+        }, 5);
       });
     }
   }
@@ -113,15 +136,15 @@ vi.mock('happy-dom', () => {
   return { Window: FakeWindow };
 });
 
-import { getHmac, initStorageKey, ensureStorageKey } from './ltsm';
+import { getHmac, initStorageKey, ensureStorageKey, signForAccount } from './signer';
 
-// Prevent require('./ltsm/ltsmSandbox.js') from loading the real 4.8 MB bundle.
+// Prevent require('<assets>/ltsmSandbox.js') from loading the real 4.8 MB bundle.
 // vi.mock cannot intercept CJS require() inside async functions, so we pre-seed
 // require.cache with an empty module before initialize() ever runs.
 // This must happen in beforeAll (not at module level) because require.cache is
 // populated after module import, but initialize() is lazy (first API call only).
 beforeAll(() => {
-  const sandboxPath = path.resolve(__dirname, 'ltsm/ltsmSandbox.js');
+  const sandboxPath = path.resolve(__dirname, '..', 'assets', 'ltsm', 'ltsmSandbox.js');
   if (!(require as NodeRequire & { cache: Record<string, unknown> }).cache[sandboxPath]) {
     (require as NodeRequire & { cache: Record<string, unknown> }).cache[sandboxPath] = {
       id: sandboxPath,
@@ -137,6 +160,7 @@ beforeAll(() => {
 
 beforeEach(() => {
   trackedCalls.storageKeyInit = 0;
+  commandTrace.length = 0;
 });
 
 // ───────────────────────────────────────────────────────────
@@ -249,5 +273,85 @@ describe('ensureStorageKey', () => {
     await ensureStorageKey({ mid: 'idem', wrappedNonce: 'wn', kdfParameter1: 'k1', kdfParameter2: 'k2' });
     await ensureStorageKey({ mid: 'idem', wrappedNonce: 'wn', kdfParameter1: 'k1', kdfParameter2: 'k2' });
     expect(trackedCalls.storageKeyInit).toBe(1);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// signForAccount — atomic check-and-sign
+// ───────────────────────────────────────────────────────────
+//
+// Regression coverage for a real race: before this refactor, "ensure the
+// right storage key is loaded" (ensureStorageKey) and "compute the HMAC"
+// (getHmac) were two *separately* queued operations against the shared WASM
+// sandbox. A concurrent call for a different LINE account could enqueue its
+// own storage-key switch in the gap between them, so the first account's
+// get_hmac could run against the second account's just-loaded storage key.
+// signForAccount() bundles both steps into a single enqueue() callback so no
+// other account's operation can run until this one fully resolves.
+
+describe('signForAccount — atomic interleaving', () => {
+  it('never interleaves two concurrent accounts\' storage_key_init/get_hmac pairs', async () => {
+    const keyA = { mid: 'atomic-mid-a', wrappedNonce: 'u-a', kdfParameter1: 'k1a', kdfParameter2: 'k2a' };
+    const keyB = { mid: 'atomic-mid-b', wrappedNonce: 'u-b', kdfParameter1: 'k1b', kdfParameter2: 'k2b' };
+    const inputA = { accessToken: 'u-a', path: '/p', body: '[]' };
+    const inputB = { accessToken: 'u-b', path: '/p', body: '[]' };
+
+    // Fired concurrently (not sequentially awaited) — if the implementation's
+    // queue failed to serialize whole signForAccount() calls, the fake
+    // sandbox's setTimeout-deferred processing above would let A's and B's
+    // commands genuinely interleave here, and the assertion below would catch it.
+    await Promise.all([
+      signForAccount(keyA, inputA),
+      signForAccount(keyB, inputB),
+    ]);
+
+    const aThenB = [
+      ['storage_key_init', 'u-a'], ['get_hmac', 'u-a'],
+      ['storage_key_init', 'u-b'], ['get_hmac', 'u-b'],
+    ];
+    const bThenA = [
+      ['storage_key_init', 'u-b'], ['get_hmac', 'u-b'],
+      ['storage_key_init', 'u-a'], ['get_hmac', 'u-a'],
+    ];
+    expect([aThenB, bThenA]).toContainEqual(commandTrace);
+  });
+
+  it('skips storage_key_init when the requested mid is already loaded', async () => {
+    const key = { mid: 'atomic-mid-repeat', wrappedNonce: 'u-repeat', kdfParameter1: 'k1', kdfParameter2: 'k2' };
+    const input = { accessToken: 'u-repeat', path: '/p', body: '[]' };
+
+    await signForAccount(key, input);
+    await signForAccount(key, input);
+
+    expect(commandTrace.filter(([cmd]) => cmd === 'storage_key_init')).toHaveLength(1);
+    expect(commandTrace.filter(([cmd]) => cmd === 'get_hmac')).toHaveLength(2);
+  });
+
+  it('re-initializes the storage key when the account switches', async () => {
+    const keyA = { mid: 'atomic-switch-a', wrappedNonce: 'switch-a', kdfParameter1: 'k1', kdfParameter2: 'k2' };
+    const keyB = { mid: 'atomic-switch-b', wrappedNonce: 'switch-b', kdfParameter1: 'k1', kdfParameter2: 'k2' };
+
+    await signForAccount(keyA, { accessToken: 'switch-a', path: '/p', body: '[]' });
+    await signForAccount(keyB, { accessToken: 'switch-b', path: '/p', body: '[]' });
+
+    expect(commandTrace).toEqual([
+      ['storage_key_init', 'switch-a'], ['get_hmac', 'switch-a'],
+      ['storage_key_init', 'switch-b'], ['get_hmac', 'switch-b'],
+    ]);
+  });
+
+  it('does not poison the queue when a signForAccount call is rejected', async () => {
+    const failingKey = { mid: 'atomic-fail', wrappedNonce: 'u-fail', kdfParameter1: 'k1', kdfParameter2: 'k2' };
+    const failingInput = { accessToken: 'FORCE_FAIL', path: '/p', body: '[]' };
+
+    await expect(signForAccount(failingKey, failingInput)).rejects.toBeTruthy();
+
+    // The queue must still be usable for the next caller — this must resolve,
+    // not hang or reject because of the previous failure.
+    const nextKey = { mid: 'atomic-after-fail', wrappedNonce: 'u-after-fail', kdfParameter1: 'k1', kdfParameter2: 'k2' };
+    const nextInput = { accessToken: 'u-after-fail', path: '/p', body: '[]' };
+    await expect(signForAccount(nextKey, nextInput)).resolves.toEqual(
+      'HMAC(u-after-fail|/p|[])',
+    );
   });
 });

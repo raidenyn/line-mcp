@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Message } from './line-client';
+import type { Message } from '@raidenyn/line-client';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 
 function message(id: string, iso: string): Message {

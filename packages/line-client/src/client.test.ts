@@ -1,14 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
 
-// Mock ltsm so no WASM is loaded
-vi.mock('./ltsm', () => ({
+// Mock signer so no WASM is loaded
+vi.mock('./signer', () => ({
   getHmac: vi.fn().mockResolvedValue('fake-hmac'),
   initStorageKey: vi.fn().mockResolvedValue(undefined),
   ensureStorageKey: vi.fn().mockResolvedValue(undefined),
+  signForAccount: vi.fn().mockResolvedValue('fake-hmac'),
 }));
 
-import { LineClient, AuthData } from './line-client';
-import { getHmac } from './ltsm';
+import { LineClient, AuthData } from './client';
+import { getHmac } from './signer';
 
 // JWT with exp 10 days from now so refreshIfExpired never triggers
 function makeFakeJwt(expOffsetSec = 86400 * 10): string {
@@ -373,12 +374,18 @@ describe('LineClient — JWT expiry', () => {
     });
 
     const auth: AuthData = { ...baseAuth, accessToken: soonJwt };
-    const client = new LineClient(auth, mockFetch);
+    const onTokenRefreshed = vi.fn();
+    const client = new LineClient(auth, mockFetch, onTokenRefreshed);
     await client.listChats();
 
     const refreshCall = mockFetch.mock.calls.find(([url]: string[]) => url.includes('tokenRefresh'));
     expect(refreshCall).toBeTruthy();
-    expect(auth.accessToken).toBe(newToken);
+    // The fresh token is surfaced via the onTokenRefreshed callback as an
+    // immutable snapshot — the caller's own `auth` object must NOT be mutated
+    // in place (that used to be how callers picked up the refreshed token,
+    // which meant refreshIfExpired() silently mutated shared caller state).
+    expect(onTokenRefreshed).toHaveBeenCalledWith(expect.objectContaining({ accessToken: newToken }));
+    expect(auth.accessToken).toBe(soonJwt);
   });
 
   it('does not refresh when JWT exp is more than 24 hours away', async () => {

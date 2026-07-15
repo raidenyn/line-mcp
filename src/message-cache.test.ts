@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { MessageCache } from './message-cache';
-import type { Message } from './line-client';
+import type { Message } from '@raidenyn/line-client';
 
 const OWNER = 'u-test';
 
