@@ -244,11 +244,16 @@ const pendingCodes = new Map<string, PendingCode>();
 
 // ─── OAuth helpers ────────────────────────────────────────────────────────────
 
-// Loopback redirect URIs allowed per RFC 8252 §7.3 — any path is valid on loopback
+// Loopback redirect URIs allowed per RFC 8252 §7.3 — any path is valid on loopback.
+// The scheme MUST be http(s): a `//localhost` authority parses under any scheme, so
+// checking only hostname would let `javascript:`/`data:`/`file:` URIs through and the
+// authorize page would then navigate the browser to attacker-controlled JavaScript
+// (reflected-XSS / token-exfiltration vector).
 function isLoopbackRedirectUri(uri: string): boolean {
   try {
     const u = new URL(uri);
-    return u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    return (u.protocol === 'http:' || u.protocol === 'https:') &&
+           (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
   } catch {
     return false;
   }
