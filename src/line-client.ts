@@ -94,6 +94,18 @@ export class LineClient {
     return this.completedAuth;
   }
 
+  async getProfileDisplayName(): Promise<string> {
+    if (!this.auth) throw new Error('Not authenticated');
+    const profile = await this.request<{ mid: string; displayName: string }>(
+      '/api/talk/thrift/Talk/TalkService/getProfile',
+      [2],
+    );
+    if (profile.mid !== this.auth.mid) throw new Error('LINE profile MID mismatch');
+    const displayName = profile.displayName?.trim();
+    if (!displayName) throw new Error('LINE profile missing display name');
+    return displayName;
+  }
+
   async waitForPin(): Promise<string | null> {
     return this.loginPinPromise;
   }
@@ -222,7 +234,7 @@ export class LineClient {
     await this.refreshIfExpired();
   }
 
-  async login(): Promise<{ qrUrl: string }> {
+  async login(certificate?: string): Promise<{ qrUrl: string }> {
     // Cancel any in-flight HTTP requests from a previous login session
     if (this.loginAbortController) {
       this.loginAbortController.abort();
@@ -256,8 +268,8 @@ export class LineClient {
     qrUrlObj.searchParams.set('e2eeVersion', '1');
     const qrUrl = qrUrlObj.toString();
 
-    // Save certificate for use after QR scan confirmation (spec: verifyCertificate follows checkQrCodeVerified)
-    this.pendingCertificate = this.auth?.certificate ?? null;
+    // Save the caller-selected certificate for verification after QR scan confirmation.
+    this.pendingCertificate = certificate?.trim() ? certificate : null;
 
     this.pendingAuthSessionId = authSessionId;
     this.pendingLongPollingMaxCount = longPollingMaxCount ?? 2;

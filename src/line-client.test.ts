@@ -614,3 +614,96 @@ describe('LineClient — concurrent refresh deduplication', () => {
     expect(callback).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('LineClient QR login', () => {
+  function makeLoginFetch(verifyResponse: Response) {
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      const headers = init?.headers as Record<string, string>;
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) return apiOk({ authSessionId: 'session-1' });
+      if (url.includes('createQrCode')) return apiOk({
+        callbackUrl: 'https://line.me/R/nv/QRLogin?sid=session-1',
+        longPollingMaxCount: 1,
+        longPollingIntervalSec: 1,
+      });
+      if (url.includes('checkQrCodeVerified')) return apiOk({});
+      if (url.includes('verifyCertificate')) return verifyResponse;
+      if (url.includes('createPinCode')) return apiOk({ pinCode: '123456' });
+      if (url.includes('checkPinCodeVerified')) return apiOk({});
+      if (url.includes('qrCodeLoginV2')) return apiOk({
+        certificate: 'replacement-cert',
+        tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+        mid: 'u123',
+      });
+      if (url.includes('getEncryptedIdentityV3')) return apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      });
+      return apiOk({});
+    });
+    return { fetchFn, calls };
+  }
+
+  it('uses an explicit certificate, keeps QR bootstrap unauthenticated, and skips PIN when accepted', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiOk({}));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await expect(client.waitForPin()).resolves.toBeNull();
+    await client.waitForCompletion();
+
+    const bootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'));
+    expect(bootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    const verify = calls.find(call => call.url.includes('verifyCertificate'))!;
+    expect(verify.body).toEqual([{ authSessionId: 'session-1', certificate: 'saved-cert' }]);
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+    expect(calls.some(call => call.url.includes('checkPinCodeVerified'))).toBe(false);
+  });
+
+  it('falls back to one PIN flow when LINE rejects a stale certificate', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(401, 'certificate rejected'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+    await client.waitForCompletion();
+
+    expect(calls.filter(call => call.url.includes('createPinCode'))).toHaveLength(1);
+    expect(calls.filter(call => call.url.includes('checkPinCodeVerified'))).toHaveLength(1);
+    expect(client.getCompletedAuth()?.certificate).toBe('replacement-cert');
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate server failure', async () => {
+    const { fetchFn, calls } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+});
+
+describe('LineClient profile', () => {
+  it('returns the authenticated account display name', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(apiOk({
+      mid: baseAuth.mid,
+      displayName: 'Personal LINE',
+    }));
+    const client = new LineClient(baseAuth, fetchFn);
+    await expect(client.getProfileDisplayName()).resolves.toBe('Personal LINE');
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toEqual([2]);
+  });
+
+  it.each([
+    [{ mid: baseAuth.mid, displayName: '' }, 'missing display name'],
+    [{ mid: 'u-other', displayName: 'Wrong Account' }, 'profile MID mismatch'],
+  ])('rejects an invalid authenticated profile', async (profile, message) => {
+    const client = new LineClient(baseAuth, vi.fn().mockResolvedValue(apiOk(profile)));
+    await expect(client.getProfileDisplayName()).rejects.toThrow(message);
+  });
+});
