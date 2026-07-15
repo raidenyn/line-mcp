@@ -566,6 +566,81 @@ describe('LineClient.getMessagesInRange', () => {
     expect(result.find(m => m.id === 'm4')?.senderName).toBe('Bob');
     expect(result.find(m => m.id === 'm2')?.senderName).toBe('Dave');
   });
+
+  // Progress guard tests (issue #37): non-advancing pagination must terminate
+
+  it('terminates when the boundary message is re-included by every previous-page call', async () => {
+    // pageSize=2, first page is full and above sinceMs. The previous-page API
+    // re-includes the boundary message (oldest of the current page) every call,
+    // alongside genuinely older messages — so without a progress guard the
+    // loop would re-request the same boundary forever.
+    const recent = [
+      rawMsg('m4', '1700000004000'),
+      rawMsg('m3', '1700000003000'),
+    ];
+    // First previous-page call: re-includes m3 (the boundary) plus an older m2.
+    // Second previous-page call: re-includes m2 (now the boundary) plus older m1.
+    // Third previous-page call: re-includes m1 plus nothing newer → m1 is the
+    // boundary again and the only returned message is m1 itself.
+    const prevPages = [
+      [rawMsg('m3', '1700000003000'), rawMsg('m2', '1700000002000')],
+      [rawMsg('m2', '1700000002000'), rawMsg('m1', '1699999999000')],
+      [rawMsg('m1', '1699999999000')],
+    ];
+    let prevCall = 0;
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(recent));
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk(prevPages[prevCall++] ?? []));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // No duplicates despite boundary re-inclusion.
+    const ids = result.map(m => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // m1 (before sinceMs) filtered out; m2, m3, m4 kept.
+    expect(ids.sort()).toEqual(['m2', 'm3', 'm4']);
+    // Loop must terminate: at most prevPages.length previous-page calls.
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls.length).toBeLessThanOrEqual(prevPages.length);
+  });
+
+  it('terminates when a full page is returned at the same createdTime (clock tie)', async () => {
+    // pageSize=2, first page is full and above sinceMs. The previous-page API
+    // returns a full page whose every message shares the current oldest
+    // createdTime (clock collision). Without a strict-backwards guard the
+    // loop would never advance past that millisecond.
+    const recent = [
+      rawMsg('m4', '1700000004000'),
+      rawMsg('m3', '1700000003000'),
+    ];
+    let prevCall = 0;
+    const prevPages = [
+      // Both at the same ms as m3 (the current oldest). Different ids, so a
+      // naive dedupe-only guard would still loop forever.
+      [rawMsg('m5', '1700000003000'), rawMsg('m6', '1700000003000')],
+    ];
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(recent));
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk(prevPages[prevCall++] ?? []));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // Loop terminates after the single non-advancing previous-page call.
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+    // m3, m4 from the recent page are in range and kept.
+    expect(result.map(m => m.id).sort()).toEqual(['m3', 'm4']);
+  });
 });
 
 // ───────────────────────────────────────────────────────────

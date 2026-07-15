@@ -628,16 +628,27 @@ export class LineClient {
   ): Promise<Message[]> {
     await this.ensureAuthenticated();
 
+    const MAX_ITERATIONS = 1000;
+
     const firstPage = await this.fetchRawPage(chatMid, pageSize);
     const page0 = firstPage ?? [];
-    let allRaw: RawMessage[] = [...page0];
+
+    // Dedupe by message id. A Set is seeded from the first page so that any
+    // boundary message re-included by getPreviousMessagesV2WithRequest is
+    // dropped on subsequent iterations rather than accumulated.
+    const seenIds = new Set<string>(page0.map(m => m.id));
+    const allRaw: RawMessage[] = [...page0];
 
     let currentPage = page0;
-    while (currentPage.length >= pageSize) {
+    let iterations = 0;
+    while (currentPage.length >= pageSize && iterations < MAX_ITERATIONS) {
+      iterations++;
+
       const oldest = currentPage.reduce((a, b) =>
         parseInt(a.createdTime, 10) < parseInt(b.createdTime, 10) ? a : b,
       );
-      if (parseInt(oldest.createdTime, 10) < sinceMs) break;
+      const oldestTime = parseInt(oldest.createdTime, 10);
+      if (oldestTime < sinceMs) break;
 
       const prevPage = await this.fetchPreviousRawPage(
         chatMid,
@@ -645,7 +656,26 @@ export class LineClient {
         pageSize,
       );
       const page = prevPage ?? [];
-      allRaw = [...allRaw, ...page];
+
+      // Keep only genuinely new messages, dropping any boundary re-includes.
+      const fresh = page.filter(m => !seenIds.has(m.id));
+
+      // Progress guard (issue #37): the oldest timestamp of the fresh
+      // messages must move strictly backwards relative to the current
+      // page's oldest. If the API re-uses the boundary (fresh is empty) or
+      // returns a full page pinned to the same millisecond (clock tie),
+      // there is no forward progress and we break — discarding the non-
+      // advancing messages — to avoid a non-terminating loop.
+      if (fresh.length === 0) break;
+      const freshOldestTime = fresh.reduce((min, m) => {
+        const t = parseInt(m.createdTime, 10);
+        return t < min ? t : min;
+      }, Infinity);
+      if (freshOldestTime >= oldestTime) break;
+
+      for (const m of fresh) seenIds.add(m.id);
+      allRaw.push(...fresh);
+
       currentPage = page;
     }
 
