@@ -47,4 +47,39 @@ describe('data-dir helpers', () => {
     const { cacheDbPath } = await import('./data-dir');
     expect(cacheDbPath()).toBe(path.join('/d', 'cache', 'messages.db'));
   });
+
+  describe('explicit root overrides', () => {
+    it('secretPath uses the explicit root instead of DATA_DIR', async () => {
+      process.env.DATA_DIR = '/env-set';
+      const { secretPath } = await import('./data-dir');
+      expect(secretPath('/explicit')).toBe(path.join('/explicit', 'secret'));
+    });
+
+    it('authDir uses the explicit root instead of DATA_DIR', async () => {
+      process.env.DATA_DIR = '/env-set';
+      const { authDir } = await import('./data-dir');
+      expect(authDir('/explicit')).toBe(path.join('/explicit', 'auth'));
+    });
+
+    it('templatesDir uses the explicit root instead of DATA_DIR', async () => {
+      process.env.DATA_DIR = '/env-set';
+      const { templatesDir } = await import('./data-dir');
+      expect(templatesDir('/explicit')).toBe(path.join('/explicit', 'templates'));
+    });
+
+    it('cacheDbPath uses the explicit root instead of DATA_DIR', async () => {
+      process.env.DATA_DIR = '/env-set';
+      const { cacheDbPath } = await import('./data-dir');
+      expect(cacheDbPath('/explicit')).toBe(path.join('/explicit', 'cache', 'messages.db'));
+    });
+
+    it('every helper falls back to dataDir() when no root is given, even with DATA_DIR unset', async () => {
+      const { secretPath, authDir, templatesDir, cacheDbPath } = await import('./data-dir');
+      const base = path.join(process.cwd(), 'data');
+      expect(secretPath()).toBe(path.join(base, 'secret'));
+      expect(authDir()).toBe(path.join(base, 'auth'));
+      expect(templatesDir()).toBe(path.join(base, 'templates'));
+      expect(cacheDbPath()).toBe(path.join(base, 'cache', 'messages.db'));
+    });
+  });
 });

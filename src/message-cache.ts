@@ -11,34 +11,55 @@ export class MessageCache {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
     this.db = new Database(dbPath);
+    this.assertNoLegacySchema();
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
+        owner_mid    TEXT    NOT NULL,
         chat_mid     TEXT    NOT NULL,
         message_id   TEXT    NOT NULL,
         created_time INTEGER NOT NULL,
         raw_json     TEXT    NOT NULL,
-        PRIMARY KEY (chat_mid, message_id)
+        PRIMARY KEY (owner_mid, chat_mid, message_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_messages_chat_time
-        ON messages (chat_mid, created_time);
+      CREATE INDEX IF NOT EXISTS idx_messages_owner_chat_time
+        ON messages (owner_mid, chat_mid, created_time);
+      PRAGMA user_version = 2;
     `);
   }
 
-  upsertMessages(chatMid: string, messages: Message[]): void {
+  // Rejects a pre-owner-scoping `messages` table outright rather than silently
+  // querying a nonexistent `owner_mid` column. Task 2 arranges migration of any
+  // such legacy database before a MessageCache is constructed against it.
+  private assertNoLegacySchema(): void {
+    const table = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+    ).get();
+    if (!table) return;
+    const columns = this.db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+    const hasOwnerMid = columns.some(c => c.name === 'owner_mid');
+    if (!hasOwnerMid) {
+      throw new Error(
+        'MessageCache: found a legacy `messages` table without `owner_mid`. ' +
+        'Migrate the database to the owner-scoped schema before constructing MessageCache.',
+      );
+    }
+  }
+
+  upsertMessages(ownerMid: string, chatMid: string, messages: Message[]): void {
     const stmt = this.db.prepare(
-      'INSERT OR REPLACE INTO messages (chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?, ?)',
     );
     const insertAll = this.db.transaction((msgs: Message[]) => {
       for (const m of msgs) {
-        stmt.run(chatMid, m.id, parseInt(m.createdTime, 10), JSON.stringify(m));
+        stmt.run(ownerMid, chatMid, m.id, parseInt(m.createdTime, 10), JSON.stringify(m));
       }
     });
     insertAll(messages);
   }
 
-  getMessages(chatMid: string, sinceMs?: number, untilMs?: number): Message[] {
-    const conditions = ['chat_mid = ?'];
-    const params: unknown[] = [chatMid];
+  getMessages(ownerMid: string, chatMid: string, sinceMs?: number, untilMs?: number): Message[] {
+    const conditions = ['owner_mid = ?', 'chat_mid = ?'];
+    const params: unknown[] = [ownerMid, chatMid];
     if (sinceMs != null) { conditions.push('created_time >= ?'); params.push(sinceMs); }
     if (untilMs != null) { conditions.push('created_time <= ?'); params.push(untilMs); }
     const sql = `SELECT raw_json FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_time ASC`;
@@ -55,15 +76,21 @@ export class MessageCache {
     });
   }
 
-  latestTimestamp(chatMid: string): number | null {
+  latestTimestamp(ownerMid: string, chatMid: string): number | null {
     const row = this.db.prepare(
-      'SELECT MAX(created_time) as ts FROM messages WHERE chat_mid = ?',
-    ).get(chatMid) as { ts: number | null };
+      'SELECT MAX(created_time) as ts FROM messages WHERE owner_mid = ? AND chat_mid = ?',
+    ).get(ownerMid, chatMid) as { ts: number | null };
     return row.ts ?? null;
   }
 
-  getDistinctChatMids(): string[] {
-    const rows = this.db.prepare('SELECT DISTINCT chat_mid FROM messages').all() as { chat_mid: string }[];
+  getDistinctChatMids(ownerMid: string): string[] {
+    const rows = this.db.prepare(
+      'SELECT DISTINCT chat_mid FROM messages WHERE owner_mid = ?',
+    ).all(ownerMid) as { chat_mid: string }[];
     return rows.map(r => r.chat_mid);
+  }
+
+  close(): void {
+    this.db.close();
   }
 }

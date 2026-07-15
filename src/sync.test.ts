@@ -31,8 +31,8 @@ describe('syncAll', () => {
 
   it('calls getMessagesInRange for each previously-accessed chat', async () => {
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages('chat1', [msg('1', '1000')]);
-    cache.upsertMessages('chat2', [msg('2', '2000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat2', [msg('2', '2000')]);
 
     const authDir = makeAuthDir(TEST_AUTH);
     const getMessagesInRange = vi.fn().mockResolvedValue([]);
@@ -52,8 +52,8 @@ describe('syncAll', () => {
 
   it('continues syncing other chats when one chat fails', async () => {
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages('chat1', [msg('1', '1000')]);
-    cache.upsertMessages('chat2', [msg('2', '2000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat2', [msg('2', '2000')]);
 
     const authDir = makeAuthDir(TEST_AUTH);
     const getMessagesInRange = vi.fn()
@@ -70,7 +70,7 @@ describe('syncAll', () => {
     const chatMid = 'c1234567890test';
     const errorText = 'injected credential-like error text';
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages(chatMid, [{ ...msg('1', '1000'), to: chatMid }]);
+    cache.upsertMessages(authData.mid, chatMid, [{ ...msg('1', '1000'), to: chatMid }]);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const makeClient = vi.fn().mockReturnValue({
       getMessagesInRange: vi.fn().mockRejectedValue(new Error(errorText)),
@@ -88,7 +88,7 @@ describe('syncAll', () => {
 
   it('skips mid if auth file contains invalid JSON', async () => {
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
 
     const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
     writeFileSync(join(authDir, 'badusr.json'), 'not-json');
@@ -105,7 +105,7 @@ describe('syncAll', () => {
     ['mismatched', { ...TEST_AUTH, mid: 'u-other' }],
   ])('skips %s auth records through shared validation', async (_label, value) => {
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
     writeFileSync(join(authDir, 'u123.json'), JSON.stringify(value));
     const makeClient = vi.fn();
@@ -124,6 +124,33 @@ describe('syncAll', () => {
 
     expect(makeClient).not.toHaveBeenCalled();
   });
+
+  it('syncs each account against only its own owner-scoped chats', async () => {
+    const cache = new MessageCache(':memory:');
+    const ownerA: AuthData = { ...TEST_AUTH, mid: 'u-owner-a' };
+    const ownerB: AuthData = { ...TEST_AUTH, mid: 'u-owner-b' };
+    cache.upsertMessages('u-owner-a', 'c-a', [msg('1', '1000')]);
+    cache.upsertMessages('u-owner-b', 'c-b', [msg('2', '2000')]);
+
+    const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
+    writeFileSync(join(authDir, 'u-owner-a.json'), JSON.stringify(ownerA));
+    writeFileSync(join(authDir, 'u-owner-b.json'), JSON.stringify(ownerB));
+
+    const seenByOwner: Record<string, string[]> = {};
+    const makeClient = vi.fn().mockImplementation((authData: AuthData) => ({
+      getMessagesInRange: vi.fn().mockImplementation(async (chatMid: string) => {
+        (seenByOwner[authData.mid] ??= []).push(chatMid);
+        return [];
+      }),
+    }));
+
+    await syncAll(cache, { authDir, makeClient });
+
+    expect(seenByOwner).toEqual({
+      'u-owner-a': ['c-a'],
+      'u-owner-b': ['c-b'],
+    });
+  });
 });
 
 describe('startSyncLoop', () => {
@@ -134,7 +161,7 @@ describe('startSyncLoop', () => {
 
   it('runs syncAll immediately on start', async () => {
     const cache = new MessageCache(':memory:');
-    cache.upsertMessages('chat1', [msg('1', '1000')]);
+    cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     const authDir = makeAuthDir(TEST_AUTH);
     const getMessagesInRange = vi.fn().mockResolvedValue([]);
     const makeClient = vi.fn().mockReturnValue({ getMessagesInRange });

@@ -93,14 +93,33 @@ const AUTH_FIELDS: ReadonlyArray<keyof AuthData> = [
   'kdfParameter2',
 ];
 
-function parseStoredAuthRecord(value: unknown, expectedMid: string): StoredAuthRecord | null {
-  if (!value || typeof value !== 'object') return null;
+// Structural-only outcome: callers may surface `reason` to operators, so it
+// must never echo field values (credentials, certificates, nonces, ...).
+type StoredAuthRecordParseResult =
+  | { ok: true; record: StoredAuthRecord }
+  | { ok: false; reason: string };
+
+function parseStoredAuthRecordDetailed(value: unknown, expectedMid: string): StoredAuthRecordParseResult {
+  if (!isSafeMid(expectedMid)) return { ok: false, reason: 'file name is not a safe LINE mid' };
+  if (!value || typeof value !== 'object') return { ok: false, reason: 'content is not a JSON object' };
   const candidate = value as Record<string, unknown>;
-  if (candidate.mid !== expectedMid || !isSafeMid(expectedMid)) return null;
-  if (AUTH_FIELDS.some(field => typeof candidate[field] !== 'string' || candidate[field] === '')) return null;
+  if (candidate.mid !== expectedMid) return { ok: false, reason: '"mid" field does not match the file name' };
+  const badFields = AUTH_FIELDS.filter(
+    field => typeof candidate[field] !== 'string' || candidate[field] === '',
+  );
+  if (badFields.length > 0) {
+    return { ok: false, reason: `missing or invalid field(s): ${badFields.join(', ')}` };
+  }
   if ('displayName' in candidate &&
-      (typeof candidate.displayName !== 'string' || candidate.displayName.trim() === '')) return null;
-  return candidate as unknown as StoredAuthRecord;
+      (typeof candidate.displayName !== 'string' || candidate.displayName.trim() === '')) {
+    return { ok: false, reason: '"displayName" is present but empty or not a string' };
+  }
+  return { ok: true, record: candidate as unknown as StoredAuthRecord };
+}
+
+function parseStoredAuthRecord(value: unknown, expectedMid: string): StoredAuthRecord | null {
+  const result = parseStoredAuthRecordDetailed(value, expectedMid);
+  return result.ok ? result.record : null;
 }
 
 export function loadStoredAuthRecord(
@@ -133,6 +152,45 @@ export function listStoredAuthRecords(storeDir = dataDirAuth()): StoredAuthRecor
     else process.stderr.write(`[OAuth] Ignoring invalid auth record for ${maskMid(mid)}\n`);
   }
   return records;
+}
+
+export interface AuthRecordInventory {
+  valid: Array<{ mid: string; path: string }>;
+  invalid: Array<{ path: string; reason: string }>;
+}
+
+// Unlike listStoredAuthRecords (which silently drops anything it can't parse,
+// for use by the normal login/account-selector flow), this reports every file
+// so a migration decision can tell "no candidates" apart from "candidates
+// that could not be trusted" — both cases must block automatic attribution,
+// but only the latter needs a caller-visible reason. `reason` is always a
+// structural description (e.g. "missing field: accessToken") and must never
+// include field values, since those are LINE credentials.
+export function inventoryStoredAuthRecords(storeDir: string): AuthRecordInventory {
+  const valid: AuthRecordInventory['valid'] = [];
+  const invalid: AuthRecordInventory['invalid'] = [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(storeDir, { withFileTypes: true });
+  } catch {
+    return { valid, invalid };
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const mid = entry.name.slice(0, -5);
+    const file = path.join(storeDir, entry.name);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch {
+      invalid.push({ path: file, reason: 'file is not valid JSON' });
+      continue;
+    }
+    const result = parseStoredAuthRecordDetailed(parsed, mid);
+    if (result.ok) valid.push({ mid: result.record.mid, path: file });
+    else invalid.push({ path: file, reason: result.reason });
+  }
+  return { valid, invalid };
 }
 
 export function persistAuthData(

@@ -16,7 +16,8 @@ import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTempla
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { parseExportFile } from './export-parser';
 import { startSyncLoop } from './sync';
-import { cacheDbPath } from './data-dir';
+import { dataDir, authDir } from './data-dir';
+import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
 import { normalizeBasePath } from './base-path';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
@@ -882,7 +883,7 @@ server.registerTool(
 
     try {
       const messages = parseExportFile(content, resolvedMid, timezone);
-      sharedCache.upsertMessages(resolvedMid, messages);
+      sharedCache.upsertMessages(authData.mid, resolvedMid, messages);
       pendingFiles.delete(file_ref_id); // clean up after success
 
       const timestamps = messages.map(m => parseInt(m.createdTime, 10)).filter(Number.isFinite);
@@ -918,6 +919,7 @@ function makeLineClient(authData: AuthData): CachingLineClient {
   return new CachingLineClient(
     new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
     sharedCache,
+    authData.mid,
   );
 }
 
@@ -934,13 +936,43 @@ function seedTestToken(): void {
   }
 }
 
-async function main() {
-  // Two separate connections to the same SQLite file — safe since each touches a disjoint table
-  // (messages vs categories) and better-sqlite3 is synchronous, so writes never overlap.
-  sharedCache = new MessageCache(cacheDbPath());
-  categoryStore = new CategoryStore(cacheDbPath());
-  startSyncLoop(sharedCache);
-  const PORT = parseInt(process.env.PORT ?? '3000', 10);
+export interface MainOptions {
+  // Overrides process.env.DATA_DIR — used by tests to guarantee an isolated
+  // root that bootstrapPersistence() migrates instead of the developer's
+  // real data/ directory. Production always omits this and gets the
+  // process-wide default.
+  dataRoot?: string;
+  // Overrides process.env.PORT / the 3000 default — tests bind to an
+  // ephemeral port (0) so they never collide with a real running server.
+  port?: number;
+}
+
+export interface MainResult {
+  server: ReturnType<express.Express['listen']>;
+  syncHandle: ReturnType<typeof startSyncLoop>;
+  active: ActivePersistence;
+}
+
+// Startup order is the one cutover contract this function exists to enforce:
+// bootstrap the committed generation, then open the two stores against its
+// paths, then start sync, then start listening. Nothing here may construct
+// MessageCache/CategoryStore, or read/write persistence state, before
+// bootstrapPersistence() has returned.
+export async function main(options: MainOptions = {}): Promise<MainResult> {
+  const dataRoot = options.dataRoot ?? dataDir();
+  const active = bootstrapPersistence({ dataRoot });
+
+  // Two separate DB files (Task 2) — line messages and bank/category data no
+  // longer share a single SQLite file the way the pre-migration schema did.
+  sharedCache = new MessageCache(active.lineDbPath);
+  categoryStore = new CategoryStore(active.bankDbPath);
+
+  // Scope sync's auth lookups to the same dataRoot this generation was
+  // bootstrapped from — never the process-wide default when a caller (e.g. a
+  // test) has passed an explicit override.
+  const syncHandle = startSyncLoop(sharedCache, 24 * 60 * 60 * 1000, { authDir: authDir(dataRoot) });
+
+  const PORT = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
   const basePath = normalizeBasePath(process.env.BASE_PATH);
   const WWW_AUTH = makeWwwAuthenticate(PORT, basePath);
   seedTestToken();
@@ -983,13 +1015,24 @@ async function main() {
     res.status(405).send('Use POST /mcp');
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
-    process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}${basePath}/mcp\n`);
-    process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}${basePath}/mcp\n`);
+  const httpServer = await new Promise<ReturnType<express.Express['listen']>>((resolvePromise) => {
+    const s = app.listen(PORT, '0.0.0.0', () => {
+      process.stderr.write(`LINE MCP server listening on http://localhost:${PORT}${basePath}/mcp\n`);
+      process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${PORT}${basePath}/mcp\n`);
+      resolvePromise(s);
+    });
   });
+
+  return { server: httpServer, syncHandle, active };
 }
 
-main().catch((err) => {
-  process.stderr.write(`Fatal: ${err}\n`);
-  process.exit(1);
-});
+// Only auto-starts when this file is the process entry point (`ts-node
+// src/index.ts` / the compiled dist/index.js run directly) — never when
+// imported as a module (e.g. by tests exercising main() directly against an
+// isolated dataRoot).
+if (require.main === module) {
+  main().catch((err) => {
+    process.stderr.write(`Fatal: ${err}\n`);
+    process.exit(1);
+  });
+}

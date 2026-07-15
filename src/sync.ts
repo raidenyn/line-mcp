@@ -18,6 +18,7 @@ const defaultMakeClient: MakeClient = (authData, cache) =>
   new CachingLineClient(
     new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
     cache,
+    authData.mid,
   );
 
 export interface SyncOptions {
@@ -27,8 +28,6 @@ export interface SyncOptions {
 
 export async function syncAll(cache: MessageCache, options: SyncOptions = {}): Promise<void> {
   const makeClient = options.makeClient ?? defaultMakeClient;
-  const chatMids = cache.getDistinctChatMids();
-  if (chatMids.length === 0) return;
 
   const records = listStoredAuthRecords(resolve(options.authDir ?? getAuthDir()));
   if (records.length === 0) return;
@@ -37,6 +36,8 @@ export async function syncAll(cache: MessageCache, options: SyncOptions = {}): P
     const authData = authDataFromStoredRecord(record);
     const mid = authData.mid;
     latestAuthData.set(mid, authData);
+    const chatMids = cache.getDistinctChatMids(mid);
+    if (chatMids.length === 0) continue;
     const client = makeClient(authData, cache);
     let synced = 0;
     let errors = 0;

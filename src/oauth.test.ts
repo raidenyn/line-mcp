@@ -895,6 +895,69 @@ describe('stored auth records', () => {
     ].sort());
   });
 
+  describe('inventoryStoredAuthRecords', () => {
+    it('reports every invalid file with a structural reason instead of dropping it', () => {
+      const dir = path.join(tmpdir, 'auth');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
+      fs.writeFileSync(path.join(dir, 'u-second.json'), JSON.stringify({
+        ...TEST_AUTH,
+        mid: 'u-second',
+        displayName: 'Work LINE',
+      }));
+      fs.writeFileSync(path.join(dir, 'u-corrupt.json'), '{');
+      fs.writeFileSync(path.join(dir, 'u-incomplete.json'), JSON.stringify({ mid: 'u-incomplete' }));
+      fs.writeFileSync(path.join(dir, 'u-mismatch.json'), JSON.stringify({
+        ...TEST_AUTH,
+        mid: 'u-other',
+      }));
+      fs.writeFileSync(path.join(dir, 'u-empty-name.json'), JSON.stringify({
+        ...TEST_AUTH,
+        mid: 'u-empty-name',
+        displayName: '',
+      }));
+
+      const inventory = mod.inventoryStoredAuthRecords(dir);
+
+      expect(inventory.valid.map(v => v.mid).sort()).toEqual([TEST_AUTH.mid, 'u-second'].sort());
+      expect(inventory.valid.every(v => typeof v.path === 'string' && v.path.length > 0)).toBe(true);
+      expect(inventory.invalid.map(i => i.path.split(path.sep).pop()).sort()).toEqual([
+        'u-corrupt.json',
+        'u-empty-name.json',
+        'u-incomplete.json',
+        'u-mismatch.json',
+      ].sort());
+      // Every invalid entry must carry a non-empty structural reason.
+      for (const entry of inventory.invalid) {
+        expect(entry.reason.length).toBeGreaterThan(0);
+      }
+      // Reasons must never leak credential values (accessToken/refreshToken/
+      // certificate/etc.), only describe the structural problem.
+      const serializedReasons = JSON.stringify(inventory.invalid.map(i => i.reason));
+      expect(serializedReasons).not.toContain(TEST_AUTH.accessToken);
+      expect(serializedReasons).not.toContain(TEST_AUTH.refreshToken);
+      expect(serializedReasons).not.toContain(TEST_AUTH.certificate);
+      expect(serializedReasons).not.toContain(TEST_AUTH.wrappedNonce);
+    });
+
+    it('returns empty valid/invalid arrays when the directory does not exist', () => {
+      const inventory = mod.inventoryStoredAuthRecords(path.join(tmpdir, 'does-not-exist'));
+      expect(inventory).toEqual({ valid: [], invalid: [] });
+    });
+
+    it('agrees with listStoredAuthRecords on which records are valid', () => {
+      const dir = path.join(tmpdir, 'auth');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
+      fs.writeFileSync(path.join(dir, 'u-bad.json'), JSON.stringify({ mid: 'u-bad' }));
+
+      const inventory = mod.inventoryStoredAuthRecords(dir);
+      const listed = mod.listStoredAuthRecords(dir);
+      expect(inventory.valid.map(v => v.mid).sort()).toEqual(listed.map(r => r.mid).sort());
+      expect(inventory.invalid).toHaveLength(1);
+    });
+  });
+
   it('rejects unsafe MIDs and non-string auth fields', () => {
     expect(mod.loadStoredAuthRecord('../escape')).toBeNull();
     const dir = path.join(tmpdir, 'auth');
