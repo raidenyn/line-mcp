@@ -677,6 +677,20 @@ describe('LineClient QR login', () => {
     expect(client.getCompletedAuth()?.certificate).toBe('replacement-cert');
   });
 
+  it('delivers a rejected-certificate PIN without writing it to stderr', async () => {
+    const pinCode = '123456';
+    const { fetchFn } = makeLoginFetch(apiErr(401, 'certificate rejected'));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe(pinCode);
+    await client.waitForCompletion();
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(pinCode);
+  });
+
   it('fails login instead of entering PIN on a verifyCertificate server failure', async () => {
     const { fetchFn, calls } = makeLoginFetch(httpErr(500));
     const client = new LineClient(null, fetchFn);

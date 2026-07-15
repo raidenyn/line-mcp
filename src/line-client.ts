@@ -377,7 +377,6 @@ export class LineClient {
         [{ authSessionId }],
       );
       const pinCode = pinData.pinCode;
-      process.stderr.write(`[LINE] PIN code: ${pinCode}\n`);
       this.loginPinResolve?.(pinCode);
       this.loginPinResolve = null;
 
