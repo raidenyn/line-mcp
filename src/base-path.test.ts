@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { normalizeBasePath } from './base-path';
+import { describe, it, expect, afterEach } from 'vitest';
+import { normalizeBasePath, getPublicOrigin } from './base-path';
 
 describe('normalizeBasePath', () => {
   it('returns empty string for undefined', () => {
@@ -36,5 +36,29 @@ describe('normalizeBasePath', () => {
 
   it('leaves an already-normalized path unchanged', () => {
     expect(normalizeBasePath('/line-mcp')).toBe('/line-mcp');
+  });
+});
+
+describe('getPublicOrigin', () => {
+  const ORIGINAL = process.env.PUBLIC_URL;
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.PUBLIC_URL;
+    else process.env.PUBLIC_URL = ORIGINAL;
+  });
+
+  it('uses PUBLIC_URL when set', () => {
+    process.env.PUBLIC_URL = 'https://mcp.example.test';
+    expect(getPublicOrigin(3000)).toBe('https://mcp.example.test');
+  });
+
+  it('strips a trailing slash from PUBLIC_URL', () => {
+    process.env.PUBLIC_URL = 'https://mcp.example.test/';
+    expect(getPublicOrigin(3000)).toBe('https://mcp.example.test');
+  });
+
+  it('falls back to localhost when PUBLIC_URL is unset', () => {
+    delete process.env.PUBLIC_URL;
+    expect(getPublicOrigin(3000)).toBe('http://localhost:3000');
   });
 });
