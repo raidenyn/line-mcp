@@ -165,8 +165,9 @@ async function withOAuthServer(
 }
 
 function sessionIdFromQrPage(html: string): string {
-  const sid = html.match(/const sid = "([^"]+)"/)?.[1];
-  if (!sid) throw new Error('QR page did not contain a login session ID');
+  const context = html.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/)?.[1];
+  const sid = context && (JSON.parse(context) as { sid?: unknown }).sid;
+  if (typeof sid !== 'string') throw new Error('QR page did not contain a login session ID');
   return sid;
 }
 
@@ -357,6 +358,28 @@ describe('GET /authorize', () => {
     const response = await req(`${base}/authorize?${validParams}`);
     expect(response.status).toBe(200);
     expect(__createdClients.at(-1)?.login).toHaveBeenCalledWith(undefined);
+  });
+
+  it('keeps script-breakout OAuth values in inert JSON context', async () => {
+    const state = '</script><img src=x onerror=alert(1)>';
+    const redirectUri = 'http://localhost:8765/</script><img src=x onerror=alert(2)>';
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: 'claude-code',
+      redirect_uri: redirectUri,
+      code_challenge: s256('verifier123'),
+      code_challenge_method: 'S256',
+      state,
+    });
+
+    const { status, body } = await req(`${base}/authorize?${params}`);
+    const html = body as string;
+    const context = html.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/)?.[1];
+
+    expect(status).toBe(200);
+    expect(html).not.toContain('</script><img');
+    expect(context).toBeDefined();
+    expect(JSON.parse(context!)).toMatchObject({ state, redirectUri, basePath: '' });
   });
 
   it('automatically starts QR login with the only saved certificate', async () => {
@@ -1068,7 +1091,7 @@ describe('non-root basePath', () => {
     expect(unprefixed.status).toBe(404);
   });
 
-  it('embeds the basePath in the authorize page poll script', async () => {
+  it('embeds the basePath in the authorize page OAuth context', async () => {
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: 'claude-code',
@@ -1078,8 +1101,10 @@ describe('non-root basePath', () => {
       state: 'st',
     });
     const { body: html } = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
-    expect(html as string).toContain(`const basePath = ${JSON.stringify(BASE_PATH_2)};`);
-    expect(html as string).toContain(`fetch(basePath + '/authorize/poll?sid='`);
+    const page = html as string;
+    const context = page.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/)?.[1];
+    expect(JSON.parse(context!)).toMatchObject({ basePath: BASE_PATH_2 });
+    expect(page).toContain(`fetch(basePath + '/authorize/poll?sid='`);
   });
 
   it('serves /token under the prefix, not at root', async () => {

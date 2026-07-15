@@ -384,6 +384,9 @@ async function monitorLogin(sid: string): Promise<void> {
 }
 
 function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redirectUri: string, basePath: string): string {
+  const oauthContext = JSON.stringify({ sid, state, redirectUri, basePath })
+    .replace(/</g, '\\u003c');
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -410,11 +413,11 @@ function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redire
   <span id="pin"></span>
   <p class="hint">Go to LINE → Settings → Account → Allow login or check the login prompt.</p>
 </div>
+<script type="application/json" id="oauth-context">${oauthContext}</script>
 <script>
-const sid = ${JSON.stringify(sid)};
-const state = ${JSON.stringify(state)};
-const redirectUri = ${JSON.stringify(redirectUri)};
-const basePath = ${JSON.stringify(basePath)};
+const { sid, state, redirectUri, basePath } = JSON.parse(
+  document.getElementById('oauth-context').textContent,
+);
 const status = document.getElementById('status');
 const pinBox = document.getElementById('pin-box');
 const pinEl = document.getElementById('pin');
