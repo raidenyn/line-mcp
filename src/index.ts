@@ -7,7 +7,7 @@ import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
 import { z } from 'zod';
 import { LineClient, AuthData } from './line-client';
-import { setupOAuthRoutes, validateBearerToken, latestAuthData, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, persistAuthData, pendingUploads, pendingFiles } from './oauth';
+import { setupOAuthRoutes, validateBearerToken, recordRefreshedAuth, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
 import { MessageCache } from './message-cache';
 import { CategoryStore } from './category-store';
@@ -916,10 +916,7 @@ server.registerTool(
 
 function makeLineClient(authData: AuthData): CachingLineClient {
   return new CachingLineClient(
-    new LineClient(authData, globalThis.fetch, () => {
-      latestAuthData.set(authData.mid, authData);
-      persistAuthData(authData);
-    }),
+    new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
     sharedCache,
   );
 }

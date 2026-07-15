@@ -792,6 +792,29 @@ describe('stored auth records', () => {
     });
   });
 
+  describe('recordRefreshedAuth', () => {
+    it('updates memory and disk while preserving the account display name', () => {
+      mod.persistAuthData(TEST_AUTH, 'Personal LINE');
+      mod.latestAuthData.clear();
+
+      mod.recordRefreshedAuth(FRESH_AUTH);
+
+      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
+      expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
+        ...FRESH_AUTH,
+        displayName: 'Personal LINE',
+      });
+    });
+
+    it('keeps refreshed credentials in memory when persistence fails', () => {
+      const blocked = path.join(tmpdir, 'blocked-auth');
+      fs.writeFileSync(blocked, 'not a directory');
+
+      expect(() => mod.recordRefreshedAuth(FRESH_AUTH, blocked)).not.toThrow();
+      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
+    });
+  });
+
   it('throws without replacing the previous record when rename fails', () => {
     mod.persistAuthData(TEST_AUTH, 'Personal LINE');
     vi.mocked(fs.renameSync).mockImplementationOnce(() => {
@@ -883,6 +906,47 @@ describe('issueTokens lazy load', () => {
     // The token should embed FRESH_AUTH, so validateBearerToken returns it
     const result = mod.validateBearerToken(access_token);
     expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
+  });
+});
+
+describe('refresh token after restart', () => {
+  let tmpdir: string;
+
+  beforeEach(() => {
+    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
+    process.env.DATA_DIR = tmpdir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+    delete process.env.DATA_DIR;
+  });
+
+  it('uses persisted fresh LINE credentials without starting authorization', async () => {
+    vi.resetModules();
+    const first = await import('./oauth');
+    first.persistAuthData(FRESH_AUTH, 'Personal LINE');
+    const { refresh_token } = first.issueTokens(TEST_AUTH);
+
+    vi.resetModules();
+    const restarted = await import('./oauth');
+    const { LineClient } = await import('./line-client');
+    vi.mocked(LineClient).mockClear();
+    await withOAuthServer(path.join(tmpdir, 'auth'), async restartBase => {
+      const response = await fetch(`${restartBase}/token`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ grant_type: 'refresh_token', refresh_token }),
+      });
+
+      expect(response.status).toBe(200);
+      const body = await response.json() as { access_token: string };
+      expect(restarted.validateBearerToken(body.access_token)?.accessToken)
+        .toBe(FRESH_AUTH.accessToken);
+      expect(restarted.latestAuthData.get(TEST_AUTH.mid)?.accessToken)
+        .toBe(FRESH_AUTH.accessToken);
+      expect(LineClient).not.toHaveBeenCalled();
+    }, restarted.setupOAuthRoutes);
   });
 });
 

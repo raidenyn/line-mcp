@@ -7,7 +7,7 @@ import {
   latestAuthData,
   listStoredAuthRecords,
   maskMid,
-  persistAuthData,
+  recordRefreshedAuth,
 } from './oauth';
 import { authDir as getAuthDir } from './data-dir';
 
@@ -16,10 +16,7 @@ type MakeClient = (authData: AuthData, cache: MessageCache) => SyncClient;
 
 const defaultMakeClient: MakeClient = (authData, cache) =>
   new CachingLineClient(
-    new LineClient(authData, globalThis.fetch, () => {
-      latestAuthData.set(authData.mid, authData);
-      persistAuthData(authData);
-    }),
+    new LineClient(authData, globalThis.fetch, () => recordRefreshedAuth(authData)),
     cache,
   );
 

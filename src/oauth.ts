@@ -164,6 +164,20 @@ export function persistAuthData(
   }
 }
 
+export function recordRefreshedAuth(
+  authData: AuthData,
+  storeDir = dataDirAuth(),
+): void {
+  latestAuthData.set(authData.mid, authData);
+  try {
+    persistAuthData(authData, undefined, storeDir);
+  } catch {
+    process.stderr.write(
+      `[OAuth] Refreshed LINE auth for ${maskMid(authData.mid)} but could not persist it\n`,
+    );
+  }
+}
+
 export function loadAuthFromDisk(mid: string): AuthData | null {
   const record = loadStoredAuthRecord(mid);
   if (!record) return null;
