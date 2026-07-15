@@ -48,8 +48,8 @@ export async function syncAll(cache: MessageCache, options: SyncOptions = {}): P
       try {
         await client.getMessagesInRange(chatMid, 0);
         synced++;
-      } catch (err) {
-        process.stderr.write(`[sync] Error syncing ${chatMid} for ${maskMid(mid)}: ${(err as Error).message}\n`);
+      } catch {
+        process.stderr.write(`[sync] Error syncing ${maskMid(chatMid)} for ${maskMid(mid)}\n`);
         errors++;
       }
     }
@@ -64,8 +64,8 @@ export function startSyncLoop(
   options: SyncOptions = {},
 ): ReturnType<typeof setInterval> {
   process.stderr.write(`[sync] Starting daily sync loop (interval: ${Math.round(intervalMs / 3_600_000)}h)\n`);
-  const run = () => syncAll(cache, options).catch(err =>
-    process.stderr.write(`[sync] Unexpected error: ${(err as Error).message}\n`),
+  const run = () => syncAll(cache, options).catch(() =>
+    process.stderr.write('[sync] Unexpected sync error\n'),
   );
   run();
   return setInterval(run, intervalMs);
