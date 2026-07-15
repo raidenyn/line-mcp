@@ -207,6 +207,8 @@ interface LoginSession {
   codeChallengeMethod: string;
   redirectUri: string;
   clientId: string;
+  authStoreDir: string;
+  previousDisplayName?: string;
   phase: 'qr' | 'pin_needed' | 'complete' | 'failed';
   pin?: string;
   code?: string;
@@ -241,6 +243,81 @@ function s256(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
 
+interface AuthorizationRequest {
+  state: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  redirectUri: string;
+  clientId: string;
+}
+
+interface AccountSelectionSession {
+  request: AuthorizationRequest;
+  choices: Map<string, string>;
+  expiresAt: number;
+}
+
+const accountSelectionSessions = new Map<string, AccountSelectionSession>();
+
+function accountLabel(record: StoredAuthRecord): string {
+  return record.displayName ?? maskMid(record.mid);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
+  })[char]!);
+}
+
+function accountSelectorHtml(
+  basePath: string,
+  selectionSession: string,
+  choices: Array<{ id: string; label: string }>,
+): string {
+  const options = choices.map(({ id, label }, index) => `
+    <label>
+      <input type="radio" name="choice" value="${escapeHtml(id)}"${index === 0 ? ' checked' : ''}>
+      ${escapeHtml(label)}
+    </label>`).join('');
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Select LINE account</title></head><body>
+<h1>Select LINE account</h1>
+<form method="post" action="${escapeHtml(basePath)}/authorize/select">
+<input type="hidden" name="selection_session" value="${escapeHtml(selectionSession)}">
+${options}
+<button type="submit">Continue</button>
+</form></body></html>`;
+}
+
+async function startQrLogin(
+  request: AuthorizationRequest,
+  selected: StoredAuthRecord | null,
+  authStoreDir: string,
+  basePath: string,
+  res: Response,
+): Promise<void> {
+  const lineClient = new LineClient();
+  const { qrUrl } = await lineClient.login(selected?.certificate);
+  const qrDataUrl = await QRCode.toDataURL(qrUrl);
+  const sid = crypto.randomBytes(16).toString('hex');
+  loginSessions.set(sid, {
+    lineClient,
+    ...request,
+    authStoreDir,
+    previousDisplayName: selected?.displayName,
+    phase: 'qr',
+  });
+  void monitorLogin(sid);
+  res.type('html').send(authorizePageHtml(
+    qrDataUrl,
+    sid,
+    request.state,
+    request.redirectUri,
+    basePath,
+  ));
+}
+
 async function monitorLogin(sid: string): Promise<void> {
   const session = loginSessions.get(sid);
   if (!session) return;
@@ -254,6 +331,23 @@ async function monitorLogin(sid: string): Promise<void> {
     const authData = session.lineClient.getCompletedAuth();
     if (!authData) throw new Error('Login completed but no auth data returned');
 
+    let displayName = session.previousDisplayName;
+    try {
+      displayName = await session.lineClient.getProfileDisplayName();
+    } catch {
+      process.stderr.write(`[OAuth] Profile name unavailable for ${maskMid(authData.mid)}\n`);
+    }
+
+    try {
+      persistAuthData(authData, displayName, session.authStoreDir);
+    } catch {
+      process.stderr.write(`[OAuth] Could not persist completed login for ${maskMid(authData.mid)}\n`);
+      session.phase = 'failed';
+      session.error = 'Unable to save LINE login securely; check DATA_DIR/auth permissions and try again.';
+      return;
+    }
+
+    latestAuthData.set(authData.mid, authData);
     const code = crypto.randomBytes(16).toString('hex');
     pendingCodes.set(code, {
       authData,
@@ -265,9 +359,6 @@ async function monitorLogin(sid: string): Promise<void> {
     });
     session.code = code;
     session.phase = 'complete';
-
-    latestAuthData.set(authData.mid, authData);
-    persistAuthData(authData);
   } catch (err) {
     session.phase = 'failed';
     session.error = String(err);
@@ -341,7 +432,12 @@ poll();
 </html>`;
 }
 
-export function setupOAuthRoutes(app: Express, port: number, basePath: string): void {
+export function setupOAuthRoutes(
+  app: Express,
+  port: number,
+  basePath: string,
+  authStoreDir = dataDirAuth(),
+): void {
   const base = `http://localhost:${port}${basePath}`;
 
   // RFC 9728 requires the well-known segment inserted before the *full* path of the
@@ -401,28 +497,60 @@ export function setupOAuthRoutes(app: Express, port: number, basePath: string): 
       return;
     }
 
+    const authorizationRequest: AuthorizationRequest = {
+      state: state ?? '',
+      codeChallenge: code_challenge,
+      codeChallengeMethod: code_challenge_method ?? 'S256',
+      redirectUri: redirect_uri,
+      clientId: client_id,
+    };
+    const records = listStoredAuthRecords(authStoreDir);
+
+    if (records.length > 1) {
+      const now = Date.now();
+      for (const [sid, selection] of accountSelectionSessions) {
+        if (selection.expiresAt < now) accountSelectionSessions.delete(sid);
+      }
+      const selectionSession = crypto.randomBytes(16).toString('hex');
+      const choices = records.map(record => ({
+        id: crypto.randomBytes(16).toString('hex'),
+        mid: record.mid,
+        label: accountLabel(record),
+      }));
+      accountSelectionSessions.set(selectionSession, {
+        request: authorizationRequest,
+        choices: new Map(choices.map(choice => [choice.id, choice.mid])),
+        expiresAt: now + 600_000,
+      });
+      res.type('html').send(accountSelectorHtml(basePath, selectionSession, choices));
+      return;
+    }
+
     try {
-      const lineClient = new LineClient();
-      const { qrUrl } = await lineClient.login();
-      const qrDataUrl = await QRCode.toDataURL(qrUrl);
-      const sid = crypto.randomBytes(16).toString('hex');
+      await startQrLogin(authorizationRequest, records[0] ?? null, authStoreDir, basePath, res);
+    } catch (err) {
+      res.status(500).send(`Failed to start LINE login: ${(err as Error).message}`);
+    }
+  });
 
-      loginSessions.set(sid, {
-        lineClient,
-        state: state ?? '',
-        codeChallenge: code_challenge,
-        codeChallengeMethod: code_challenge_method ?? 'S256',
-        redirectUri: redirect_uri,
-        clientId: client_id,
-        phase: 'qr',
-      });
-
-      monitorLogin(sid).catch((err) => {
-        process.stderr.write(`[OAuth] monitorLogin error for ${sid}: ${err}\n`);
-      });
-
-      res.setHeader('Content-Type', 'text/html');
-      res.send(authorizePageHtml(qrDataUrl, sid, state ?? '', redirect_uri, basePath));
+  app.post(`${basePath}/authorize/select`, async (req: Request, res: Response) => {
+    const sessionId = typeof req.body?.selection_session === 'string'
+      ? req.body.selection_session : '';
+    const choice = typeof req.body?.choice === 'string' ? req.body.choice : '';
+    const selection = accountSelectionSessions.get(sessionId);
+    accountSelectionSessions.delete(sessionId);
+    if (!selection || selection.expiresAt < Date.now()) {
+      res.status(400).send('Account selection expired or invalid; restart authorization.');
+      return;
+    }
+    const mid = selection.choices.get(choice);
+    const record = mid ? loadStoredAuthRecord(mid, authStoreDir) : null;
+    if (!record) {
+      res.status(400).send('Selected account is no longer available; restart authorization.');
+      return;
+    }
+    try {
+      await startQrLogin(selection.request, record, authStoreDir, basePath, res);
     } catch (err) {
       res.status(500).send(`Failed to start LINE login: ${(err as Error).message}`);
     }

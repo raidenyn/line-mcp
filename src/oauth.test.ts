@@ -23,13 +23,31 @@ vi.mock('./line-client', () => {
     kdfParameter1: 'k1',
     kdfParameter2: 'k2',
   };
-  const mockLineClient = {
-    login: vi.fn().mockResolvedValue({ qrUrl: 'https://line.me/R/nv/QRLogin?sid=fakesid' }),
-    waitForPin: vi.fn().mockResolvedValue(null),
-    waitForCompletion: vi.fn().mockResolvedValue(undefined),
-    getCompletedAuth: vi.fn().mockReturnValue(mockAuthData),
+  const createdClients: Array<{
+    login: ReturnType<typeof vi.fn>;
+    waitForPin: ReturnType<typeof vi.fn>;
+    waitForCompletion: ReturnType<typeof vi.fn>;
+    getCompletedAuth: ReturnType<typeof vi.fn>;
+    getProfileDisplayName: ReturnType<typeof vi.fn>;
+  }> = [];
+  const profileLookup = vi.fn().mockResolvedValue('Personal LINE');
+  const LineClient = vi.fn().mockImplementation(function LineClient() {
+    const client = {
+      login: vi.fn().mockResolvedValue({ qrUrl: 'https://line.me/R/nv/QRLogin?sid=fakesid' }),
+      waitForPin: vi.fn().mockResolvedValue(null),
+      waitForCompletion: vi.fn().mockResolvedValue(undefined),
+      getCompletedAuth: vi.fn().mockReturnValue(mockAuthData),
+      getProfileDisplayName: profileLookup,
+    };
+    createdClients.push(client);
+    return client;
+  });
+  return {
+    LineClient,
+    __createdClients: createdClients,
+    __profileLookup: profileLookup,
+    __mockAuthData: mockAuthData,
   };
-  return { LineClient: vi.fn().mockImplementation(function LineClient() { return mockLineClient; }) };
 });
 
 import { setupOAuthRoutes, latestAuthData, validateBearerToken, seedTestToken, makeWwwAuthenticate } from './oauth';
@@ -40,6 +58,8 @@ let server: http.Server;
 let base: string;
 let server2: http.Server;
 let base2: string;
+let authStoreDir: string;
+let authStoreDir2: string;
 const BASE_PATH_2 = '/line-mcp';
 
 async function req(
@@ -66,6 +86,100 @@ const sampleAuthData = {
   kdfParameter2: 'k2',
 };
 
+function writeRouteAuth(mid: string, displayName: string, certificate: string): void {
+  fs.writeFileSync(path.join(authStoreDir, `${mid}.json`), JSON.stringify({
+    ...sampleAuthData,
+    mid,
+    certificate,
+    displayName,
+  }));
+}
+
+function bodyAsHtml(response: { body: unknown }): string {
+  expect(typeof response.body).toBe('string');
+  return response.body as string;
+}
+
+function parseSelector(html: string): {
+  selectionSession: string;
+  personalChoice: string;
+  workChoice: string;
+} {
+  const selectionSession = html.match(/name="selection_session" value="([^"]+)"/)?.[1];
+  const rows = [...html.matchAll(/value="([^"]+)"[^>]*>\s*([^<]+)/g)];
+  const choiceFor = (label: string) => rows.find(([, , text]) => text.trim() === label)?.[1];
+  const personalChoice = choiceFor('Personal LINE');
+  const workChoice = choiceFor('Work LINE');
+  if (!selectionSession || !personalChoice || !workChoice) {
+    throw new Error('Could not parse account selector');
+  }
+  return { selectionSession, personalChoice, workChoice };
+}
+
+async function postSelection(
+  selectionSession: string,
+  choice: string,
+  targetBase = base,
+  targetPath = '',
+) {
+  return req(`${targetBase}${targetPath}/authorize/select`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ selection_session: selectionSession, choice }),
+  });
+}
+
+async function lastCreatedClient() {
+  const lineModule = await import('./line-client') as unknown as {
+    __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
+  };
+  return lineModule.__createdClients.at(-1)!;
+}
+
+const routeParams = () => new URLSearchParams({
+  response_type: 'code',
+  client_id: 'claude-code',
+  redirect_uri: 'http://localhost:8765/callback',
+  code_challenge: s256('verifier123'),
+  code_challenge_method: 'S256',
+  state: 'st',
+});
+
+async function withOAuthServer(
+  authStorePath: string,
+  run: (serverBase: string) => Promise<void>,
+  setupRoutes: typeof setupOAuthRoutes = setupOAuthRoutes,
+): Promise<void> {
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+  const localServer = http.createServer(app);
+  await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+  const port = (localServer.address() as { port: number }).port;
+  setupRoutes(app, port, '', authStorePath);
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>(resolve => localServer.close(() => resolve()));
+  }
+}
+
+function sessionIdFromQrPage(html: string): string {
+  const sid = html.match(/const sid = "([^"]+)"/)?.[1];
+  if (!sid) throw new Error('QR page did not contain a login session ID');
+  return sid;
+}
+
+async function waitForTerminalLogin(serverBase: string, sid: string) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const response = await req(`${serverBase}/authorize/poll?sid=${encodeURIComponent(sid)}`);
+    const body = response.body as { phase: string; code?: string; error?: string };
+    if (body.phase === 'complete' || body.phase === 'failed') return body;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  throw new Error('Login session did not reach a terminal phase');
+}
+
 // --- test lifecycle ---
 
 beforeAll(async () => {
@@ -78,7 +192,8 @@ beforeAll(async () => {
     server.listen(0, '127.0.0.1', () => {
       const addr = server.address() as { port: number };
       base = `http://127.0.0.1:${addr.port}`;
-      setupOAuthRoutes(app, addr.port, '');
+      authStoreDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-routes-'));
+      setupOAuthRoutes(app, addr.port, '', authStoreDir);
       resolve();
     });
   });
@@ -96,7 +211,8 @@ beforeAll(async () => {
     server2.listen(0, 'localhost', () => {
       const addr = server2.address() as { port: number };
       base2 = `http://localhost:${addr.port}`;
-      setupOAuthRoutes(app2, addr.port, BASE_PATH_2);
+      authStoreDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-routes-prefix-'));
+      setupOAuthRoutes(app2, addr.port, BASE_PATH_2, authStoreDir2);
       resolve();
     });
   });
@@ -105,10 +221,26 @@ beforeAll(async () => {
 afterAll(() => Promise.all([
   new Promise<void>((resolve) => server.close(() => resolve())),
   new Promise<void>((resolve) => server2.close(() => resolve())),
-]));
+] ).then(() => {
+  fs.rmSync(authStoreDir, { recursive: true, force: true });
+  fs.rmSync(authStoreDir2, { recursive: true, force: true });
+}));
 
-beforeEach(() => {
+beforeEach(async () => {
   latestAuthData.clear();
+  fs.rmSync(authStoreDir, { recursive: true, force: true });
+  fs.mkdirSync(authStoreDir, { recursive: true });
+  fs.rmSync(authStoreDir2, { recursive: true, force: true });
+  fs.mkdirSync(authStoreDir2, { recursive: true });
+  const lineModule = await import('./line-client') as unknown as {
+    LineClient: ReturnType<typeof vi.fn>;
+    __createdClients: unknown[];
+    __profileLookup: ReturnType<typeof vi.fn>;
+  };
+  lineModule.LineClient.mockClear();
+  lineModule.__createdClients.length = 0;
+  lineModule.__profileLookup.mockReset();
+  lineModule.__profileLookup.mockResolvedValue('Personal LINE');
 });
 
 // ───────────────────────────────────────────────────────────
@@ -218,6 +350,134 @@ describe('GET /authorize', () => {
     state: 'st',
   });
 
+  it('starts first-time QR login without a certificate when no account is saved', async () => {
+    const { __createdClients } = await import('./line-client') as unknown as {
+      __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
+    };
+    const response = await req(`${base}/authorize?${validParams}`);
+    expect(response.status).toBe(200);
+    expect(__createdClients.at(-1)?.login).toHaveBeenCalledWith(undefined);
+  });
+
+  it('automatically starts QR login with the only saved certificate', async () => {
+    fs.writeFileSync(path.join(authStoreDir, `${sampleAuthData.mid}.json`), JSON.stringify({
+      ...sampleAuthData,
+      displayName: 'Personal LINE',
+    }));
+    const { __createdClients } = await import('./line-client') as unknown as {
+      __createdClients: Array<{ login: ReturnType<typeof vi.fn> }>;
+    };
+
+    const response = await req(`${base}/authorize?${validParams}`);
+
+    expect(response.status).toBe(200);
+    expect(__createdClients.at(-1)?.login).toHaveBeenCalledWith(sampleAuthData.certificate);
+  });
+
+  it('renders human names and opaque choices without starting QR for multiple accounts', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+    const { LineClient } = await import('./line-client');
+
+    const { status, body } = await req(`${base}/authorize?${validParams}`);
+    const html = body as string;
+
+    expect(status).toBe(200);
+    expect(html).toContain('Personal LINE');
+    expect(html).toContain('Work LINE');
+    expect(html).not.toContain('u-personal');
+    expect(html).not.toContain('u-work');
+    expect(html).not.toContain('personal-cert');
+    expect(html).not.toContain(sampleAuthData.accessToken);
+    expect(LineClient).not.toHaveBeenCalled();
+  });
+
+  it('uses the selected account certificate once and rejects replay', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+    const form = new URLSearchParams({ selection_session: selectionSession, choice: workChoice });
+
+    const selected = await req(`${base}/authorize/select`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form,
+    });
+    expect(selected.status).toBe(200);
+    expect((await lastCreatedClient()).login).toHaveBeenCalledWith('work-cert');
+
+    const replay = await req(`${base}/authorize/select`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: form,
+    });
+    expect(replay.status).toBe(400);
+  });
+
+  it('returns 400 for an unknown selection session', async () => {
+    const response = await postSelection('missing-session', 'missing-choice');
+    expect(response.status).toBe(400);
+  });
+
+  it('returns 400 for a tampered choice and consumes the selection session', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+
+    expect((await postSelection(selectionSession, 'missing-choice')).status).toBe(400);
+    expect((await postSelection(selectionSession, workChoice)).status).toBe(400);
+  });
+
+  it('returns 400 when the selected record disappears before submission', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+    fs.unlinkSync(path.join(authStoreDir, 'u-work.json'));
+
+    expect((await postSelection(selectionSession, workChoice)).status).toBe(400);
+  });
+
+  it('expires account selection sessions after ten minutes', async () => {
+    vi.useFakeTimers();
+    try {
+      writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+      writeRouteAuth('u-work', 'Work LINE', 'work-cert');
+      const selector = await req(`${base}/authorize?${validParams}`);
+      const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+      vi.advanceTimersByTime(600_001);
+
+      expect((await postSelection(selectionSession, workChoice)).status).toBe(400);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses opaque choices to distinguish duplicate display names', async () => {
+    writeRouteAuth('u-personal', 'LINE Account', 'personal-cert');
+    writeRouteAuth('u-work', 'LINE Account', 'work-cert');
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const html = bodyAsHtml(selector);
+    const choices = [...html.matchAll(/name="choice" value="([^"]+)"/g)].map(match => match[1]);
+    expect(new Set(choices).size).toBe(2);
+  });
+
+  it('shows a masked MID for a legacy record without displayName', async () => {
+    writeRouteAuth('u-personal', 'Personal LINE', 'personal-cert');
+    fs.writeFileSync(path.join(authStoreDir, 'u123456789abcdef.json'), JSON.stringify({
+      ...sampleAuthData,
+      mid: 'u123456789abcdef',
+      certificate: 'legacy-cert',
+    }));
+
+    const selector = await req(`${base}/authorize?${validParams}`);
+    const html = bodyAsHtml(selector);
+    expect(html).toContain('u123...cdef');
+    expect(html).not.toContain('u123456789abcdef');
+  });
+
   it('returns 400 when response_type is missing', async () => {
     const params = new URLSearchParams(validParams);
     params.delete('response_type');
@@ -280,6 +540,65 @@ describe('GET /authorize/poll', () => {
     const { status, body } = await req(`${base}/authorize/poll?sid=nonexistent`);
     expect(status).toBe(404);
     expect((body as Record<string, string>).error).toBe('Session not found');
+  });
+});
+
+describe('OAuth completion persistence', () => {
+  it('does not issue a code or update memory when durable persistence fails', async () => {
+    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-blocked-'));
+    const blockedAuthPath = path.join(parent, 'auth');
+    fs.writeFileSync(blockedAuthPath, 'not a directory');
+    latestAuthData.clear();
+
+    await withOAuthServer(blockedAuthPath, async serverBase => {
+      const authorize = await req(`${serverBase}/authorize?${routeParams()}`);
+      const sid = sessionIdFromQrPage(bodyAsHtml(authorize));
+      const pollBody = await waitForTerminalLogin(serverBase, sid);
+
+      expect(pollBody.phase).toBe('failed');
+      expect(pollBody.code).toBeUndefined();
+      expect(latestAuthData.has('umid')).toBe(false);
+    });
+  });
+
+  it('persists the profile name before reporting login complete', async () => {
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-success-'));
+    await withOAuthServer(store, async serverBase => {
+      const authorize = await req(`${serverBase}/authorize?${routeParams()}`);
+      const sid = sessionIdFromQrPage(bodyAsHtml(authorize));
+      const pollBody = await waitForTerminalLogin(serverBase, sid);
+
+      expect(pollBody.phase).toBe('complete');
+      expect(pollBody.code).toBeTypeOf('string');
+      expect(JSON.parse(fs.readFileSync(path.join(store, 'umid.json'), 'utf8')))
+        .toMatchObject({ mid: 'umid', displayName: 'Personal LINE' });
+    });
+  });
+
+  it('retains the saved display name when profile lookup fails', async () => {
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-profile-fallback-'));
+    fs.writeFileSync(path.join(store, 'umid.json'), JSON.stringify({
+      accessToken: 'old-token',
+      refreshToken: 'old-refresh',
+      certificate: 'old-cert',
+      mid: 'umid',
+      wrappedNonce: 'old-nonce',
+      kdfParameter1: 'old-kdf1',
+      kdfParameter2: 'old-kdf2',
+      displayName: 'Existing Name',
+    }));
+    const lineModule = await import('./line-client') as unknown as {
+      __profileLookup: ReturnType<typeof vi.fn>;
+    };
+    lineModule.__profileLookup.mockRejectedValueOnce(new Error('profile unavailable'));
+
+    await withOAuthServer(store, async serverBase => {
+      const authorize = await req(`${serverBase}/authorize?${routeParams()}`);
+      const sid = sessionIdFromQrPage(bodyAsHtml(authorize));
+      expect((await waitForTerminalLogin(serverBase, sid)).phase).toBe('complete');
+      expect(JSON.parse(fs.readFileSync(path.join(store, 'umid.json'), 'utf8')).displayName)
+        .toBe('Existing Name');
+    });
   });
 });
 
@@ -536,6 +855,41 @@ describe('validateBearerToken lazy load', () => {
 // ───────────────────────────────────────────────────────────
 
 describe('non-root basePath', () => {
+  it('serves account selection submission under the configured base path', async () => {
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: 'claude-code',
+      redirect_uri: 'http://localhost:8765/callback',
+      code_challenge: s256('verifier123'),
+      code_challenge_method: 'S256',
+      state: 'st',
+    });
+    fs.writeFileSync(path.join(authStoreDir2, 'u-personal.json'), JSON.stringify({
+      ...sampleAuthData,
+      mid: 'u-personal',
+      certificate: 'personal-cert',
+      displayName: 'Personal LINE',
+    }));
+    fs.writeFileSync(path.join(authStoreDir2, 'u-work.json'), JSON.stringify({
+      ...sampleAuthData,
+      mid: 'u-work',
+      certificate: 'work-cert',
+      displayName: 'Work LINE',
+    }));
+    const selector = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
+    const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
+
+    const selected = await postSelection(
+      selectionSession,
+      workChoice,
+      base2,
+      BASE_PATH_2,
+    );
+
+    expect(selected.status).toBe(200);
+    expect((await lastCreatedClient()).login).toHaveBeenCalledWith('work-cert');
+  });
+
   it('serves protected-resource metadata at the well-known suffix location mirroring /mcp', async () => {
     const { status, body } = await req(`${base2}/.well-known/oauth-protected-resource${BASE_PATH_2}/mcp`);
     expect(status).toBe(200);
