@@ -2,9 +2,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { MessageCache } from './message-cache';
+import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { syncAll, startSyncLoop } from './sync';
-import type { AuthData } from '@raidenyn/line-client';
+import type { AuthData, MessageCache } from '@raidenyn/line-client';
 
 function msg(id: string, createdTime: string) {
   return { id, from: 'u1', to: 'chat1', toType: 1, createdTime, contentType: 0, hasContent: false };
@@ -30,7 +30,7 @@ describe('syncAll', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   it('calls getMessagesInRange for each previously-accessed chat', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     cache.upsertMessages(TEST_AUTH.mid, 'chat2', [msg('2', '2000')]);
 
@@ -46,12 +46,12 @@ describe('syncAll', () => {
   });
 
   it('does not throw when auth dir is missing', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     await expect(syncAll(cache, { authDir: '/nonexistent/auth' })).resolves.not.toThrow();
   });
 
   it('continues syncing other chats when one chat fails', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     cache.upsertMessages(TEST_AUTH.mid, 'chat2', [msg('2', '2000')]);
 
@@ -69,7 +69,7 @@ describe('syncAll', () => {
     const authData = { ...TEST_AUTH, mid: 'u1234567890test' };
     const chatMid = 'c1234567890test';
     const errorText = 'injected credential-like error text';
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(authData.mid, chatMid, [{ ...msg('1', '1000'), to: chatMid }]);
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const makeClient = vi.fn().mockReturnValue({
@@ -87,7 +87,7 @@ describe('syncAll', () => {
   });
 
   it('skips mid if auth file contains invalid JSON', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
 
     const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
@@ -104,7 +104,7 @@ describe('syncAll', () => {
     ['incomplete', { mid: 'u123', accessToken: 'tok' }],
     ['mismatched', { ...TEST_AUTH, mid: 'u-other' }],
   ])('skips %s auth records through shared validation', async (_label, value) => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     const authDir = mkdtempSync(join(tmpdir(), 'sync-test-'));
     writeFileSync(join(authDir, 'u123.json'), JSON.stringify(value));
@@ -116,7 +116,7 @@ describe('syncAll', () => {
   });
 
   it('does nothing when cache has no previously-accessed chats', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     const authDir = makeAuthDir(TEST_AUTH);
     const makeClient = vi.fn().mockReturnValue({ getMessagesInRange: vi.fn() });
 
@@ -126,7 +126,7 @@ describe('syncAll', () => {
   });
 
   it('syncs each account against only its own owner-scoped chats', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     const ownerA: AuthData = { ...TEST_AUTH, mid: 'u-owner-a' };
     const ownerB: AuthData = { ...TEST_AUTH, mid: 'u-owner-b' };
     cache.upsertMessages('u-owner-a', 'c-a', [msg('1', '1000')]);
@@ -160,7 +160,7 @@ describe('startSyncLoop', () => {
   });
 
   it('runs syncAll immediately on start', async () => {
-    const cache = new MessageCache(':memory:');
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     cache.upsertMessages(TEST_AUTH.mid, 'chat1', [msg('1', '1000')]);
     const authDir = makeAuthDir(TEST_AUTH);
     const getMessagesInRange = vi.fn().mockResolvedValue([]);

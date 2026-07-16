@@ -1,5 +1,4 @@
-import type { LineClient, Message } from '@raidenyn/line-client';
-import type { MessageCache } from './message-cache';
+import type { LineClient, Message, MessageCache } from '@raidenyn/line-client';
 
 export class CachingLineClient {
   constructor(

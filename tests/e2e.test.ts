@@ -10,7 +10,7 @@ import Database from 'better-sqlite3';
 import { spawn, ChildProcess } from 'child_process';
 import { main as startMain, type MainResult } from '../src/index';
 import * as persistenceMigrationModule from '../src/persistence-migration';
-import * as messageCacheModule from '../src/message-cache';
+import * as lineClientSqliteModule from '@raidenyn/line-client-sqlite';
 import * as categoryStoreModule from '../src/category-store';
 import * as syncModule from '../src/sync';
 
@@ -322,7 +322,7 @@ describe('LINE MCP server e2e (real account)', () => {
 //
 // Runs main() in-process against an isolated temp dataRoot — no spawned
 // child, no .line-auth.json required. Spies wrap the exact functions/classes
-// src/index.ts's main() calls (bootstrapPersistence, MessageCache,
+// src/index.ts's main() calls (bootstrapPersistence, SqliteMessageCache,
 // CategoryStore, startSyncLoop) and call through to the real implementation,
 // so this observes the real construction points, not a decoupled log.
 describe('startup order', () => {
@@ -351,8 +351,8 @@ describe('startup order', () => {
       },
     );
 
-    const OriginalMessageCache = messageCacheModule.MessageCache;
-    vi.spyOn(messageCacheModule, 'MessageCache').mockImplementation(function (
+    const OriginalMessageCache = lineClientSqliteModule.SqliteMessageCache;
+    vi.spyOn(lineClientSqliteModule, 'SqliteMessageCache').mockImplementation(function (
       this: unknown,
       ...args: ConstructorParameters<typeof OriginalMessageCache>
     ) {
@@ -467,7 +467,7 @@ describe('old volume migration', () => {
     expect(report.ownerMid).toBe('u-legacy-owner');
     expect(report.counts.attributedMessages).toBe(1);
 
-    const cache = new messageCacheModule.MessageCache(result.active.lineDbPath);
+    const cache = new lineClientSqliteModule.SqliteMessageCache({ dbPath: result.active.lineDbPath });
     try {
       expect(cache.getMessages('u-legacy-owner', 'c1')).toHaveLength(1);
     } finally {

@@ -14,9 +14,13 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "type": "commonjs",
+  "scripts": {
+    "prepack": "node scripts/vendor-happy-dom.js"
+  },
   "dependencies": {
     "happy-dom": "^20.10.2"
   },

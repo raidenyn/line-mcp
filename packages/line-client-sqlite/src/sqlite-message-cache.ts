@@ -1,12 +1,19 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { Message } from '@raidenyn/line-client';
+import type { Message, MessageCache } from '@raidenyn/line-client';
 
-export class MessageCache {
+/**
+ * SQLite-backed implementation of the `MessageCache` interface
+ * (`@raidenyn/line-client`). Constructed with an explicit `dbPath` — this
+ * package never derives a default location; that's the caller's
+ * responsibility (see the server's data-dir helpers).
+ */
+export class SqliteMessageCache implements MessageCache {
   private db: Database.Database;
 
-  constructor(dbPath: string) {
+  constructor(options: { dbPath: string }) {
+    const { dbPath } = options;
     if (dbPath !== ':memory:') {
       mkdirSync(dirname(dbPath), { recursive: true });
     }
@@ -28,8 +35,8 @@ export class MessageCache {
   }
 
   // Rejects a pre-owner-scoping `messages` table outright rather than silently
-  // querying a nonexistent `owner_mid` column. Task 2 arranges migration of any
-  // such legacy database before a MessageCache is constructed against it.
+  // querying a nonexistent `owner_mid` column. Migration arranges migration of
+  // any such legacy database before a SqliteMessageCache is constructed against it.
   private assertNoLegacySchema(): void {
     const table = this.db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
@@ -39,8 +46,8 @@ export class MessageCache {
     const hasOwnerMid = columns.some(c => c.name === 'owner_mid');
     if (!hasOwnerMid) {
       throw new Error(
-        'MessageCache: found a legacy `messages` table without `owner_mid`. ' +
-        'Migrate the database to the owner-scoped schema before constructing MessageCache.',
+        'SqliteMessageCache: found a legacy `messages` table without `owner_mid`. ' +
+        'Migrate the database to the owner-scoped schema before constructing SqliteMessageCache.',
       );
     }
   }

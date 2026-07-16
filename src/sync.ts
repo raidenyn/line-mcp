@@ -1,6 +1,5 @@
-import { AuthData, LineClient } from '@raidenyn/line-client';
+import { AuthData, LineClient, type MessageCache } from '@raidenyn/line-client';
 import { resolve } from 'path';
-import { MessageCache } from './message-cache';
 import { CachingLineClient } from './caching-line-client';
 import {
   authDataFromStoredRecord,

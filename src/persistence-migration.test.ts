@@ -13,7 +13,7 @@ import {
   type FailPoint,
   type MigrationReport,
 } from './persistence-migration';
-import { MessageCache } from './message-cache';
+import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 
 // ─── Fixture builders ─────────────────────────────────────────────────────────
 
@@ -317,7 +317,7 @@ describe('persistence-migration: ownership decision matrix', () => {
   it('attributed messages are readable through the normal owner-scoped MessageCache API', () => {
     buildFixture('single-valid-auth', dataRoot);
     const active = bootstrapPersistence({ dataRoot });
-    const cache = new MessageCache(active.lineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
     try {
       expect(cache.getMessages(OWNER, 'c1').map(m => m.id)).toEqual(['m1']);
       expect(cache.getMessages(OWNER, 'c2').map(m => m.id)).toEqual(['m2']);
@@ -348,7 +348,7 @@ describe('persistence-migration: ownership decision matrix', () => {
     // Nothing prevents a caller from mistakenly pointing MessageCache at the
     // quarantine file; the *schema* itself (no `messages` table) is the
     // guarantee that no rows are readable through the normal API.
-    const cache = new MessageCache(active.quarantineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.quarantineDbPath });
     try {
       expect(cache.getMessages(OWNER, 'c1')).toEqual([]);
       expect(cache.getMessages(OWNER, 'c2')).toEqual([]);
@@ -480,7 +480,7 @@ describe('persistence-migration: interruption and pointer authority', () => {
       const report = readReport(restart.active.reportPath);
       expect(report.ownerMid).toBe(OWNER);
       expect(report.counts.attributedMessages).toBe(2);
-      const cache = new MessageCache(restart.active.lineDbPath);
+      const cache = new SqliteMessageCache({ dbPath: restart.active.lineDbPath });
       try {
         expect(cache.getMessages(OWNER, 'c1').map(m => m.id)).toEqual(['m1']);
       } finally {
@@ -539,7 +539,7 @@ describe('persistence-migration: quarantine recovery', () => {
 
     expect(result).toEqual({ recovered: 2, unresolved: 0, conflicts: 0 });
 
-    const cache = new MessageCache(active.lineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
     try {
       expect(cache.getMessages(OWNER, 'c1')).toHaveLength(1);
       expect(cache.getMessages(OWNER, 'c2')).toHaveLength(1);
@@ -560,7 +560,7 @@ describe('persistence-migration: quarantine recovery', () => {
 
     expect(result).toEqual({ recovered: 1, unresolved: 1, conflicts: 0 });
 
-    const cache = new MessageCache(active.lineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
     try {
       expect(cache.getMessages(OWNER, 'c1')).toHaveLength(1);
     } finally {
@@ -591,7 +591,7 @@ describe('persistence-migration: quarantine recovery', () => {
 
     expect(result).toEqual({ recovered: 0, unresolved: 2, conflicts: 0 });
 
-    const cache = new MessageCache(active.lineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
     try {
       // Never silently creates a new owner out of an unvalidated mapping.
       expect(cache.getMessages('unknown-mid-with-no-record', 'c1')).toEqual([]);
@@ -608,7 +608,7 @@ describe('persistence-migration: quarantine recovery', () => {
 
     // Simulate the owner having independently re-synced this exact message
     // under the new owner-scoped schema after cutover, before recovery ran.
-    const preseed = new MessageCache(active.lineDbPath);
+    const preseed = new SqliteMessageCache({ dbPath: active.lineDbPath });
     preseed.upsertMessages(OWNER, 'c1', [{
       id: 'm1', from: 'c1', to: 'c1', toType: 1, createdTime: '9999',
       contentType: 0, hasContent: false, text: 'already synced independently',
@@ -621,7 +621,7 @@ describe('persistence-migration: quarantine recovery', () => {
 
     expect(result).toEqual({ recovered: 1, unresolved: 0, conflicts: 1 });
 
-    const cache = new MessageCache(active.lineDbPath);
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
     try {
       const c1Messages = cache.getMessages(OWNER, 'c1');
       expect(c1Messages).toHaveLength(1);

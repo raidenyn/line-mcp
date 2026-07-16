@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { LineClient, AuthData, parseExportFile } from '@raidenyn/line-client';
 import { setupOAuthRoutes, validateBearerToken, recordRefreshedAuth, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, pendingUploads, pendingFiles } from './oauth';
 import { CachingLineClient } from './caching-line-client';
-import { MessageCache } from './message-cache';
+import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { CategoryStore } from './category-store';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction, TransactionFilterSchema, TransactionFilter, validateFilters, filterTransactions } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
@@ -35,7 +35,7 @@ const SERVER_VERSION = '1.0.0';
 const server = new McpServer({ name: 'line-mcp', version: SERVER_VERSION });
 const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
-let sharedCache: MessageCache;
+let sharedCache: SqliteMessageCache;
 let categoryStore: CategoryStore;
 
 async function readGuideFile(relPath: string, uri: string) {
@@ -957,7 +957,7 @@ export interface MainResult {
 // Startup order is the one cutover contract this function exists to enforce:
 // bootstrap the committed generation, then open the two stores against its
 // paths, then start sync, then start listening. Nothing here may construct
-// MessageCache/CategoryStore, or read/write persistence state, before
+// SqliteMessageCache/CategoryStore, or read/write persistence state, before
 // bootstrapPersistence() has returned.
 export async function main(options: MainOptions = {}): Promise<MainResult> {
   const dataRoot = options.dataRoot ?? dataDir();
@@ -965,7 +965,7 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
 
   // Two separate DB files (Task 2) — line messages and bank/category data no
   // longer share a single SQLite file the way the pre-migration schema did.
-  sharedCache = new MessageCache(active.lineDbPath);
+  sharedCache = new SqliteMessageCache({ dbPath: active.lineDbPath });
   categoryStore = new CategoryStore(active.bankDbPath);
 
   // Scope sync's auth lookups to the same dataRoot this generation was

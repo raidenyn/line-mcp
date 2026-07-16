@@ -4,6 +4,12 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { cacheDbPath, authDir } from './data-dir';
 import { inventoryStoredAuthRecords, type AuthRecordInventory } from './oauth';
+import {
+  stageLineDb,
+  stageQuarantineDb,
+  recoverQuarantinedMessagesSql,
+  type LegacyMessageRow,
+} from '@raidenyn/line-client-sqlite';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -70,25 +76,12 @@ export interface RecoveryResult {
   conflicts: number;
 }
 
-interface QuarantinedRow {
-  source_key: string;
-  chat_mid: string;
-  message_id: string;
-  created_time: number;
-  raw_json: string;
-}
-
 // ActivePersistence never carries dataRoot directly (it's re-derived here
 // rather than added as a field) so the interface stays what bootstrapPersistence
 // has always returned; every generation path is a fixed descendant of dataRoot
 // (see resolveGenerationPaths), so walking back up from reportPath is exact.
 function deriveDataRoot(active: ActivePersistence): string {
   return path.dirname(path.dirname(path.dirname(active.reportPath)));
-}
-
-function isConstraintViolation(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === 'string' && code.startsWith('SQLITE_CONSTRAINT');
 }
 
 function updateReportWithRecovery(
@@ -128,52 +121,16 @@ export function recoverQuarantinedMessages(
     inventoryStoredAuthRecords(authDir(dataRoot)).valid.map(v => v.mid),
   );
 
-  const qdb = new Database(active.quarantineDbPath);
-  const ldb = new Database(active.lineDbPath);
-
-  let recovered = 0;
-  let conflicts = 0;
-  let total: number;
-
-  try {
-    const pendingRows = qdb.prepare(
-      `SELECT source_key, chat_mid, message_id, created_time, raw_json
-       FROM legacy_messages
-       WHERE resolution_owner_mid IS NULL`,
-    ).all() as QuarantinedRow[];
-    total = pendingRows.length;
-
-    const insertLine = ldb.prepare(
-      'INSERT INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?, ?)',
-    );
-    const markResolved = qdb.prepare(
-      'UPDATE legacy_messages SET resolution_owner_mid = ?, resolved_at = ? WHERE source_key = ?',
-    );
-    const nowIso = new Date().toISOString();
-
-    for (const row of pendingRows) {
-      const ownerMid = mapping.messages[row.source_key];
-      if (!ownerMid) continue; // no mapping supplied for this row — stays unresolved
-
-      if (!validMids.has(ownerMid)) continue; // no stored auth record for this mid — refuse, stays unresolved
-
-      try {
-        insertLine.run(ownerMid, row.chat_mid, row.message_id, row.created_time, row.raw_json);
-      } catch (err) {
-        if (!isConstraintViolation(err)) throw err;
-        // A row already exists at (owner_mid, chat_mid, message_id) — never
-        // overwrite; retain the quarantined row untouched for audit.
-        conflicts++;
-        continue;
-      }
-
-      markResolved.run(ownerMid, nowIso, row.source_key);
-      recovered++;
-    }
-  } finally {
-    qdb.close();
-    ldb.close();
-  }
+  // Direct SQLite recovery over the quarantine/line databases lives in
+  // @raidenyn/line-client-sqlite (issue #75, Task 6) — this function keeps
+  // only the orchestration: resolving which mids are currently valid, and
+  // folding the result into the persisted migration report.
+  const { recovered, conflicts, total } = recoverQuarantinedMessagesSql(
+    active.quarantineDbPath,
+    active.lineDbPath,
+    mapping.messages,
+    validMids,
+  );
 
   const unresolved = total - recovered - conflicts;
   updateReportWithRecovery(active.reportPath, { recovered, conflicts });
@@ -309,13 +266,9 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
 }
 
 // ─── Legacy source (read-only; never modified) ───────────────────────────────
-
-interface LegacyMessageRow {
-  chat_mid: string;
-  message_id: string;
-  created_time: number;
-  raw_json: string;
-}
+// LegacyMessageRow (the line/quarantine row shape) is imported from
+// @raidenyn/line-client-sqlite so this file and the staging primitives it
+// calls share exactly one definition — see the import above.
 
 interface LegacyCategoryRow {
   id: number;
@@ -405,83 +358,17 @@ function decideOwnership(inventory: AuthRecordInventory): OwnershipDecision {
 }
 
 // ─── Staging destination databases ───────────────────────────────────────────
+// Line/quarantine staging (stageLineDb/stageQuarantineDb) now lives in
+// @raidenyn/line-client-sqlite (issue #75, Task 6) — imported above. Bank/
+// category staging stays here until a later task extracts bank-mcp, so this
+// file keeps its own tiny integrity-check helper for stageBankDb rather than
+// reaching into the line/quarantine package for something bank-only.
 
 function checkIntegrity(db: Database.Database, dbPathForError: string): void {
   const rows = db.pragma('integrity_check') as Array<{ integrity_check: string }>;
   const ok = rows.length === 1 && rows[0].integrity_check === 'ok';
   if (!ok) {
     throw new Error(`Integrity check failed for staged database at ${dbPathForError}`);
-  }
-}
-
-function stageLineDb(lineDbPath: string, rows: LegacyMessageRow[], ownerMid: string): void {
-  fs.mkdirSync(path.dirname(lineDbPath), { recursive: true });
-  const db = new Database(lineDbPath);
-  try {
-    db.exec(`
-      CREATE TABLE messages (
-        owner_mid    TEXT    NOT NULL,
-        chat_mid     TEXT    NOT NULL,
-        message_id   TEXT    NOT NULL,
-        created_time INTEGER NOT NULL,
-        raw_json     TEXT    NOT NULL,
-        PRIMARY KEY (owner_mid, chat_mid, message_id)
-      );
-      CREATE INDEX idx_messages_owner_chat_time
-        ON messages (owner_mid, chat_mid, created_time);
-      PRAGMA user_version = 2;
-    `);
-    const insert = db.prepare(
-      'INSERT OR REPLACE INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?, ?)',
-    );
-    const insertAll = db.transaction((items: LegacyMessageRow[]) => {
-      for (const row of items) {
-        insert.run(ownerMid, row.chat_mid, row.message_id, row.created_time, row.raw_json);
-      }
-    });
-    insertAll(rows);
-    checkIntegrity(db, lineDbPath);
-    db.pragma('wal_checkpoint(TRUNCATE)');
-  } finally {
-    db.close();
-  }
-}
-
-function stageQuarantineDb(quarantineDbPath: string, rows: LegacyMessageRow[], reason: string): void {
-  fs.mkdirSync(path.dirname(quarantineDbPath), { recursive: true });
-  const db = new Database(quarantineDbPath);
-  try {
-    db.exec(`
-      CREATE TABLE legacy_messages (
-        source_key           TEXT PRIMARY KEY,
-        chat_mid             TEXT NOT NULL,
-        message_id           TEXT NOT NULL,
-        created_time         INTEGER NOT NULL,
-        raw_json             TEXT NOT NULL,
-        reason               TEXT NOT NULL,
-        resolution_owner_mid TEXT,
-        resolved_at          TEXT
-      );
-      PRAGMA user_version = 1;
-    `);
-    const insert = db.prepare(
-      `INSERT OR REPLACE INTO legacy_messages
-         (source_key, chat_mid, message_id, created_time, raw_json, reason, resolution_owner_mid, resolved_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
-    );
-    const insertAll = db.transaction((items: LegacyMessageRow[]) => {
-      for (const row of items) {
-        // Audit-stable and matches the chatMid/messageId shape recovery will
-        // key mappings by (see Task 3): never derived from row order.
-        const sourceKey = `${row.chat_mid}/${row.message_id}`;
-        insert.run(sourceKey, row.chat_mid, row.message_id, row.created_time, row.raw_json, reason);
-      }
-    });
-    insertAll(rows);
-    checkIntegrity(db, quarantineDbPath);
-    db.pragma('wal_checkpoint(TRUNCATE)');
-  } finally {
-    db.close();
   }
 }
 
