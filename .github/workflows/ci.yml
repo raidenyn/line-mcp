@@ -3,9 +3,14 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
 
 jobs:
-  lint-build-test:
+  # Deterministic, merge-blocking gate: lint, composite build, the full
+  # unit/contract/migration suite, the package import-boundary test, and a
+  # dependency-closure check. Requires no LINE credentials and no Docker.
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,8 +22,72 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run lint
+      - name: Lint
+        run: npm run lint
 
-      - run: npm run build
+      - name: Build (tsc -b, all six packages)
+        run: npm run build
 
-      - run: npm run test:unit
+      - name: Unit / contract / migration tests
+        run: npm run test:unit
+
+      - name: Package import-boundary test
+        run: npx vitest run tests/architecture/import-boundaries.test.ts
+
+      - name: Dependency-closure check
+        run: npm ls --all
+
+  # Artifact gate for @raidenyn/line-client: a real `npm pack`, a clean offline
+  # install into a directory outside the checkout, a TypeScript compile against
+  # the installed package, a real (non-mocked) WASM HMAC operation, and proof
+  # the packed core carries no better-sqlite3. This is exactly the coverage in
+  # tests/artifacts/line-client-pack.test.ts. It is a packing/consumption smoke
+  # test only — never an `npm publish` (see packages/line-client/THIRD_PARTY_NOTICES.md).
+  pack-line-client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build (needed for pack + the consumer tsc compile)
+        run: npm run build
+
+      - name: Pack / install / load / compile / WASM / no-SQLite
+        run: npx vitest run tests/artifacts/line-client-pack.test.ts
+
+  # Docker gate: build both runtime targets and smoke each running container
+  # over a real MCP tools/list roundtrip (composed = ten tools, standalone =
+  # five). Proves better-sqlite3's native addon loads inside the runtime image.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build (the smoke test mints a token via the built @raidenyn/mcp-runtime)
+        run: npm run build
+
+      - name: Build composed server image
+        run: docker build --target server -t line-mcp-server:test .
+
+      - name: Build standalone line-mcp image
+        run: docker build --target line-mcp -t line-mcp-standalone:test .
+
+      - name: Smoke both containers (healthz + real MCP tools/list)
+        run: npx vitest run tests/docker/docker-smoke.test.ts
+
+  # NOTE: the live LINE end-to-end suite (`npm run test:e2e`) is deliberately
+  # NOT part of this PR-blocking workflow. It requires a real `.line-auth.json`
+  # LINE session and is run manually as a pre-release check (see README.md).

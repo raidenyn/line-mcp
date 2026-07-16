@@ -5,20 +5,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-npm run build        # tsc → dist/
-npm start            # ts-node src/index.ts  (HTTP MCP server on localhost:3000)
-npm test             # vitest run (e2e tests — requires valid .line-auth.json)
+npm run build        # tsc -b — composite build of all six packages
+npm run clean        # tsc -b --clean
+npm start            # composed server: node packages/server/dist/cli.js  (HTTP MCP on localhost:3000)
+npm run lint         # eslint .
 ```
 
 ```bash
-npm run test:unit    # unit tests only (no LINE session required)
-npm run test:e2e     # e2e tests (requires .line-auth.json)
+npm run test:unit    # unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+npm run test:e2e     # live LINE e2e (requires .line-auth.json)
+```
+
+Extra deterministic gates (run explicitly; also wired into CI):
+
+```bash
+npx vitest run tests/architecture/import-boundaries.test.ts   # package dependency-graph guard
+npx vitest run tests/artifacts/line-client-pack.test.ts       # packed line-client: offline install, real WASM, no SQLite
+npx vitest run tests/docker/docker-smoke.test.ts              # both Docker targets: healthz + real MCP tools/list
 ```
 
 To run a single test file:
 ```bash
-npx vitest run tests/e2e.test.ts
+npx vitest run packages/server/src/composition.test.ts
 ```
+
+The standalone messenger-only server runs from `node packages/line-mcp/dist/cli.js`.
 
 ## Working Branches
 
@@ -29,105 +40,135 @@ use `origin/main`.
 
 ## Architecture
 
-This is a **LINE MCP server** — an MCP (Model Context Protocol) server that exposes LINE messenger as tools to an AI assistant. It runs as an HTTP server (Streamable HTTP transport) and implements OAuth 2.0 so Claude Code handles authentication natively.
+This is a **LINE MCP server** — an MCP (Model Context Protocol) server that exposes LINE messenger (and, in the composed build, template-driven parsing of bank notifications delivered over LINE) as tools to an AI assistant. It runs over the Streamable HTTP transport and implements OAuth 2.0 so Claude Code handles authentication natively.
 
-### Source files (`src/`)
+It is an **npm-workspace monorepo** (`packages/*`) built with TypeScript project references (`tsc -b`, CommonJS output). There is no top-level `src/` — the former monolith was split (issue #75) into six packages plus two runnable server entry points.
 
-**`index.ts`** — entry point. Creates an Express app, registers ten tools (`list_chats`, `get_messages`, `get_image`, `sample_messages`, `manage_templates`, `manage_categories`, `get_transactions`, `summarize_transactions`, `initiate_import`, `complete_import`) on an `McpServer`, mounts OAuth routes from `oauth.ts`, and serves `POST /mcp` protected by bearer-token validation. Uses `AsyncLocalStorage` to pass the per-request `AuthData` into tool handlers without threading it through parameters. When `TEST_TOKEN` + `LINE_AUTH_DATA` env vars are both set, pre-seeds the token bypass so e2e tests skip the OAuth flow. Initialises `MessageCache` once at startup (`sharedCache`) and `CategoryStore` (`categoryStore`), which share the same SQLite file, and creates a `CachingLineClient` per request via `makeLineClient()`, which wires `onTokenRefreshed` to `recordRefreshedAuth()` in `oauth.ts`.
+### Package graph
 
-- `sample_messages` — fetches raw text messages from a chat (filters `contentType === 0`, sorted oldest-first). Accepts optional `since`/`until` ISO date strings; when `since` is provided, calls `getMessagesInRange` to paginate the full history back to that date. Also runs preset-gap detection (`detectPresets()` against saved templates and all built-in presets) and returns a structured `preset_suggestions` field in `content[1]`, plus a human-readable hint appended to `content[0].text` when gaps are found.
-- `manage_templates` — CRUD for named regex templates and currency aliases, plus built-in preset discovery/application; delegates to `template-store.ts` and `preset-store.ts`. Actions: `upsert`, `delete`, `list`, `upsert_alias`, `delete_alias`, `list_aliases`, `list_presets` (lists built-in bank presets with template/alias counts), `apply_preset` (copies a named preset's templates + currency aliases into a chat's template file, additive by name, not a replace-all).
-- `manage_categories` — CRUD for global spending categories; delegates to `category-store.ts`. Actions: `upsert`, `delete`, `list`. Categories are not scoped per chat, unlike templates.
-- `get_transactions` — `templates` parameter is optional; when omitted, loads saved templates from `data/templates/<chatMid>.json` via `loadTemplates()` and filters each message's applicable templates by `filterByTime()`. When `since` is provided, calls `getMessagesInRange()` to paginate backwards through LINE history until that date; without `since`, fetches the latest 200 messages and appends a note recommending `since` for full-range accuracy. After parsing, calls `applyBalanceDiffs()` to populate the `amount` and `currency` fields from consecutive balance diffs for transactions that did not capture them explicitly, then calls `categorize()` to stamp each transaction's `category` field from saved categories (first pattern match against `merchant`/`rawText` wins; `"uncategorized"` when none match) — this now runs on both the saved-templates and inline-templates code paths. Finally applies `filterTransactions()` against optional `categories`/`original_currencies`/`merchants`/`amount_min`/`amount_max` params (AND across filter types, OR within a type; validated eagerly via `validateFilters()` before any LINE API call). Returns a zero-match hint when saved templates exist but nothing matched.
+The dependency graph is strictly one-directional and enforced at test time by `tests/architecture/import-boundaries.test.ts`:
 
-### MCP Resources (`docs/guide/`)
+| Package | Role | Depends on |
+|---------|------|-----------|
+| `@raidenyn/line-client` | LINE Chrome-extension API client: QR login, message fetch, image download, WASM HMAC signing (LTSM). No SQLite. | `happy-dom` (bundled) |
+| `@raidenyn/line-client-sqlite` | SQLite message cache + persistence-migration primitives, wrapping the client. | `line-client`, `better-sqlite3` |
+| `@raidenyn/mcp-runtime` | Generic MCP-over-HTTP host + token codec. Imports **no** product package; accepts exactly one `AuthProvider`. | `express`, MCP SDK (peer) |
+| `@raidenyn/line-mcp` | Messenger product: five messenger tools + guides, LINE auth provider, import service, sync loop, **standalone server**. | `line-client`, `line-client-sqlite`, `mcp-runtime` |
+| `@raidenyn/bank-mcp` | Bank product: five transaction tools + guides, template/category/preset stores, parser, FX. Imports **no** `line-mcp`. | `line-client`, `mcp-runtime`, `better-sqlite3` |
+| `@raidenyn/server` | Composition root — the **only** package importing both product packages. Owns the data root, secret, and legacy migration. | all of the above + MCP SDK |
 
-Eleven static markdown resources are registered in `index.ts` via `server.registerResource()` and served over the MCP protocol:
+Every package's entry point (`src/index.ts`) is **side-effect free**: importing it reads no files, opens no database, starts no timer, binds no socket. All I/O is deferred to explicitly-constructed objects and to the executable `cli.ts` files that own `DATA_DIR` / `process.cwd()` resolution.
 
-| URI | File |
-|-----|------|
-| `line://guide` | `docs/guide/overview.md` |
-| `line://guide/tools/<name>` | `docs/guide/tools/<name>.md` |
+### `@raidenyn/mcp-runtime` (`packages/mcp-runtime/src`)
 
-Files are read from disk at request time via `fs.promises.readFile`. Missing files return an error string in the content rather than crashing. The `docs/guide/` tree is copied into the Docker image (`COPY docs/guide ./docs/guide` in `Dockerfile`).
+- **`host.ts`** — `createMcpHost<P>({ name, version, basePath, authProvider, registrations })`. Owns only `POST ${basePath}/mcp`: authenticates FIRST (a rejected request allocates no protocol object), then builds a **fresh** `McpServer` + transport per request and passes the resolved principal through an explicit `RequestContext` (never `AsyncLocalStorage`). Defines the `AuthProvider<P>`, `Principal`, `RequestContext`, and `Registration` contracts. One idempotent cleanup closure closes transport + server on completion/disconnect/error.
+- **`token-codec.ts`** — `createTokenCodec({ secret, issuer, audience, now? })`. Self-contained HMAC-SHA256 tokens: `base64url(claims).base64url(sig)`. Claims are a strict, versioned discriminated shape (`version:1`, `kind:'access'|'refresh'`, `subject`, `issuer`, `audience`, `scopes`, `issuedAt`, `expiresAt`). Verification is total and schema-checked — access/refresh kinds cannot be exchanged, and the two historical `{ authData, expiresAt }` / `{ authData }` payloads are rejected, never migrated.
+- **`base-path.ts`** — `normalizeBasePath()` (`/` and empty → `''`; strips trailing slashes; adds a leading slash).
 
-**Maintenance rule:** When any `docs/guide/` file is added, removed, or substantively changed, update this CLAUDE.md section to match. When a new tool is added to `index.ts`, also create `docs/guide/tools/<tool_name>.md` and a corresponding `registerResource` call.
+### `@raidenyn/line-client` (`packages/line-client/src`)
 
-**`oauth.ts`** — OAuth 2.0 authorization server. Provides:
-- `GET /.well-known/oauth-authorization-server` — CIMD-capable AS metadata
-- `GET /.well-known/oauth-protected-resource` — resource server metadata (referenced from `WWW-Authenticate`)
-- `GET /authorize` — starts a LINE QR login, renders an HTML page with QR code image and PIN display; polls `/authorize/poll` via JS to detect completion and auto-redirects with the auth code
-- `GET /authorize/poll?sid=<id>` — JSON status endpoint polled by the authorize page
-- `POST /token` — PKCE code exchange and refresh-token rotation; issues self-contained signed MCP tokens
-- In-memory stores: `loginSessions`, `pendingCodes` (ephemeral login state only)
-- `SERVER_SECRET` — loaded from `data/secret` on startup (created automatically if absent); used to HMAC-sign all tokens
-- `StoredAuthRecord` — an `AuthData` plus optional profile `displayName`, stored atomically at `data/auth/<mid>.json`; files are `0600` beneath a `0700` directory. Login persists this record before updating memory or issuing an authorization code.
-- Saved records drive the multi-account selector by profile name (falling back to a masked MID); selected accounts initialize QR login with only their saved certificate.
-- `validateBearerToken(token)` — verifies HMAC, checks expiry, returns embedded `AuthData`; it first checks `latestAuthData`, then lazily loads `data/auth/<mid>.json` for a fresher LINE credential.
-- `recordRefreshedAuth(authData)` — updates `latestAuthData` then atomically persists refreshed LINE credentials while preserving the stored display name. Persistence failure is logged but non-fatal because `LineClient` refresh callbacks are synchronous.
-- `latestAuthData` — `Map<mid, AuthData>` consulted on MCP token refresh so rotated LINE credentials propagate into new self-contained tokens.
-- `seedTestToken(token, authData)` — bypass map for e2e tests (not used in production)
+- **`client.ts`** — `LineClient` + `createLineClient()`. All LINE API logic; targets `https://line-chrome-gw.line-apps.com`, impersonating the Chrome extension (`ophjlpahpchlmihnnnihgmmeilfjmjjc`). Login flow (QR → certificate/PIN → `qrCodeLoginV2` → identity), message fetch with contact-name resolution, image download, on-demand LINE access-token refresh (per-`mid` in-flight lock).
+- **`signer.ts`** — `signForAccount()`. Loads LINE's proprietary LTSM WASM crypto module inside a `happy-dom` sandbox (lazy; first signing call only) to produce request HMACs identical to the genuine extension.
+- **`cached-message-reader.ts`** — `withMessageCache()` and the `MessageReader` / `MessageCache` ports the SQLite cache implements.
+- **`export-parser.ts`** — LINE chat-export file parsing (`parseExportFile`, `parseExportHeader`).
+- **`assets/ltsm/`** — vendored, proprietary LINE artifacts (`ltsm.wasm`, `ltsmSandbox.js`) plus `provenance.json` and `README.md`. **Do not edit.** See `THIRD_PARTY_NOTICES.md`: public publication is **not approved** (legal review pending). `happy-dom` is a `bundledDependencies` entry; `scripts/vendor-happy-dom.js` runs as `prepack` to vendor its real closure so `npm pack` yields a self-contained, registry-free tarball with **no** better-sqlite3.
 
-**`line-client.ts`** — all LINE API logic. Targets `https://line-chrome-gw.line-apps.com`, impersonating the LINE Chrome extension (`ophjlpahpchlmihnnnihgmmeilfjmjjc`). Key concerns:
-- **Login flow**: QR code → `checkQrCodeVerified` long-poll → `verifyCertificate` (uses saved certificate to skip PIN on repeat logins) → optional PIN confirmation (`checkPinCodeVerified`) → `qrCodeLoginV2` → `getEncryptedIdentityV3`. After completion, `getCompletedAuth()` returns the full `AuthData`.
-- **PIN surfacing for OAuth**: `waitForPin()` and `waitForCompletion()` are public methods used by `oauth.ts` to monitor the background login without going through `ensureAuthenticated()`.
-- **Token refresh**: LINE access tokens are refreshed when less than 24 hours from expiry. Uses a static `refreshLocks = Map<mid, Promise>` so concurrent requests for the same user share one in-flight refresh rather than racing. The synchronous `onTokenRefreshed` constructor callback is fired once per refresh; callers use non-fatal `recordRefreshedAuth()` to update memory and persist the credentials.
-- **HMAC signing**: every request is signed via `getHmac()` from `ltsm.ts`.
-- **Contact name resolution**: `getMessages()` fetches display names for any senders not already in the per-instance `contactNameCache`.
+### `@raidenyn/line-client-sqlite` (`packages/line-client-sqlite/src`)
 
-**`template-store.ts`** — file-based persistence for named transaction templates. Stores one JSON file per chat MID under `data/templates/<chatMid>.json`. Exports:
-- `loadTemplates(chatMid)` → `{ templates, warning? }` — reads file; automatically migrates old `(?<amount>...)` and `(?<currency>...)` capture group names to `(?<original_amount>...)` and `(?<original_currency>...)` and rewrites the file in place on first load; returns `[]` on absence or corruption (with warning).
-- `upsertTemplate(chatMid, template)` — inserts or replaces by `name`.
-- `deleteTemplate(chatMid, name)` → `boolean`.
-- `listTemplates(chatMid)` → `NamedTemplate[]`.
-- `filterByTime(templates, timestampMs)` — keeps entries where `timestampMs` falls within `[valid_from, valid_until]`; used per-message in `get_transactions` so time-bounded templates apply correctly across format changes.
-- `NamedTemplateSchema` — extends `TransactionTemplateSchema` with `name` (required), `valid_from`, `valid_until` (ISO 8601 with timezone offset).
-- Path traversal guard: chatMid validated against `/^[a-zA-Z0-9_-]+$/` before any I/O.
-- All functions accept an optional `storeDir` parameter (default: `<cwd>/data/templates`) for test isolation without mocking.
+- **`sqlite-message-cache.ts`** — `SqliteMessageCache` over `better-sqlite3`: one `messages` table (`chat_mid`, `message_id`, `created_time`, `raw_json`), `INSERT OR REPLACE` dedup, index on `(chat_mid, created_time)`. Owner-scoped: the same chat/message IDs under two MIDs stay isolated. `:memory:` accepted for tests.
+- **`migration.ts`** — one-time legacy-migration SQL primitives consumed by the server's `persistence-migration.ts`: `readLegacyMessages`, `stageLineDb`, `stageQuarantineDb`, `recoverQuarantinedMessagesSql`.
 
-**`category-store.ts`** — SQLite-backed persistence for global spending categories, sharing the same database file as `message-cache.ts` (`data/cache/messages.db`) via a separate `categories` table (`id`, `name` UNIQUE, `pattern`). Exports the `CategoryStore` class: `upsert(category)` (insert or update-in-place by `name`, preserving row order), `delete(name)` → `boolean`, `list()` → `Category[]` in insertion order.
+### `@raidenyn/line-mcp` (`packages/line-mcp/src`)
 
-**`preset-store.ts`** — built-in bank preset templates (bootstrap starting point for common banks). Exports:
-- `Preset` interface: `{ description, templates: NamedTemplate[], currency_aliases: Record<string, string> }`.
-- `loadAllPresets(dir?)` → `Record<string, Preset>` — reads all `*.json` from `src/presets/` (default dir resolves via `__dirname`, works in both ts-node and compiled `dist/` modes), keyed by filename stem; skips non-JSON and malformed files silently.
-- `getPreset(name, dir?)` → `Preset | null`.
-- `detectPresets(messages, savedTemplates, presets)` → `Array<{ preset_name, matched_count, description }>` — pure function; for each preset, counts messages that match the preset's patterns but none of the chat's saved template patterns (i.e. coverage gaps).
-- `src/presets/` holds the preset JSON files (`scb.json`, `cardx.json`), same shape as `data/templates/<chatMid>.json` plus a `description` field; the build script copies `src/presets/` into `dist/presets/`.
+The messenger product and the standalone server.
 
-**`transaction-parser.ts`** — template-driven transaction parser. Exports `parseTransaction(message, templates)` which applies an ordered list of caller-supplied regex patterns (named capture groups: `original_amount`, `original_currency` (required); `amount`, `currency`, `merchant`, `date`, `balance`, `account` (optional)) to a single message and returns a `Transaction` or `null`. The `amount` group captures the native-currency amount explicitly; if absent, `applyBalanceDiffs()` computes it from consecutive balance diffs after the full list is built. `currency` captures the account default currency (e.g. "THB"); `original_currency` captures the transaction currency (e.g. "USD" for foreign spends). Also exports `summarize(transactions, groupBy, since, until)` for pure-math aggregation — uses `amount`/`currency` when present, falls back to `original_amount`/`original_currency` per transaction. Exports `async applyBalanceDiffs(transactions, rateFetcher?)` which mutates a sorted array in place: groups by `account`; for a transaction missing an explicit `amount`, if its `original_currency` matches the group's dominant currency (most-common wins; tie → no stamp → `summarize` reports "mixed"), `amount` is set directly from `original_amount` — exact, no inference, so no untracked balance gap can be absorbed into it. Otherwise (a genuine cross-currency spend), `amount` is computed via a historical FX rate from `fx-rates.ts` (`original_amount * rate`, stamping `amount_estimated: true`), falling back to the old `balance - prevBalance` estimate only if the rate lookup fails. When the observed balance diff disagrees with the FX-converted amount by more than 15%, `amount_gap_suspected: true` is also set — signalling nearby untracked balance activity (a fee, hold, or interest posting) without discarding the still-trustworthy FX-derived amount. No LINE API calls; used directly by the `get_transactions` and `summarize_transactions` tool handlers in `index.ts`. The `'s'` (dotAll) flag is applied to all patterns so `.` matches newlines in bilingual messages (e.g. UOB Thai + English in one blob). Also exports `CategorySchema`/`Category` and `categorize(transactions, categories)`, which stamps each transaction's `category` field by testing each category's regex (case-insensitive, dotAll) against `merchant` (falling back to `rawText`); first match wins, unmatched transactions get `"uncategorized"`. `summarize`'s `groupBy` parameter also accepts `'category'`. Also exports `TransactionFilterSchema`/`TransactionFilter`, `validateFilters(filters)` (returns an error string naming the first invalid `merchants` regex, or `null`), and `filterTransactions(transactions, filters)` — a pure post-processing filter (categories: exact case-sensitive match on `category`; original_currencies: case-insensitive match; merchants: regex against `merchant`/`rawText` fallback, reusing the same `getRegex` cache and ReDoS guard as `categorize`; amount_min/amount_max: inclusive bounds on `Math.abs(amount ?? original_amount)`), called by `get_transactions` and `summarize_transactions` (via `fetchParsedTransactions`) as the final step after `categorize()`.
+- **`cli.ts`** — standalone executable. Resolves `DATA_DIR` (`env` or `<cwd>/data`), constructs `createStandaloneServer`, wires SIGTERM/SIGINT shutdown.
+- **`standalone.ts`** — `createStandaloneServer({ dataRoot, port?, basePath?, publicUrl? })`. Its own `SqliteMessageCache`, `LineAuthProvider`, `ImportService`, sync loop, composed through `createMcpHost` with exactly the five messenger tools + resources. Exposes `GET ${basePath}/healthz` → `{ status: 'ok', version }`. **Refuses to start** if it finds a legacy combined `cache/messages.db` with no `persistence-current.json` pointer (that migration is the composed server's job). Resolves its line DB from the pointer-committed generation if present, else a fresh `line-mcp/messages.db` layout.
+- **`tools/`** — `registerLineTools(server, context, deps)`: the five messenger tools `list_chats`, `get_messages`, `get_image`, `initiate_import`, `complete_import`.
+- **`resources.ts`** — `registerLineResources(server, { includeOverview? })`: the messenger `overview.md` (optional) plus the five messenger tool guides, read from this package's `docs/guide/`.
+- **`auth/`** — `line-auth-provider.ts` (`LineAuthProvider`, the concrete `AuthProvider<LinePrincipal>`; MID-only principals; token issuance/refresh via the codec; `seedTestToken` e2e bypass; `publicEndpointConfig`), `credential-store.ts` (`FileCredentialStore` + `StoredAuthRecord` at `data/auth/<mid>.json`, `0600`/`0700`; `latestAuthData` freshness map; `recordRefreshedAuth`), `oauth-router.ts` (discovery / `/authorize` / `/authorize/poll` / `/token`, multi-account selector).
+- **`import-service.ts`**, **`request-client.ts`**, **`sync.ts`** — chat-export upload service (OAuth-independent routes; owner-binds writes), the per-request cache-wrapping LINE client factory, and the daily background sync loop.
+- **`assets/index.html`** — landing page served at `GET ${basePath}/`.
 
-**`fx-rates.ts`** — `getHistoricalRate(date, from, to)` fetches a historical exchange rate from `https://api.frankfurter.dev/v1/{date}?from={from}&to={to}` (the API auto-resolves weekends/holidays to the preceding published business day). Returns `null` on any failure (network error, unsupported currency, no data for the date) rather than throwing. Successful lookups are cached in-memory keyed by `date|from|to` — historical rates never change, so this is exact, not just an optimization; failed lookups are not cached, so a transient outage doesn't permanently block a currency pair.
+### `@raidenyn/bank-mcp` (`packages/bank-mcp/src`)
 
-**`message-cache.ts`** — SQLite-backed message cache. Wraps `better-sqlite3` with a single `messages` table (`chat_mid`, `message_id`, `created_time INTEGER`, `raw_json`). `INSERT OR REPLACE` deduplicates on re-fetch. Index on `(chat_mid, created_time)` for fast range queries. Key methods: `upsertMessages`, `getMessages(sinceMs?, untilMs?)` (oldest-first), `latestTimestamp(chatMid)` (returns highest `created_time` or `null`). Database file lives at `data/cache/messages.db` (created automatically); `:memory:` accepted for tests.
+The bank/transaction product (composed server only; never imported by `line-mcp`).
 
-**`caching-line-client.ts`** — `CachingLineClient` wraps a `LineClient` and a `MessageCache`. Overrides `getMessages` and `getMessagesInRange`: fetches only messages newer than `cache.latestTimestamp()` from LINE (topping up the cache), then reads the full requested range from SQLite. Always resolves sender names before writing to cache so cached messages always carry display names. All other `LineClient` methods (`listChats`, `getImageBuffer`, `waitForPin`, `waitForCompletion`, `getCompletedAuth`) are forwarded directly.
+- **`tools/`** — `registerBankTools(server, context, deps)`: `sample_messages`, `manage_templates`, `manage_categories`, `get_transactions`, `summarize_transactions`.
+  - `sample_messages` — raw text messages (oldest-first); optional `since`/`until`; runs `detectPresets()` for coverage-gap suggestions.
+  - `manage_templates` — CRUD for named regex templates + currency aliases, plus preset `list_presets` / `apply_preset` (additive-by-name).
+  - `manage_categories` — CRUD for **global** spending categories (not per-chat).
+  - `get_transactions` — auto-loads saved templates when `templates` omitted; `filterByTime()` per message; `getMessagesInRange()` when `since` given (else latest 200); `applyBalanceDiffs()` then `categorize()` then `filterTransactions()` (validated eagerly via `validateFilters()`).
+  - `summarize_transactions` — pure-math totals grouped by month / merchant / category.
+- **`resources.ts`** — `registerBankResources(server, { includeOverview? })`: the bank `overview.md` (optional) plus the five bank tool guides.
+- **`transaction-parser.ts`** — `parseTransaction`, `summarize`, `applyBalanceDiffs` (dominant-currency exact stamp, else historical-FX conversion with `amount_estimated` / `amount_gap_suspected` flags), `categorize`, `validateFilters`, `filterTransactions`. dotAll (`s`) flag throughout for bilingual blobs. Zod schemas for templates/transactions/categories/filters.
+- **`fx-rates.ts`** — `getHistoricalRate(date, from, to)` from `api.frankfurter.dev`; in-memory cache of successful lookups (historical rates never change); `null` on failure.
+- **`template-store.ts`** — `TemplateStore` + `loadTemplates`/`upsertTemplate`/`deleteTemplate`/`listTemplates`/`filterByTime`, one JSON file per chat MID under `<dataRoot>/templates/<chatMid>.json`; migrates old `(?<amount>)`/`(?<currency>)` group names; path-traversal guard on chatMid.
+- **`category-store.ts`** — `CategoryStore` over a SQLite `categories` table (`id`, `name` UNIQUE, `pattern`); insertion-order preserving.
+- **`preset-store.ts`** — `PresetStore`, `loadAllPresets`, `getPreset`, `detectPresets`; preset JSON in `assets/presets/` (`scb.json`, `cardx.json`).
+- **`category-migration.ts`** — `readLegacyCategories`, `stageBankCategories` (category IDs/order survive migration and stay shared across principals).
 
-**`ltsm.ts`** — thin wrapper around the LINE WASM crypto sandbox. The real HMAC and storage-key logic lives in `src/ltsm/ltsm.wasm` (a WebAssembly binary extracted from the LINE Chrome extension). Running it requires a browser-like environment; `ltsm.ts` creates one with `happy-dom`, loads `src/ltsm/ltsmSandbox.js`, and communicates via `window.postMessage` using a serialized command queue (one command at a time — concurrent sends would collide on the fixed response-handler keys). The storage key is initialized per LINE account (`mid`) and cached module-wide; `ensureStorageKey` skips re-initialization when the same account is already active.
+### `@raidenyn/server` (`packages/server/src`)
 
-### Specs (`specs/`)
+The composition root and the default executable.
 
-- `src/ltsm/ltsm.wasm` — LINE's WASM crypto module (binary, do not edit).
-- `src/ltsm/ltsmSandbox.js` — sandbox JS that wraps the WASM; loaded via `require()` inside the happy-dom window.
-- `specs/LINE_Chrome_API_Specification.md` / `specs/LINE_Login_Protocol_Specification.md` — reverse-engineered API specs used as reference.
+- **`cli.ts`** — composed executable. Resolves `DATA_DIR`, the `TEST_TOKEN` + `LINE_AUTH_DATA` e2e bypass (this is the ONLY reader of those env vars — passed to `createServer` as `testAuth`), and SIGTERM/SIGINT shutdown.
+- **`server.ts`** — `createServer({ dataRoot, port?, basePath?, publicUrl?, testAuth? })`. Runs `bootstrapPersistence()` first, then opens two **separate** SQLite files (line messages vs. bank/category), constructs the **shared trusted-tenant** `CategoryStore` + `TemplateStore`, one `LineAuthProvider`, one request-client factory (backing messenger tools, the bank message reader, and the sync loop), the import service, and wires everything through `createMcpHost`. Exposes `GET ${basePath}/healthz` and `GET ${basePath}/` (serves `@raidenyn/line-mcp`'s `assets/index.html`).
+- **`registrations.ts`** — `buildRegistrations({ line, bank, guideDir })`: five messenger + five bank tools, plus resources = the five messenger guides + five bank guides (both registered with `includeOverview:false`) + exactly one composed overview at `line://guide` via `registerComposedOverview`, read from this package's own `docs/guide/overview.md`.
+- **`data-layout.ts`** — pure path derivation from one data root (secret, auth, templates, generations, pointer, composed `guideDir`).
+- **`persistence-migration.ts`** — `bootstrapPersistence()`. One-time, generation-based, pointer-committed migration of the legacy combined `cache/messages.db` into separate line/bank/quarantine databases. Rows whose owning MID is ambiguous are **quarantined** (never dropped or arbitrarily assigned). An interrupted restart before or after the pointer rename converges on a single authoritative generation.
 
-### Tests (`tests/`)
+### MCP resources & guide ownership (`docs/guide/`)
 
-`e2e.test.ts` launches the MCP server as a child process (`ts-node src/index.ts`) over HTTP on port 13117. It reads `.line-auth.json`, passes the contents as `LINE_AUTH_DATA` and a random hex string as `TEST_TOKEN` to the server process. The server calls `seedTestToken(TEST_TOKEN, authData)` which adds the token to an in-memory bypass map, so the test client connects over `StreamableHTTPClientTransport` with that token already valid — no OAuth flow needed. Tests run sequentially and share state across cases.
+Guides are read from disk at request time (`fs.promises.readFile`); a missing file returns an error string in the content rather than crashing. **Each product package owns its own guides**, and the composed server owns only the combined overview:
+
+| URI | Owning package / file |
+|-----|-----------------------|
+| `line://guide` (composed overview) | `packages/server/docs/guide/overview.md` |
+| `line://guide` (messenger-only overview, standalone) | `packages/line-mcp/docs/guide/overview.md` |
+| `line://guide/tools/{list_chats,get_messages,get_image,initiate_import,complete_import}` | `packages/line-mcp/docs/guide/tools/<name>.md` |
+| `line://guide/tools/{sample_messages,manage_templates,manage_categories,get_transactions,summarize_transactions}` | `packages/bank-mcp/docs/guide/tools/<name>.md` |
+
+The composed server suppresses both product packages' own overviews (`includeOverview:false`) so only `packages/server/docs/guide/overview.md` wins the shared `line://guide` URI. The standalone server registers `@raidenyn/line-mcp`'s own overview + its five tool guides.
+
+**Maintenance rule:** When a `docs/guide/` file is added, removed, or substantively changed, update this section to match. When a **messenger** tool is added, create `packages/line-mcp/docs/guide/tools/<tool>.md` and add it to `registerLineResources`' `TOOL_GUIDES`; for a **bank** tool, do the same under `packages/bank-mcp`. When a new tool is added to either product package, also update the composed overview and the tool tables above and in `README.md`. Each package's `docs/`, `assets/`, and `dist/` are copied into the Docker image by the corresponding `COPY` in the `Dockerfile` (whole `packages/` for the `server` target; the four-package closure for `line-mcp`).
 
 ### Auth flow
 
-**Transport**: Streamable HTTP on `http://localhost:PORT` (default port 3000). Claude Code adds the server as an HTTP MCP connector. All routes are mounted under `BASE_PATH` (default `/`, normalized via `normalizeBasePath()` in `base-path.ts`) — the OAuth discovery routes are the one exception, where the well-known segment is inserted *before* the path per RFC 8414/9728 rather than prepended to it: `/.well-known/oauth-authorization-server${BASE_PATH}` (AS metadata, mirrors the issuer's own path) and `/.well-known/oauth-protected-resource${BASE_PATH}/mcp` (protected-resource metadata, mirrors the full path of the `/mcp` resource it describes — not just `BASE_PATH`).
+**Transport:** Streamable HTTP on `http://localhost:PORT` (default 3000). Routes mount under `BASE_PATH` (default `/`, normalized to `''`) — the OAuth discovery routes insert the well-known segment *before* the path per RFC 8414/9728: `/.well-known/oauth-authorization-server${BASE_PATH}` and `/.well-known/oauth-protected-resource${BASE_PATH}/mcp`.
 
-**First-time setup:**
-1. Start the server: `npm start`
-2. Add to Claude Code: `claude mcp add --transport http --scope user line http://localhost:3000/mcp`
-3. Call any tool — Claude Code detects the `401` response, opens the LINE QR page in a browser
-4. If several saved accounts exist, choose one by profile name; scan its QR code with the LINE mobile app and enter PIN only on first login or after certificate rejection
-5. Claude Code receives tokens automatically and retries the tool call
+**Breaking token cutover (issue #75, Task 8):** MCP tokens are finite-lived, **MID-only**, versioned, schema-checked claims that embed **no** LINE credential. Token claims carry MID identity only and enforce issuer, audience, scope, and finite expiry. The two historical embedded-credential formats are rejected on both the access and refresh paths — never migrated — so **every previously issued token requires a one-time reauthorization** after upgrading.
 
 **Token lifecycle:**
-- MCP tokens are self-contained HMAC-SHA256-signed blobs embedding the user's `AuthData` and expiry — the server is stateless and holds no token maps
-- The signing key lives in `data/secret` (auto-created on first run, persisted across restarts); tokens issued before a restart remain valid as long as the file is not deleted
-- MCP tokens expire after 24 hours; Claude Code refreshes them proactively via `POST /token` with `grant_type=refresh_token`; the server verifies the refresh token's signature, resolves fresher LINE credentials from memory or `data/auth/<mid>.json`, and issues new signed tokens. Refresh tokens remain usable after restart while `data/secret` and that auth record are retained.
-- LINE access tokens are refreshed on-demand inside `LineClient.refreshIfExpired()` when < 24 h remain; `recordRefreshedAuth()` updates memory first and atomically persists the refresh while preserving the account profile name. Persistence errors do not fail the LINE request.
-- Multiple independent LINE accounts are supported: each user's `AuthData` is embedded in their own MCP tokens and never shared with other users
+- Tokens are HMAC-SHA256-signed by the codec; the key lives in `data/secret` (auto-created; persisted across restarts). Access tokens ~24 h, refresh tokens ~90 days.
+- Refresh (`POST /token`, `grant_type=refresh_token`) verifies the refresh token's signature and reloads the LINE credential by MID from `latestAuthData` (memory) or `data/auth/<mid>.json` — a missing record means the account must reauthorize. Refresh survives restart while `data/secret` and the auth record are retained.
+- LINE access tokens are refreshed on-demand inside `LineClient` when < 24 h remain; `recordRefreshedAuth()` updates memory then atomically persists, preserving the profile name (persistence failure is non-fatal).
+- Multiple independent LINE accounts are supported; each principal's credential is resolved by its own MID and never shared.
+
+### Data model & one-process-per-root rule
+
+- The **line-message cache is owner-scoped** (per MID); the **bank category/template stores are shared across every principal** on a data root by explicit design (trusted-tenant model, Task 10). Only trust principals that may share bank/category state on the same root.
+- **Never run two servers against the same data root on one host.** The composed server owns bank/category data the standalone server knows nothing about, and the standalone server refuses a legacy pre-migration combined database. Under Docker, give each target its own `/data` volume.
+
+### Docker
+
+One multi-stage `Dockerfile`, two runtime targets. The `builder` stage (`node:24`) runs `npm ci` + `tsc -b` once, then `npm prune --omit=dev` (keeping better-sqlite3's already-compiled native addon) and strips `src`/tests/tsconfig from `packages/`. Both runtime targets use `node:24-slim` (glibc — matches the builder so the prebuilt better-sqlite3 addon loads) and copy the pruned production `node_modules` plus their own package closure:
+
+- `--target server` → `packages/server/dist/cli.js`, whole `packages/` tree (ten tools).
+- `--target line-mcp` → `packages/line-mcp/dist/cli.js`, only the four-package closure (five tools).
+
+Both run as the non-root `node` user, expose `/data` as a volume, and healthcheck `GET ${BASE_PATH}/healthz` via Node's http client. `docker-compose.yml` defaults to the `server` target; the `line-mcp` standalone service is under the `standalone` profile with its **own** volume.
+
+### Specs & artifact policy
+
+- `packages/line-client/assets/ltsm/*` — LINE's proprietary WASM crypto + sandbox (binary, do not edit). Provenance/notice in `THIRD_PARTY_NOTICES.md` and `provenance.json`.
+- `specs/LINE_Chrome_API_Specification.md` / `specs/LINE_Login_Protocol_Specification.md` — reverse-engineered API reference.
+- **No package is published to any public registry.** CI and the artifact tests `npm pack`/install for verification only; a new public distribution form requires the issue #75 provenance review.
+
+### Tests
+
+- `packages/**/*.test.ts` — unit / contract / migration tests co-located with each package. Run by `npm run test:unit` alongside `tests/architecture`.
+- `tests/architecture/import-boundaries.test.ts` — enforces the package dependency graph above.
+- `tests/artifacts/line-client-pack.test.ts` — real `npm pack` + offline install of `@raidenyn/line-client` outside the checkout, real WASM HMAC, asserts no better-sqlite3. (CI `pack-line-client` job.)
+- `tests/docker/docker-smoke.test.ts` — builds both Docker targets, runs each container against a throwaway data root, waits for `/healthz`, and asserts the tool surface over a real MCP `tools/list` (composed = ten, standalone = five). (CI `docker` job.)
+- `tests/e2e.test.ts` — live LINE e2e; launches the composed server, seeds a `TEST_TOKEN` bypass, connects over the MCP HTTP transport. Requires `.line-auth.json`; **excluded from the PR-blocking CI gate**, run manually pre-release.

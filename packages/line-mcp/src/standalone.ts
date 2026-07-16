@@ -56,6 +56,8 @@ function loadOrCreateSecret(dataRoot: string): string {
   }
 }
 
+const STANDALONE_VERSION = '1.0.0';
+
 const GENERATION_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /**
@@ -161,6 +163,10 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
         ],
       });
       importService.mountRoutes(host.app);
+
+      host.app.get(`${basePath}/healthz`, (_req, res) => {
+        res.status(200).json({ status: 'ok', version: STANDALONE_VERSION });
+      });
 
       syncHandle = startSyncLoop({ credentialStore, cache, createRequestClient });
 

@@ -1,121 +1,156 @@
 # LINE MCP Server
 
-An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes your LINE messenger to AI assistants. Lets Claude read your chats, messages, and images directly from LINE.
+An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes your LINE messenger — and, optionally, template-driven parsing of bank notifications delivered over LINE — as tools to an AI assistant such as Claude Code.
+
+It ships as a **modular npm-workspace monorepo** that builds into two runnable servers:
+
+- **Composed server** (`@raidenyn/server`, the default) — all **ten** tools: five messenger tools plus five bank/transaction tools.
+- **Standalone messenger server** (`@raidenyn/line-mcp`) — the **five** messenger tools only, with no bank code, no bank data, and a smaller dependency and Docker footprint.
+
+## Packages
+
+Six workspace packages under `packages/*`, with a strict, one-directional dependency graph (enforced by `tests/architecture/import-boundaries.test.ts`):
+
+| Package | Role | Depends on |
+|---------|------|-----------|
+| `@raidenyn/line-client` | LINE Chrome-extension API client: QR login, message fetch, image download, WASM HMAC signing (LTSM). No SQLite. | — (`happy-dom`, bundled) |
+| `@raidenyn/line-client-sqlite` | SQLite-backed message cache + persistence-migration primitives, wrapping the client. | `line-client`, `better-sqlite3` |
+| `@raidenyn/mcp-runtime` | Generic, product-agnostic MCP-over-HTTP scaffolding: Express host, per-request server/transport, token codec, one `AuthProvider`. Imports no product package. | `express`, MCP SDK (peer) |
+| `@raidenyn/line-mcp` | Messenger product: the five messenger tools + guides, OAuth/LINE auth provider, import service, sync loop, and the **standalone** server. | `line-client`, `line-client-sqlite`, `mcp-runtime` |
+| `@raidenyn/bank-mcp` | Bank product: the five transaction tools + guides, template/category/preset stores, parser, FX. Imports no `line-mcp`. | `line-client`, `mcp-runtime`, `better-sqlite3` |
+| `@raidenyn/server` | Composition root — the **only** package importing both product packages; wires them onto `mcp-runtime` and owns the data root, secret, and legacy-persistence migration. | all of the above + MCP SDK |
 
 ## Tools
+
+**Messenger (both servers):**
 
 | Tool | Description |
 |------|-------------|
 | `list_chats` | List recent LINE chats |
 | `get_messages` | Fetch messages from a chat |
 | `get_image` | Download and return an image from a message |
-| `sample_messages` | Fetch raw text messages with timestamps; accepts optional `since`/`until` for historical ranges — use before writing regex templates |
-| `manage_templates` | Save, update, delete, or list regex templates for a chat (persisted in `data/templates/`) |
-| `get_transactions` | Parse bank notifications into structured transactions; paginates the full history when `since` is given; auto-loads saved templates; supports filtering by category, currency, merchant regex, and amount range |
-| `summarize_transactions` | Aggregate transactions into totals grouped by month, merchant, or category; supports the same filters as `get_transactions` |
+| `initiate_import` | Begin a LINE chat-export upload (returns an upload link) |
+| `complete_import` | Finalize an uploaded export into the message cache |
 
-### Transaction tools
+**Bank / transactions (composed server only):**
 
-Some LINE channels (e.g. UOB Thai, CardX Thailand, SCB Connect) deliver bank notifications as templated messages. The transaction tools let Claude extract structured data from them without any hardcoded parsers.
+| Tool | Description |
+|------|-------------|
+| `sample_messages` | Fetch raw text messages with timestamps; accepts `since`/`until` for historical ranges — use before writing regex templates |
+| `manage_templates` | Save, update, delete, list regex templates + currency aliases; discover/apply built-in bank presets |
+| `manage_categories` | CRUD for global spending categories (not scoped per chat) |
+| `get_transactions` | Parse bank notifications into structured transactions; paginates full history with `since`; auto-loads saved templates; filters by category, currency, merchant regex, amount range |
+| `summarize_transactions` | Aggregate transactions into totals grouped by month, merchant, or category |
 
-Templates are saved per-chat on the server and loaded automatically — no need to re-derive patterns each session.
+### Transaction workflow
 
-**Workflow (first time for a new bank chat):**
-1. Call `sample_messages` to inspect raw message text — pass `since` to reach older messages if the bank changed its format months ago
-2. Call `manage_templates` (`action: upsert`) to save a named regex template — required capture groups are `(?<original_amount>...)` and `(?<original_currency>...)`; add `(?<balance>...)` to enable automatic native-currency `amount` calculation from balance diffs
-3. Call `get_transactions` with no `templates` argument — saved templates are loaded automatically
-4. Call `summarize_transactions` to get totals grouped by month or merchant
+Some LINE channels (e.g. UOB Thai, CardX Thailand, SCB Connect) deliver bank notifications as templated messages. The bank tools extract structured data from them without any hardcoded parsers; templates are saved per-chat on the server and auto-loaded.
 
-**Workflow (subsequent sessions):**
-- Just call `get_transactions` — templates are already saved.
+1. `sample_messages` — inspect raw text; pass `since` to reach older messages if the bank changed format months ago.
+2. `manage_templates` (`action: upsert`) — save a named regex; required capture groups are `(?<original_amount>...)` and `(?<original_currency>...)`; add `(?<balance>...)` to enable native-currency `amount` from balance diffs. Or `apply_preset` to bootstrap from a built-in bank preset.
+3. `get_transactions` — call with no `templates`; saved templates load automatically.
+4. `summarize_transactions` — totals grouped by month, merchant, or category.
 
-Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so that old messages are handled by old templates and new messages by new ones when a bank changes its format.
+Templates support `valid_from` / `valid_until` (ISO 8601 with timezone) so old messages use old templates and new ones use new templates when a bank changes format.
 
-**Example — UOB Thai** (bilingual Thai+English messages, non-breaking spaces around "Available credit"):
-```json
-{
-  "name": "uob-debit",
-  "pattern": "You\\s+have\\s+spent\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+using\\s+UOB\\s+card\\s+\\(ending\\s+(?<account>[^)]+)\\)\\s+at\\s+(?<merchant>.+?)\\s+on\\s+(?<date>\\d{2}/\\d{2})\\.\\s+Available\\s+credit:\\s+THB\\s+(?<balance>[\\d,]+\\.?\\d*)",
-  "amount_sign": "debit",
-  "date_format": "DD/MM"
-}
-```
-
-**Example — CardX Thailand** (English-only, date format "9 Jun 26"):
-```json
-{
-  "name": "cardx-debit",
-  "pattern": "CardX\\s+would\\s+like\\s+to\\s+inform\\s+that\\s+you\\s+have\\s+made\\s+transaction\\s+via\\s+card\\s+ending\\s+with\\s+(?<account>\\d+)\\s+at\\s+(?<merchant>.+?)\\s+in\\s+the\\s+amount\\s+of\\s+(?<original_amount>[\\d,]+\\.?\\d*)\\s+(?<original_currency>[A-Z]+)\\s+on\\s+(?<date>.+?)\\.\\s+You\\s+have\\s+available\\s+credit\\s+limit\\s+(?<balance>[\\d,]+\\.?\\d*)",
-  "amount_sign": "debit"
-}
-```
-
-> **Tip:** Use `\\s+` instead of a literal space throughout patterns. LINE bank messages frequently contain non-breaking spaces (U+00A0) that look identical but break literal-space matches.
-
-> **Tip:** Pass `since` to `get_transactions` (e.g. `since: "2026-05-01"`) to fetch the complete history for a month. Without `since`, only the latest 200 messages are checked.
-
-> **Tip:** Narrow results with filters instead of fetching everything and filtering client-side. Example — dining spend over 500 THB in June: `get_transactions({ chatMid, since: "2026-06-01", until: "2026-06-30", categories: ["Dining"], amount_min: 500 })`. Filter types combine with AND; multiple values within one type (e.g. `categories: ["Dining", "Coffee"]`) combine with OR.
-
-When a bank changes its message format, save a new template with an appropriate `valid_from` date — no code changes needed.
+> **Tip:** Use `\s+` instead of literal spaces — LINE bank messages frequently contain non-breaking spaces (U+00A0) that break literal-space matches.
+> **Tip:** Pass `since` (e.g. `since: "2026-05-01"`) to fetch complete history; without it only the latest 200 messages are checked.
+> **Tip:** Narrow with filters (`categories`, `original_currencies`, `merchants`, `amount_min`, `amount_max`) — AND across types, OR within a type.
 
 ## How it works
 
-The server runs as an HTTP server using the [Streamable HTTP MCP transport](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#streamable-http). It implements OAuth 2.0, so Claude Code handles authentication natively — no manual token setup required.
+The server runs over the [Streamable HTTP MCP transport](https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/transports/#streamable-http) and implements OAuth 2.0, so Claude Code handles authentication natively. Every `POST /mcp` gets a freshly constructed MCP server and transport; the resolved principal is passed explicitly (no ambient `AsyncLocalStorage`).
 
-**Auth flow:**
-1. On first use, Claude Code detects a `401` and opens an authorization page in your browser
-2. If several saved LINE accounts exist, choose the account by its LINE profile name
-3. Scan the QR code with that account
-4. Enter the PIN on first login or when LINE rejects an old saved certificate
-5. Claude Code receives tokens automatically and retries the tool call
+**Auth flow (first use):** Claude Code detects a `401`, opens an authorization page, you pick a saved LINE account (if several exist) by profile name, scan the QR with that account, enter the PIN on first login or when LINE rejects an old certificate, and Claude Code receives tokens automatically and retries.
 
-**Token lifecycle:** MCP tokens are self-contained HMAC-signed blobs embedding LINE credentials and expiry. The signing key is stored in `data/secret`. MCP refresh tokens remain usable across server restarts while `data/secret` and the corresponding `data/auth/<mid>.json` record remain available. LINE access tokens are refreshed transparently when they near expiry. Repeat authorization reuses the saved LINE certificate and normally requires QR confirmation without a PIN.
+**⚠️ Breaking token cutover (one-time reauthorization):** MCP tokens are now finite-lived, **MID-only**, schema-checked claims (`version`/`kind`/`issuer`/`audience`/`scope`/`expiry`). They embed **no** LINE credential. The two historical embedded-credential token formats have no `version`/`kind` field and are rejected outright — never migrated. **Every previously issued token must be re-authorized once** after upgrading to this modular server. `data/secret` still signs tokens and, together with the `data/auth/<mid>.json` records, keeps refresh tokens valid across restarts.
 
-**Message cache:** Every message fetched from LINE is automatically stored in a local SQLite database (`data/cache/messages.db`). On subsequent calls, the server reads from the cache first and only fetches messages newer than the latest cached entry from LINE. This means history older than LINE's ~2-week API window remains accessible indefinitely — `since` dates from months ago work without any special configuration.
+**Message cache:** Every fetched message is stored in a local SQLite DB. Later calls read the cache first and fetch only messages newer than the latest cached entry, so history older than LINE's ~2-week API window stays accessible — `since` dates from months ago just work. The line-message cache is **owner-scoped**: the same chat/message IDs under two different MIDs stay isolated.
+
+**Trusted-tenant bank data:** By explicit design (issue #75, Task 10), the bank **category and template stores are shared across every principal** on a data root — unlike the owner-scoped message cache. Only trust principals that may share bank/category state on the same data root.
+
+**Legacy persistence migration:** On first start against a pre-modular data root, the composed server performs a one-time migration of the old combined `cache/messages.db` into separate per-generation line and bank databases. Rows whose owning MID cannot be unambiguously determined are **quarantined** (never dropped or arbitrarily assigned) and can be recovered later. The migration is generation-based and pointer-committed: an interrupted restart (before or after the pointer is published) converges on a single authoritative generation. Category IDs and order survive migration and remain shared across principals.
+
+### One process per data root
+
+Never run two servers against the same data root on one host. The composed server owns bank/category data the standalone server knows nothing about, and the **standalone server refuses to start** if it finds a legacy pre-migration combined database with no committed pointer (run the composed server once first to migrate, then start the standalone server). Under Docker, give each server its own data volume.
 
 ## Usage
 
 ### Docker (recommended)
 
+Two build targets share one multi-stage `Dockerfile`:
+
 ```bash
-docker compose up -d
+# Composed server (ten tools) — the docker-compose default
+docker compose up -d line-mcp
 claude mcp add --transport http --scope user line http://localhost:3000/mcp
+
+# Standalone messenger server (five tools) — its OWN data volume
+docker compose --profile standalone up -d line-mcp-standalone
+# → listens on host port 3100
 ```
 
-Call any LINE tool in Claude — the OAuth flow will trigger automatically on first use.
+Or build the targets directly:
 
-To run behind a reverse proxy under a URL prefix instead of at the domain root, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp` in `docker-compose.yml`) and include the same prefix in the `claude mcp add` URL (`http://localhost:3000/line-mcp/mcp`).
+```bash
+docker build --target server   -t line-mcp-server:latest     .
+docker build --target line-mcp  -t line-mcp-standalone:latest .
+```
+
+Both images build once with Node 24, ship only their own compiled package closure plus production dependencies, run as a non-root `node` user with `/data` as a volume, and expose `GET ${BASE_PATH}/healthz`. To run behind a reverse proxy under a URL prefix, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp`) and include the same prefix in the `claude mcp add` URL.
 
 ### Local development
 
-**Prerequisites:** Node.js 20+
+**Prerequisites:** Node.js 24
 
 ```bash
 npm install
-npm start          # starts HTTP MCP server on http://localhost:3000
-```
-
-```bash
-claude mcp add --transport http --scope user line http://localhost:3000/mcp
+npm run build                # tsc -b — composite build of all six packages
+npm start                    # composed server on http://localhost:3000
+node packages/line-mcp/dist/cli.js   # standalone messenger server
 ```
 
 ## Commands
 
 ```bash
-npm run build        # compile TypeScript → dist/
-npm start            # run with ts-node (development)
-npm test             # run all tests
-npm run test:unit    # run unit tests only (no LINE session required)
-npm run test:e2e     # run e2e tests (requires .line-auth.json)
+npm run build      # tsc -b — composite build across all six packages
+npm run clean      # tsc -b --clean
+npm start          # run the composed server (packages/server/dist/cli.js)
+npm run lint       # eslint .
+npm run test:unit  # unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+npm run test:e2e   # live LINE e2e (requires .line-auth.json)
 ```
+
+Extra deterministic gates (run explicitly; also wired into CI):
+
+```bash
+npx vitest run tests/artifacts/line-client-pack.test.ts   # packed line-client: offline install, WASM, no SQLite
+npx vitest run tests/docker/docker-smoke.test.ts          # both Docker targets: healthz + real MCP tools/list
+```
+
+## CI
+
+`.github/workflows/ci.yml` runs three parallel jobs on pull requests and pushes to `main`:
+
+- **check** — `npm ci` → lint → `tsc -b` → unit/contract/migration tests → import-boundary test → `npm ls --all`.
+- **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
+- **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
+
+The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate; it needs real credentials and is a manual pre-release check.
 
 ## E2E tests
 
-Tests require a valid LINE session. Export your auth data to `.line-auth.json` in the project root, then run `npm run test:e2e`. The test suite launches the server as a child process, seeds a test token to bypass OAuth, and connects over the MCP HTTP transport.
+Export a valid LINE session to `.line-auth.json` in the project root, then `npm run test:e2e`. The suite launches the composed server as a child process, seeds a test token to bypass OAuth, and connects over the MCP HTTP transport with an isolated temporary `DATA_DIR`.
+
+## Package artifact & provenance policy
+
+- **No public publish.** No package is published to the public npm registry (or any public index). CI and the artifact tests `npm pack`/install for verification only — never `npm publish`. A new public distribution form requires the provenance review described in issue #75.
+- **LTSM assets (`@raidenyn/line-client`).** `assets/ltsm/ltsm.wasm` and `ltsmSandbox.js` are proprietary artifacts copied as-is from the LINE Chrome extension (owned by LINE Corporation) — see `packages/line-client/THIRD_PARTY_NOTICES.md` and `assets/ltsm/provenance.json`. Approved distribution: this repo, Docker images built from it, and internal tarballs. Public publication is **not approved** pending legal review. `line-client` bundles `happy-dom` (via `bundledDependencies`) so a consumer needs no registry access, and it carries **no** `better-sqlite3`.
 
 ## Security notes
 
-- `data/secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates all issued tokens.
-- `data/auth/*.json` — sensitive live LINE credentials, written with `0600` permissions beneath a `0700` directory. Keep them private and out of version control.
-- `.line-auth.json` — contains live LINE credentials. Keep it out of version control (it is in `.gitignore`).
-- The server binds to `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost.
+- `data/secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates every issued token.
+- `data/auth/*.json` — live LINE credentials, written `0600` beneath a `0700` directory. Keep private and out of version control.
+- `.line-auth.json` — live LINE credentials; keep out of version control (it is in `.gitignore`).
+- The server binds `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost.

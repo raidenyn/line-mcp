@@ -156,6 +156,13 @@ describe('createStandaloneServer — in-process start/stop', () => {
       const server = createStandaloneServer({ dataRoot: tmpDataDir, port: 0 });
       const { port } = await server.start();
       expect(port).toBeGreaterThan(0);
+
+      // /healthz answers { status: 'ok', version } — the same liveness contract
+      // the composed server exposes, and what the Docker HEALTHCHECK probes.
+      const res = await fetch(`http://127.0.0.1:${port}/healthz`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: 'ok', version: '1.0.0' });
+
       await server.stop();
 
       expect(fs.existsSync(path.join(tmpDataDir, 'secret'))).toBe(true);

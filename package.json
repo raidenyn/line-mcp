@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "test:unit": "vitest run packages src tests/architecture",
+    "test:unit": "vitest run packages tests/architecture",
     "test:e2e": "vitest run tests/e2e.test.ts",
     "lint": "eslint .",
     "start": "node packages/server/dist/cli.js"
