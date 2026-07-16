@@ -8,8 +8,12 @@ export interface Preset {
   currency_aliases: Record<string, string>;
 }
 
+// Packaged preset JSON ships under the package's own assets/ tree, resolved
+// relative to this module (never process.cwd()). __dirname is
+// packages/bank-mcp/src under ts-node and packages/bank-mcp/dist once compiled;
+// `../assets/presets` points at packages/bank-mcp/assets/presets in both.
 function presetsDir(): string {
-  return join(__dirname, 'presets');
+  return join(__dirname, '..', 'assets', 'presets');
 }
 
 export function loadAllPresets(dir = presetsDir()): Record<string, Preset> {
@@ -71,4 +75,21 @@ export function detectPresets(
   }
 
   return suggestions;
+}
+
+/**
+ * Read-only accessor for the built-in bank presets. `dir` defaults to the
+ * package's own `assets/presets` (resolved relative to this module, not
+ * process.cwd()); tests may point it at a temp directory.
+ */
+export class PresetStore {
+  constructor(private readonly dir: string = presetsDir()) {}
+
+  loadAll(): Record<string, Preset> {
+    return loadAllPresets(this.dir);
+  }
+
+  get(name: string): Preset | null {
+    return getPreset(name, this.dir);
+  }
 }

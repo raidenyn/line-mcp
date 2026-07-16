@@ -10,6 +10,7 @@ export {
   stageLineDb,
   stageQuarantineDb,
   recoverQuarantinedMessagesSql,
+  readLegacyMessages,
   checkIntegrity,
   type LegacyMessageRow,
   type QuarantineRecoverySqlResult,

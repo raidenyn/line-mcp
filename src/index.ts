@@ -5,8 +5,7 @@ import crypto from 'crypto';
 import express from 'express';
 import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
-import { z } from 'zod';
-import { LineClient, AuthData } from '@raidenyn/line-client';
+import { AuthData } from '@raidenyn/line-client';
 import {
   recordRefreshedAuth,
   LineAuthProvider,
@@ -21,37 +20,46 @@ import {
   type LineToolDeps,
   type RequestLineClient,
 } from '@raidenyn/line-mcp';
-import { CachingLineClient } from './caching-line-client';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
-import { CategoryStore } from './category-store';
-import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction, TransactionFilterSchema, TransactionFilter, validateFilters, filterTransactions } from './transaction-parser';
-import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
-import { loadAllPresets, getPreset, detectPresets } from './preset-store';
-import { dataDir, authDir, secretPath } from './data-dir';
+import {
+  CategoryStore,
+  TemplateStore,
+  PresetStore,
+  registerBankTools,
+  registerBankResources,
+  type BankToolDeps,
+} from '@raidenyn/bank-mcp';
+import { dataDir, authDir, secretPath, templatesDir } from './data-dir';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
 import { normalizeBasePath, type RequestContext } from '@raidenyn/mcp-runtime';
-import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
 
 const SERVER_VERSION = '1.0.0';
 const server = new McpServer({ name: 'line-mcp', version: SERVER_VERSION });
-const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
-// Threads the resolved LINE principal (not just its raw AuthData) through to
-// the messenger tools' request-bound context — see lineToolContext below.
+// Threads the resolved LINE principal through to the messenger AND bank tools'
+// request-bound contexts — see lineToolContext / bankToolContext below.
 const principalStore = new AsyncLocalStorage<LinePrincipal>();
 let sharedCache: SqliteMessageCache;
-let categoryStore: CategoryStore;
 
-// The messenger tools/import-service/sync are constructed fresh inside every
-// main() call (issue #75, Task 9) — these module-level `let`s are reassigned
-// there, exactly like `sharedCache`/`categoryStore` above. registerLineTools()
-// itself runs exactly ONCE at module load (below), and its closures read
-// these mutable bindings — and lineToolContext's live getters — fresh on
-// every actual tool invocation, so they always see the CURRENT main() call's
-// wiring even across repeated main() calls in the same process (tests).
+// The messenger + bank tools/import-service/sync are constructed fresh inside
+// every main() call (issue #75, Tasks 9–10) — these module-level `let`s are
+// reassigned there, exactly like `sharedCache` above. registerLineTools() /
+// registerBankTools() themselves run exactly ONCE at module load (below), and
+// their closures read these mutable bindings — and the tool contexts' live
+// getters — fresh on every actual tool invocation, so they always see the
+// CURRENT main() call's wiring even across repeated main() calls in the same
+// process (tests).
 let currentCreateRequestClient: ((principal: LinePrincipal) => Promise<RequestLineClient>) | undefined;
 let currentImportService: ImportService | undefined;
+let currentCategoryStore: CategoryStore | undefined;
+let currentTemplateStore: TemplateStore | undefined;
+
+// Built-in bank presets ship inside @raidenyn/bank-mcp and resolve relative to
+// that package, not the data root — so this store carries no per-generation
+// state and is safe to construct once at module load. Constructing it performs
+// no filesystem I/O (assets are read lazily on first use).
+const presetStore = new PresetStore();
 
 // The executable owns secret loading: importing @raidenyn/line-mcp never reads
 // or creates data/secret. The signing key is loaded here and injected into
@@ -67,51 +75,6 @@ function loadOrCreateSecret(dataRoot: string): string {
     return secret;
   }
 }
-
-async function readGuideFile(relPath: string, uri: string) {
-  try {
-    const text = await fs.promises.readFile(join(process.cwd(), relPath), 'utf8');
-    return { contents: [{ uri, mimeType: 'text/markdown' as const, text }] };
-  } catch {
-    return { contents: [{ uri, mimeType: 'text/markdown' as const, text: `Guide file not found: ${relPath}` }] };
-  }
-}
-
-// Bank-tool guides only (sample_messages, manage_templates, manage_categories,
-// get_transactions, summarize_transactions) — these stay in root docs/guide
-// until Task 10 extracts bank-mcp. The messenger overview + its five tool
-// guides now live in @raidenyn/line-mcp's own docs/guide and are registered
-// below via registerLineResources().
-server.registerResource(
-  'guide-sample_messages',
-  'line://guide/tools/sample_messages',
-  { description: 'When to use sample_messages, since/until params, role before template writing', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/sample_messages.md', 'line://guide/tools/sample_messages'),
-);
-server.registerResource(
-  'guide-manage_templates',
-  'line://guide/tools/manage_templates',
-  { description: 'When to use manage_templates, capture group requirements, time-bounded templates', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/manage_templates.md', 'line://guide/tools/manage_templates'),
-);
-server.registerResource(
-  'guide-manage_categories',
-  'line://guide/tools/manage_categories',
-  { description: 'When to use manage_categories, pattern matching rules, global scope vs per-chat templates', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/manage_categories.md', 'line://guide/tools/manage_categories'),
-);
-server.registerResource(
-  'guide-get_transactions',
-  'line://guide/tools/get_transactions',
-  { description: 'When to use get_transactions, why since is critical, auto-loaded templates', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/get_transactions.md', 'line://guide/tools/get_transactions'),
-);
-server.registerResource(
-  'guide-summarize_transactions',
-  'line://guide/tools/summarize_transactions',
-  { description: 'When to use summarize_transactions, group_by options, final step in transaction workflow', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/summarize_transactions.md', 'line://guide/tools/summarize_transactions'),
-);
 
 // The one live RequestContext<LinePrincipal> registerLineTools() is ever
 // called with. Its fields are getters that read the CURRENT AsyncLocalStorage
@@ -152,528 +115,56 @@ const lineToolDeps: LineToolDeps = {
 registerLineTools(server, lineToolContext, lineToolDeps);
 registerLineResources(server); // messenger overview + list_chats/get_messages/get_image/initiate_import/complete_import guides
 
-server.registerTool(
-  'manage_templates',
-  {
-    description:
-      'Create, update, delete, or list saved transaction regex templates for a LINE chat. ' +
-      'Templates are persisted in data/templates/<chatMid>.json and auto-loaded by get_transactions. ' +
-      'Recommended workflow: call sample_messages first to inspect raw message text, ' +
-      'then upsert templates here, then call get_transactions with no templates argument.',
-    inputSchema: {
-      chatMid: z.string().describe('Chat MID from list_chats'),
-      action: z.enum(['upsert', 'delete', 'list', 'upsert_alias', 'delete_alias', 'list_aliases', 'list_presets', 'apply_preset']).describe(
-        '"upsert" — save or replace a template by name. ' +
-        '"delete" — remove a named template. ' +
-        '"list" — return all saved templates for this chat (full objects, in insertion order). ' +
-        '"upsert_alias" — save or replace a currency alias (e.g. alias: "บาท", canonical: "THB"). ' +
-        '"delete_alias" — remove a currency alias by its alias string. ' +
-        '"list_aliases" — return all currency aliases for this chat. ' +
-        '"list_presets" — list all available built-in bank presets (chatMid is ignored). ' +
-        '"apply_preset" — copy all templates and aliases from a named preset into this chat\'s template file.'
-      ),
-      template: NamedTemplateSchema.optional().describe(
-        'Required for action: upsert. Pattern rules: ' +
-        'Use named capture groups — (?<original_amount>...) and (?<original_currency>...) are REQUIRED; ' +
-        '(?<amount>...), (?<currency>...), (?<merchant>...), (?<date>...), (?<balance>...), (?<account>...) are optional. ' +
-        '(?<amount>) captures native-currency amount directly; if absent, it is computed from consecutive balance diffs. ' +
-        '(?<currency>) captures the account default currency (e.g. "THB"); (?<original_currency>) captures the transaction currency (e.g. "USD" for foreign spends). ' +
-        'Pattern is compiled with the "s" flag (dotAll) — . matches newlines, enabling one pattern for bilingual messages. ' +
-        'Backslashes must be doubled in JSON strings: \\\\d, \\\\s, \\\\. — but / does NOT need escaping. ' +
-        'Bank messages often use non-breaking spaces (U+00A0) — use \\\\s+ instead of a literal space at word boundaries. ' +
-        'amount_sign: "debit" stores amount as negative; "credit" as positive. ' +
-        'date_format hint: "DD/MM", "DD/MM/YYYY", or "DD/MM/YYYY HH:mm" — omit if date is already ISO-parseable. ' +
-        'valid_from / valid_until: ISO 8601 with timezone offset, e.g. "2025-03-01T00:00:00+07:00". ' +
-        'Messages outside this window skip this template — use when the bank changed its message format.'
-      ),
-      name: z.string().optional().describe('Template name to remove (required for action: delete)'),
-      alias: z.string().optional().describe('Currency string captured by regex (required for upsert_alias and delete_alias)'),
-      canonical: z.string().optional().describe('Canonical currency code to normalise to, e.g. "THB" (required for upsert_alias)'),
-      preset_name: z.string().optional().describe('Preset name to apply (required for action: apply_preset). Use list_presets to see available names.'),
-    },
+// Bank tools (manage_templates, manage_categories, sample_messages,
+// get_transactions, summarize_transactions) share the SAME live principal/
+// request context as the messenger tools — a separate object mirroring
+// lineToolContext's getters, backed by the same principalStore/requestStore.
+const bankToolContext: RequestContext<LinePrincipal> = {
+  get principal(): LinePrincipal {
+    const principal = principalStore.getStore();
+    if (!principal) throw new Error('No LINE principal in scope for this request');
+    return principal;
   },
-  async ({ chatMid, action, template, name, alias, canonical, preset_name }) => {
-    if (action === 'upsert') {
-      if (!template) {
-        return { content: [{ type: 'text' as const, text: 'template is required for action: upsert' }], isError: true };
-      }
-      try {
-        upsertTemplate(chatMid, template);
-        return { content: [{ type: 'text' as const, text: `Template '${template.name}' saved for chat ${chatMid}.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to save template: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'delete') {
-      if (!name) {
-        return { content: [{ type: 'text' as const, text: 'name is required for action: delete' }], isError: true };
-      }
-      try {
-        const deleted = deleteTemplate(chatMid, name);
-        if (!deleted) {
-          return { content: [{ type: 'text' as const, text: `No template named '${name}' found for this chat.` }], isError: true };
-        }
-        return { content: [{ type: 'text' as const, text: `Template '${name}' deleted from chat ${chatMid}.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to delete template: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'upsert_alias') {
-      if (!alias || !canonical) {
-        return { content: [{ type: 'text' as const, text: 'alias and canonical are required for action: upsert_alias' }], isError: true };
-      }
-      try {
-        upsertAlias(chatMid, alias, canonical);
-        return { content: [{ type: 'text' as const, text: `Alias '${alias}' → '${canonical}' saved for chat ${chatMid}.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to save alias: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'delete_alias') {
-      if (!alias) {
-        return { content: [{ type: 'text' as const, text: 'alias is required for action: delete_alias' }], isError: true };
-      }
-      try {
-        const deleted = deleteAlias(chatMid, alias);
-        if (!deleted) {
-          return { content: [{ type: 'text' as const, text: `No alias '${alias}' found for this chat.` }], isError: true };
-        }
-        return { content: [{ type: 'text' as const, text: `Alias '${alias}' deleted from chat ${chatMid}.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to delete alias: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'list_aliases') {
-      try {
-        const aliases = listAliases(chatMid);
-        const text = Object.keys(aliases).length === 0
-          ? `No currency aliases saved for chat ${chatMid}.`
-          : JSON.stringify(aliases, null, 2);
-        return { content: [{ type: 'text' as const, text }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to list aliases: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'list_presets') {
-      try {
-        const presets = loadAllPresets();
-        const list = Object.entries(presets).map(([name, p]) => ({
-          name,
-          description: p.description,
-          template_count: p.templates.length,
-          currency_alias_count: Object.keys(p.currency_aliases).length,
-        }));
-        return { content: [{ type: 'text' as const, text: JSON.stringify(list, null, 2) }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to list presets: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    if (action === 'apply_preset') {
-      if (!preset_name) {
-        return { content: [{ type: 'text' as const, text: 'preset_name is required for action: apply_preset' }], isError: true };
-      }
-      try {
-        const preset = getPreset(preset_name);
-        if (!preset) {
-          const available = Object.keys(loadAllPresets()).join(', ') || 'none';
-          return { content: [{ type: 'text' as const, text: `Preset '${preset_name}' not found. Available presets: ${available}` }], isError: true };
-        }
-        for (const template of preset.templates) {
-          upsertTemplate(chatMid, template);
-        }
-        for (const [alias, canonical] of Object.entries(preset.currency_aliases)) {
-          upsertAlias(chatMid, alias, canonical);
-        }
-        const aliasCount = Object.keys(preset.currency_aliases).length;
-        return {
-          content: [{
-            type: 'text' as const,
-            text: `Applied preset '${preset_name}': ${preset.templates.length} templates and ${aliasCount} aliases added/updated for chat ${chatMid}.`,
-          }],
-        };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to apply preset: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    // action === 'list'
-    try {
-      const templates = listTemplates(chatMid);
-      const text = templates.length === 0
-        ? `No templates saved for chat ${chatMid}.`
-        : JSON.stringify(templates, null, 2);
-      return { content: [{ type: 'text' as const, text }] };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: `Failed to list templates: ${(err as Error).message}` }], isError: true };
-    }
+  get request(): ExpressRequest {
+    const req = requestStore.getStore();
+    if (!req) throw new Error('No request in scope for this call');
+    return req;
   },
-);
+};
 
-server.registerTool(
-  'manage_categories',
-  {
-    description:
-      'Create, update, delete, or list global spending categories used to automatically tag transactions. ' +
-      'Categories apply across all chats — unlike templates, which are chat-specific. ' +
-      "Each category has a regex `pattern` matched against a transaction's merchant (falling back to its raw message text when no merchant was captured). " +
-      'Patterns are tried in the order categories were created; the first match wins. ' +
-      'get_transactions and summarize_transactions apply categorization automatically — no need to call this before every use, only when adding or changing categories.',
-    inputSchema: {
-      action: z.enum(['upsert', 'delete', 'list']).describe(
-        '"upsert" — save or replace a category by name. "delete" — remove a named category. "list" — return all saved categories in match order.'
-      ),
-      category: CategorySchema.optional().describe(
-        'Required for action: upsert. `pattern` is a JS regex matched case-insensitively against merchant (or rawText when merchant is absent). No named capture groups needed — this is a plain match test.'
-      ),
-      name: z.string().optional().describe('Category name to remove (required for action: delete)'),
-    },
+// Mirrors lineToolDeps: createMessageReader indirects through the SAME
+// per-request client factory main() reassigns (the reader is that client's
+// cache-backed message surface), and the category/template stores are live
+// getters over the module-level `let`s main() sets. Presets are package-relative
+// and constructed once above.
+const bankToolDeps: BankToolDeps<LinePrincipal> = {
+  createMessageReader: async (principal) => {
+    if (!currentCreateRequestClient) {
+      throw new Error('LINE request-client factory not initialized — main() must run before tools are invoked');
+    }
+    const client = await currentCreateRequestClient(principal);
+    return client.messages;
   },
-  async ({ action, category, name }) => {
-    if (action === 'upsert') {
-      if (!category) {
-        return { content: [{ type: 'text' as const, text: 'category is required for action: upsert' }], isError: true };
-      }
-      try {
-        categoryStore.upsert(category);
-        return { content: [{ type: 'text' as const, text: `Category '${category.name}' saved.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to save category: ${(err as Error).message}` }], isError: true };
-      }
+  get templates(): TemplateStore {
+    if (!currentTemplateStore) {
+      throw new Error('Template store not initialized — main() must run before tools are invoked');
     }
-
-    if (action === 'delete') {
-      if (!name) {
-        return { content: [{ type: 'text' as const, text: 'name is required for action: delete' }], isError: true };
-      }
-      try {
-        const deleted = categoryStore.delete(name);
-        if (!deleted) {
-          return { content: [{ type: 'text' as const, text: `No category named '${name}' found.` }], isError: true };
-        }
-        return { content: [{ type: 'text' as const, text: `Category '${name}' deleted.` }] };
-      } catch (err) {
-        return { content: [{ type: 'text' as const, text: `Failed to delete category: ${(err as Error).message}` }], isError: true };
-      }
-    }
-
-    // action === 'list'
-    try {
-      const categories = categoryStore.list();
-      const text = categories.length === 0
-        ? 'No categories saved.'
-        : JSON.stringify(categories, null, 2);
-      return { content: [{ type: 'text' as const, text }] };
-    } catch (err) {
-      return { content: [{ type: 'text' as const, text: `Failed to list categories: ${(err as Error).message}` }], isError: true };
-    }
+    return currentTemplateStore;
   },
-);
-
-server.registerTool(
-  'sample_messages',
-  {
-    description:
-      'Fetch raw text messages from a LINE chat for regex template derivation. ' +
-      'Use this BEFORE writing transaction templates — it shows raw message content with UTC timestamps ' +
-      'so you can identify anchor strings, field boundaries, and when the bank changed its message format. ' +
-      'Returns only text messages (images, stickers, and other non-text content are excluded), ' +
-      'sorted oldest-first so format evolution is visible top-to-bottom.',
-    inputSchema: {
-      chatMid: z.string().describe('Chat MID from list_chats'),
-      count: z.number().int().min(1).max(50).default(20).describe('Number of recent messages to fetch (text messages returned; images/stickers excluded from output)'),
-      since: z.string().optional().describe('ISO date — fetch messages from this date onwards (enables full history pagination)'),
-      until: z.string().optional().describe('ISO date — exclude messages after this date'),
-    },
+  get categories(): CategoryStore {
+    if (!currentCategoryStore) {
+      throw new Error('Category store not initialized — main() must run before tools are invoked');
+    }
+    return currentCategoryStore;
   },
-  async ({ chatMid, count, since, until }) => {
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    try {
-      if (since) {
-        const sinceMs = new Date(since).getTime();
-        if (!Number.isFinite(sinceMs)) {
-          return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
-        }
-      }
-      let untilMs: number | undefined;
-      if (until) {
-        untilMs = parseSampleUntilBound(until);
-        if (!Number.isFinite(untilMs)) {
-          return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
-        }
-      }
-      const client = makeLineClient(authData);
-      const messages = since
-        ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
-        : await client.getMessages(chatMid, count);
-      const textMessages = filterSampleMessages(messages, untilMs);
-      if (textMessages.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No text messages found.' }] };
-      }
-      const lines = textMessages.map((m) => {
-        const time = new Date(parseInt(m.createdTime, 10)).toISOString();
-        return `[${time}] ${m.text}`;
-      });
-      const { templates: savedTemplates } = loadTemplates(chatMid);
-      const allPresets = loadAllPresets();
-      const presetSuggestions = detectPresets(textMessages, savedTemplates, allPresets);
+  presets: presetStore,
+};
 
-      let messageText = lines.join('\n');
-      if (presetSuggestions.length > 0) {
-        const hints = presetSuggestions.map(
-          (s) => `${s.matched_count} message(s) matched the '${s.preset_name}' preset but no saved template — run manage_templates with action: apply_preset, preset_name: '${s.preset_name}' to set it up.`,
-        );
-        messageText += '\n\n' + hints.join('\n');
-      }
-
-      return {
-        content: [
-          { type: 'text' as const, text: messageText },
-          { type: 'text' as const, text: JSON.stringify({ preset_suggestions: presetSuggestions }) },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to sample messages: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
-function buildAmountWarnings(transactions: Transaction[]): string[] {
-  const warnings: string[] = [];
-  const estimatedCount = transactions.filter((t) => t.amount_estimated).length;
-  if (estimatedCount > 0) {
-    warnings.push(
-      `${estimatedCount} transaction(s) have amount estimated via FX conversion or balance diff — may not match the bank's own applied rate/fees. See amount_estimated field.`,
-    );
-  }
-  const gapSuspectedCount = transactions.filter((t) => t.amount_gap_suspected).length;
-  if (gapSuspectedCount > 0) {
-    warnings.push(
-      `${gapSuspectedCount} transaction(s) show a balance change that doesn't reconcile with their FX-converted amount — there may be other untracked activity nearby. See amount_gap_suspected field.`,
-    );
-  }
-  return warnings;
-}
-
-async function fetchParsedTransactions(
-  authData: AuthData,
-  chatMid: string,
-  since?: string,
-  until?: string,
-  filters: TransactionFilter = {},
-): Promise<
-  | { transactions: Transaction[]; warnings: string[]; rangeNote: string }
-  | { error: string }
-> {
-  if (since && !Number.isFinite(new Date(since).getTime())) {
-    return { error: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` };
-  }
-  if (until && !Number.isFinite(new Date(until).getTime())) {
-    return { error: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` };
-  }
-
-  const filterError = validateFilters(filters);
-  if (filterError) {
-    return { error: filterError };
-  }
-
-  const warnings: string[] = [];
-  const loaded = loadTemplates(chatMid);
-  if (loaded.warning) warnings.push(loaded.warning);
-  const savedTemplates = loaded.templates;
-  const savedAliases = loaded.currency_aliases;
-
-  if (savedTemplates.length === 0) {
-    return {
-      error:
-        'No templates provided and none saved for this chat. ' +
-        'Call sample_messages to inspect messages, then manage_templates (action: upsert) to save patterns.',
-    };
-  }
-
-  for (const t of savedTemplates) {
-    if (t.valid_from && !Number.isFinite(new Date(t.valid_from).getTime())) {
-      warnings.push(`Template "${t.name}": valid_from "${t.valid_from}" could not be parsed — treating as always-valid.`);
-    }
-    if (t.valid_until && !Number.isFinite(new Date(t.valid_until).getTime())) {
-      warnings.push(`Template "${t.name}": valid_until "${t.valid_until}" could not be parsed — treating as always-valid.`);
-    }
-  }
-
-  const client = makeLineClient(authData);
-  const messages = since
-    ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
-    : await client.getMessages(chatMid, 200);
-
-  let transactions = messages
-    .map((msg) => {
-      const templatesForMsg = filterByTime(savedTemplates, parseInt(msg.createdTime, 10));
-      return parseTransaction(msg, templatesForMsg, savedAliases);
-    })
-    .filter((tx) => tx !== null);
-
-  if (since) transactions = transactions.filter((tx) => tx.date >= since);
-  if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
-  transactions.sort((a, b) => a.date.localeCompare(b.date));
-  await applyBalanceDiffs(transactions);
-  categorize(transactions, categoryStore.list());
-  transactions = filterTransactions(transactions, filters);
-  warnings.push(...buildAmountWarnings(transactions));
-
-  const rangeNote = since
-    ? ''
-    : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
-
-  return { transactions, warnings, rangeNote };
-}
-
-server.registerTool(
-  'get_transactions',
-  {
-    description:
-      'Fetch messages from a LINE chat and parse them into structured transactions using regex templates. ' +
-      'Non-matching messages (promotions, alerts) are silently dropped. Results are sorted oldest→newest. ' +
-      'If templates is omitted, saved templates for this chat are loaded automatically from data/templates/<chatMid>.json ' +
-      'and filtered per message by valid_from/valid_until, so bank format changes across time are handled transparently. ' +
-      'Use manage_templates to save templates and sample_messages to inspect raw messages before writing patterns.',
-    inputSchema: {
-      chatMid: z.string().describe('Chat MID from list_chats'),
-      templates: z.array(TransactionTemplateSchema).min(1).optional().describe(
-        'Ordered list of patterns to try per message; first match wins. ' +
-        'Omit to auto-load saved templates for this chat.'
-      ),
-      since: z.string().optional().describe('ISO date — exclude transactions before this date'),
-      until: z.string().optional().describe('ISO date — exclude transactions after this date'),
-      ...TransactionFilterSchema.shape,
-    },
-  },
-  async ({ chatMid, templates: suppliedTemplates, since, until, categories, original_currencies, merchants, amount_min, amount_max }) => {
-    const filters: TransactionFilter = { categories, original_currencies, merchants, amount_min, amount_max };
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    try {
-      if (suppliedTemplates) {
-        // Inline-template path — unchanged from before
-        if (since && !Number.isFinite(new Date(since).getTime())) {
-          return { content: [{ type: 'text' as const, text: `Invalid 'since' date: "${since}". Use ISO 8601 format, e.g. "2026-05-01".` }], isError: true };
-        }
-        if (until && !Number.isFinite(new Date(until).getTime())) {
-          return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
-        }
-        const filterError = validateFilters(filters);
-        if (filterError) {
-          return { content: [{ type: 'text' as const, text: filterError }], isError: true };
-        }
-        const client = makeLineClient(authData);
-        const messages = since
-          ? await client.getMessagesInRange(chatMid, new Date(since).getTime())
-          : await client.getMessages(chatMid, 200);
-        let transactions = messages
-          .map((msg) => parseTransaction(msg, suppliedTemplates))
-          .filter((tx) => tx !== null);
-        if (since) transactions = transactions.filter((tx) => tx.date >= since);
-        if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
-        transactions.sort((a, b) => a.date.localeCompare(b.date));
-        await applyBalanceDiffs(transactions);
-        categorize(transactions, categoryStore.list());
-        transactions = filterTransactions(transactions, filters);
-        const inlineWarnings = buildAmountWarnings(transactions);
-        const warningBlock = inlineWarnings.length > 0 ? '\n\nWarnings:\n' + inlineWarnings.join('\n') : '';
-        const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';
-        return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock + rangeNote }] };
-      }
-
-      // Saved-templates path — delegate to helper
-      const fetched = await fetchParsedTransactions(authData, chatMid, since, until, filters);
-      if ('error' in fetched) {
-        return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
-      }
-      const { transactions, warnings, rangeNote } = fetched;
-      const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
-
-      if (transactions.length === 0) {
-        const filterNote = Object.values(filters).some((v) => v !== undefined)
-          ? ' Filters were applied — check category names via manage_categories (action: list), currency codes, merchant patterns, or the amount range.'
-          : '';
-        return {
-          content: [{
-            type: 'text' as const,
-            text: '0 transactions matched. Check that saved templates cover the message timestamps — ' +
-              'use manage_templates (action: list) to review validity ranges.' + filterNote + warningBlock + rangeNote,
-          }],
-        };
-      }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(transactions) + warningBlock + rangeNote }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to get transactions: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
-server.registerTool(
-  'summarize_transactions',
-  {
-    description:
-      'Fetch transactions from a LINE chat and aggregate them into totals and per-group breakdowns. ' +
-      'Uses saved templates (set up via manage_templates). ' +
-      'When transactions span multiple currencies the totals are labelled "mixed".',
-    inputSchema: {
-      chatMid: z.string().describe('Chat MID from list_chats'),
-      group_by: z.enum(['month', 'merchant', 'category']).describe('"month" groups by YYYY-MM; "merchant" groups by merchant name; "category" groups by assigned spending category'),
-      since: z.string().optional().describe('ISO date — exclude transactions before this date'),
-      until: z.string().optional().describe('ISO date — exclude transactions after this date'),
-      ...TransactionFilterSchema.shape,
-    },
-  },
-  async ({ chatMid, group_by, since, until, categories, original_currencies, merchants, amount_min, amount_max }) => {
-    const filters: TransactionFilter = { categories, original_currencies, merchants, amount_min, amount_max };
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    try {
-      const fetched = await fetchParsedTransactions(authData, chatMid, since, until, filters);
-      if ('error' in fetched) {
-        return { content: [{ type: 'text' as const, text: fetched.error }], isError: true };
-      }
-      const { transactions, warnings, rangeNote } = fetched;
-      const result = summarize(transactions, group_by, since, until);
-      const warningBlock = warnings.length > 0 ? '\n\nWarnings:\n' + warnings.join('\n') : '';
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result) + warningBlock + rangeNote }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to summarize: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
-function makeLineClient(authData: AuthData): CachingLineClient {
-  return new CachingLineClient(
-    // recordRefreshedAuth receives the refreshed AuthData snapshot directly —
-    // LineClient no longer mutates the `authData` object passed in here.
-    new LineClient(authData, globalThis.fetch, (fresh) => recordRefreshedAuth(fresh)),
-    sharedCache,
-    authData.mid,
-  );
-}
+registerBankTools(server, bankToolContext, bankToolDeps);
+// includeOverview: false — @raidenyn/line-mcp's registerLineResources() already
+// owns the shared `line://guide` overview URI above; bank contributes only its
+// five tool guides so the two registrations stay additive.
+registerBankResources(server, { includeOverview: false });
 
 function seedTestToken(provider: LineAuthProvider): void {
   const testToken = process.env.TEST_TOKEN;
@@ -717,8 +208,12 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
 
   // Two separate DB files (Task 2) — line messages and bank/category data no
   // longer share a single SQLite file the way the pre-migration schema did.
+  // The bank category + template stores (Task 10) are shared across every
+  // principal on this data root — the explicit trusted-tenant model, unlike the
+  // owner-scoped line-message cache.
   sharedCache = new SqliteMessageCache({ dbPath: active.lineDbPath });
-  categoryStore = new CategoryStore(active.bankDbPath);
+  currentCategoryStore = new CategoryStore(active.bankDbPath);
+  currentTemplateStore = new TemplateStore(templatesDir(dataRoot));
 
   const PORT = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
   const basePath = normalizeBasePath(process.env.BASE_PATH);
@@ -790,14 +285,16 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
       return;
     }
 
+    // authData is resolved above only to gate the request (401 when the
+    // account must reauthorize); the tools themselves re-resolve credentials
+    // per request via createRequestClient / createMessageReader, so it is not
+    // threaded through AsyncLocalStorage.
     await principalStore.run(principal, async () => {
       await requestStore.run(req, async () => {
-        await authStore.run(authData, async () => {
-          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-          res.on('close', () => { transport.close().catch(() => {}); });
-          await server.connect(transport);
-          await transport.handleRequest(req, res, req.body);
-        });
+        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        res.on('close', () => { transport.close().catch(() => {}); });
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
       });
     });
   });

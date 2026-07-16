@@ -40,6 +40,49 @@ export function checkIntegrity(db: Database.Database, dbPathForError: string): v
   }
 }
 
+function tableExists(db: Database.Database, name: string): boolean {
+  return !!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+}
+
+function firstLine(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).split('\n')[0];
+}
+
+/**
+ * Reads the legacy `messages` rows from a pre-migration combined
+ * `cache/messages.db` (read-only, never modified), ordered oldest-first by
+ * `created_time`. Returns `[]` when the file has no `messages` table. Throws
+ * (refusing migration) when the file exists but is corrupt or unreadable —
+ * the guarantee the server's persistence migration relies on to never guess.
+ * The bank/category rows in the same legacy file are read separately by the
+ * bank package; this reader is line-only.
+ */
+export function readLegacyMessages(legacyDbPath: string): LegacyMessageRow[] {
+  let db: Database.Database;
+  try {
+    db = new Database(legacyDbPath, { readonly: true, fileMustExist: true });
+  } catch (err) {
+    throw new Error(
+      `Legacy source database is corrupt or unreadable; refusing migration: ${firstLine(err)}`,
+      { cause: err },
+    );
+  }
+  try {
+    return tableExists(db, 'messages')
+      ? (db.prepare(
+          'SELECT chat_mid, message_id, created_time, raw_json FROM messages ORDER BY created_time ASC',
+        ).all() as LegacyMessageRow[])
+      : [];
+  } catch (err) {
+    throw new Error(
+      `Legacy source database is corrupt or unreadable; refusing migration: ${firstLine(err)}`,
+      { cause: err },
+    );
+  } finally {
+    db.close();
+  }
+}
+
 // Stages every legacy message row into a fresh owner-scoped line database at
 // `lineDbPath`, all attributed to `ownerMid`. Mirrors the schema
 // SqliteMessageCache itself creates (see sqlite-message-cache.ts) so the

@@ -2,7 +2,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { z } from 'zod';
 import { TransactionTemplateSchema } from './transaction-parser';
-import { templatesDir } from './data-dir';
 
 export const NamedTemplateSchema = TransactionTemplateSchema.extend({
   name: z.string().min(1).describe('Unique name for this template within the chat'),
@@ -26,7 +25,7 @@ function safeFilePath(chatMid: string, storeDir: string): string {
 
 export function loadTemplates(
   chatMid: string,
-  storeDir = templatesDir(),
+  storeDir: string,
 ): { templates: NamedTemplate[]; warning?: string; currency_aliases: Record<string, string> } {
   const path = safeFilePath(chatMid, storeDir);
   if (!existsSync(path)) return { templates: [], currency_aliases: {} };
@@ -57,7 +56,7 @@ function writeTemplates(chatMid: string, templates: NamedTemplate[], aliases: Re
   writeFileSync(safeFilePath(chatMid, storeDir), JSON.stringify({ templates, currency_aliases: aliases }, null, 2));
 }
 
-export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir = templatesDir()): void {
+export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir: string): void {
   const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === template.name);
   if (idx >= 0) templates[idx] = template;
@@ -65,7 +64,7 @@ export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDi
   writeTemplates(chatMid, templates, currency_aliases, storeDir);
 }
 
-export function deleteTemplate(chatMid: string, name: string, storeDir = templatesDir()): boolean {
+export function deleteTemplate(chatMid: string, name: string, storeDir: string): boolean {
   const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   const idx = templates.findIndex((t) => t.name === name);
   if (idx < 0) return false;
@@ -74,7 +73,7 @@ export function deleteTemplate(chatMid: string, name: string, storeDir = templat
   return true;
 }
 
-export function listTemplates(chatMid: string, storeDir = templatesDir()): NamedTemplate[] {
+export function listTemplates(chatMid: string, storeDir: string): NamedTemplate[] {
   return loadTemplates(chatMid, storeDir).templates;
 }
 
@@ -82,7 +81,7 @@ export function upsertAlias(
   chatMid: string,
   alias: string,
   canonical: string,
-  storeDir = templatesDir(),
+  storeDir: string,
 ): void {
   const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   currency_aliases[alias] = canonical;
@@ -92,7 +91,7 @@ export function upsertAlias(
 export function deleteAlias(
   chatMid: string,
   alias: string,
-  storeDir = templatesDir(),
+  storeDir: string,
 ): boolean {
   const { templates, currency_aliases } = loadTemplates(chatMid, storeDir);
   if (!(alias in currency_aliases)) return false;
@@ -103,7 +102,7 @@ export function deleteAlias(
 
 export function listAliases(
   chatMid: string,
-  storeDir = templatesDir(),
+  storeDir: string,
 ): Record<string, string> {
   return loadTemplates(chatMid, storeDir).currency_aliases;
 }
@@ -120,4 +119,45 @@ export function filterByTime(templates: NamedTemplate[], timestampMs: number): N
     }
     return true;
   });
+}
+
+/**
+ * File-backed store for per-chat transaction templates and currency aliases,
+ * bound to an explicit `storeDir` (one JSON file per chat MID beneath it). The
+ * directory is injected — there is no implicit process.cwd()-derived default —
+ * so the composed server, a standalone bank server, and tests can each point
+ * it at their own data root. Templates and aliases are intentionally shared
+ * across principals on one data root (the trusted-tenant model): the store is
+ * keyed only by chatMid, never by owner.
+ */
+export class TemplateStore {
+  constructor(private readonly storeDir: string) {}
+
+  load(chatMid: string): { templates: NamedTemplate[]; warning?: string; currency_aliases: Record<string, string> } {
+    return loadTemplates(chatMid, this.storeDir);
+  }
+
+  upsert(chatMid: string, template: NamedTemplate): void {
+    upsertTemplate(chatMid, template, this.storeDir);
+  }
+
+  delete(chatMid: string, name: string): boolean {
+    return deleteTemplate(chatMid, name, this.storeDir);
+  }
+
+  list(chatMid: string): NamedTemplate[] {
+    return listTemplates(chatMid, this.storeDir);
+  }
+
+  upsertAlias(chatMid: string, alias: string, canonical: string): void {
+    upsertAlias(chatMid, alias, canonical, this.storeDir);
+  }
+
+  deleteAlias(chatMid: string, alias: string): boolean {
+    return deleteAlias(chatMid, alias, this.storeDir);
+  }
+
+  listAliases(chatMid: string): Record<string, string> {
+    return listAliases(chatMid, this.storeDir);
+  }
 }

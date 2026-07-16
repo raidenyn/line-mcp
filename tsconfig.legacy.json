@@ -18,9 +18,10 @@
   },
   "include": ["src/**/*"],
   "exclude": ["src/**/*.test.ts"],
-  // src/ now imports @raidenyn/line-client (issue #75, Task 5) and
-  // @raidenyn/line-client-sqlite (Task 6) — these references make `tsc -b`
-  // build those packages first so their dist/*.d.ts exist before this
-  // project's files that import them are type-checked.
-  "references": [{ "path": "./packages/line-client" }, { "path": "./packages/line-client-sqlite" }, { "path": "./packages/mcp-runtime" }]
+  // src/ now imports @raidenyn/line-client (issue #75, Task 5),
+  // @raidenyn/line-client-sqlite (Task 6), and @raidenyn/bank-mcp (Task 10) —
+  // these references make `tsc -b` build those packages first so their
+  // dist/*.d.ts exist before this project's files that import them are
+  // type-checked.
+  "references": [{ "path": "./packages/line-client" }, { "path": "./packages/line-client-sqlite" }, { "path": "./packages/mcp-runtime" }, { "path": "./packages/bank-mcp" }]
 }

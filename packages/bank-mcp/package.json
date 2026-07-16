@@ -13,7 +13,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "assets",
+    "docs"
   ],
   "type": "commonjs",
   "dependencies": {

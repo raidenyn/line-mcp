@@ -1,4 +1,3 @@
-import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
@@ -8,8 +7,14 @@ import {
   stageLineDb,
   stageQuarantineDb,
   recoverQuarantinedMessagesSql,
+  readLegacyMessages,
   type LegacyMessageRow,
 } from '@raidenyn/line-client-sqlite';
+import {
+  readLegacyCategories,
+  stageBankCategories,
+  type LegacyCategoryRow,
+} from '@raidenyn/bank-mcp';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -266,15 +271,13 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
 }
 
 // ─── Legacy source (read-only; never modified) ───────────────────────────────
-// LegacyMessageRow (the line/quarantine row shape) is imported from
-// @raidenyn/line-client-sqlite so this file and the staging primitives it
-// calls share exactly one definition — see the import above.
-
-interface LegacyCategoryRow {
-  id: number;
-  name: string;
-  pattern: string;
-}
+// The line/quarantine row shape (LegacyMessageRow) and its reader come from
+// @raidenyn/line-client-sqlite; the bank/category row shape (LegacyCategoryRow),
+// its reader, and its staging primitive come from @raidenyn/bank-mcp. This file
+// no longer opens SQLite directly — it only orchestrates those two packages'
+// primitives (issue #75, Task 10). Both readers throw with a "corrupt or
+// unreadable; refusing migration" error rather than guessing, preserving the
+// pre-extraction refuse-on-corrupt guarantee.
 
 interface LegacySource {
   present: boolean;
@@ -282,46 +285,17 @@ interface LegacySource {
   categories: LegacyCategoryRow[];
 }
 
-function tableExists(db: Database.Database, name: string): boolean {
-  return !!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
-}
-
 function readLegacySource(dataRoot: string): LegacySource {
   const file = cacheDbPath(dataRoot);
   if (!fs.existsSync(file)) {
     return { present: false, messages: [], categories: [] };
   }
-  let db: Database.Database;
-  try {
-    db = new Database(file, { readonly: true, fileMustExist: true });
-  } catch (err) {
-    throw new Error(
-      `Legacy source database is corrupt or unreadable; refusing migration: ${firstLine(err)}`,
-      { cause: err },
-    );
-  }
-  try {
-    const messages = tableExists(db, 'messages')
-      ? (db.prepare(
-          'SELECT chat_mid, message_id, created_time, raw_json FROM messages ORDER BY created_time ASC',
-        ).all() as LegacyMessageRow[])
-      : [];
-    const categories = tableExists(db, 'categories')
-      ? (db.prepare('SELECT id, name, pattern FROM categories ORDER BY id ASC').all() as LegacyCategoryRow[])
-      : [];
-    return { present: true, messages, categories };
-  } catch (err) {
-    throw new Error(
-      `Legacy source database is corrupt or unreadable; refusing migration: ${firstLine(err)}`,
-      { cause: err },
-    );
-  } finally {
-    db.close();
-  }
-}
-
-function firstLine(err: unknown): string {
-  return (err instanceof Error ? err.message : String(err)).split('\n')[0];
+  // readLegacyMessages runs first, so a corrupt legacy file is rejected before
+  // any category read is attempted — exactly like the single-open reader it
+  // replaces.
+  const messages = readLegacyMessages(file);
+  const categories = readLegacyCategories(file);
+  return { present: true, messages, categories };
 }
 
 // ─── Ownership decision matrix ────────────────────────────────────────────────
@@ -358,43 +332,10 @@ function decideOwnership(inventory: AuthRecordInventory): OwnershipDecision {
 }
 
 // ─── Staging destination databases ───────────────────────────────────────────
-// Line/quarantine staging (stageLineDb/stageQuarantineDb) now lives in
-// @raidenyn/line-client-sqlite (issue #75, Task 6) — imported above. Bank/
-// category staging stays here until a later task extracts bank-mcp, so this
-// file keeps its own tiny integrity-check helper for stageBankDb rather than
-// reaching into the line/quarantine package for something bank-only.
-
-function checkIntegrity(db: Database.Database, dbPathForError: string): void {
-  const rows = db.pragma('integrity_check') as Array<{ integrity_check: string }>;
-  const ok = rows.length === 1 && rows[0].integrity_check === 'ok';
-  if (!ok) {
-    throw new Error(`Integrity check failed for staged database at ${dbPathForError}`);
-  }
-}
-
-function stageBankDb(bankDbPath: string, rows: LegacyCategoryRow[]): void {
-  fs.mkdirSync(path.dirname(bankDbPath), { recursive: true });
-  const db = new Database(bankDbPath);
-  try {
-    db.exec(`
-      CREATE TABLE categories (
-        id      INTEGER PRIMARY KEY AUTOINCREMENT,
-        name    TEXT NOT NULL UNIQUE,
-        pattern TEXT NOT NULL
-      );
-      PRAGMA user_version = 1;
-    `);
-    const insert = db.prepare('INSERT INTO categories (id, name, pattern) VALUES (?, ?, ?)');
-    const insertAll = db.transaction((items: LegacyCategoryRow[]) => {
-      for (const row of items) insert.run(row.id, row.name, row.pattern);
-    });
-    insertAll(rows);
-    checkIntegrity(db, bankDbPath);
-    db.pragma('wal_checkpoint(TRUNCATE)');
-  } finally {
-    db.close();
-  }
-}
+// Line/quarantine staging (stageLineDb/stageQuarantineDb) lives in
+// @raidenyn/line-client-sqlite (issue #75, Task 6); bank/category staging
+// (stageBankCategories) lives in @raidenyn/bank-mcp (Task 10). Both are
+// imported above — this file owns only the orchestration below.
 
 // ─── Count validation (refuses pointer publication on mismatch) ─────────────
 
@@ -455,7 +396,7 @@ export function bootstrapPersistence(options: {
   stageLineDb(active.lineDbPath, attributedRows, decision.ownerMid ?? '');
   if (failAt === 'after-line') throw new Error('Simulated crash: after-line');
 
-  stageBankDb(active.bankDbPath, legacy.categories);
+  const bankStaging = stageBankCategories(active.bankDbPath, legacy.categories);
   if (failAt === 'after-bank') throw new Error('Simulated crash: after-bank');
 
   stageQuarantineDb(active.quarantineDbPath, quarantinedRows, quarantineReasonForRows);
@@ -465,8 +406,8 @@ export function bootstrapPersistence(options: {
     sourceMessages: legacy.messages.length,
     attributedMessages: attributedRows.length,
     quarantinedMessages: quarantinedRows.length,
-    sourceCategories: legacy.categories.length,
-    copiedCategories: legacy.categories.length,
+    sourceCategories: bankStaging.sourceCategories,
+    copiedCategories: bankStaging.copiedCategories,
   };
   validateMigrationCounts(counts);
 
