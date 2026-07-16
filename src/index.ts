@@ -6,43 +6,52 @@ import express from 'express';
 import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
 import { z } from 'zod';
-import { LineClient, AuthData, parseExportFile, parseExportHeader } from '@raidenyn/line-client';
-import { recordRefreshedAuth, LineAuthProvider, FileCredentialStore, publicEndpointConfig } from '@raidenyn/line-mcp';
+import { LineClient, AuthData } from '@raidenyn/line-client';
+import {
+  recordRefreshedAuth,
+  LineAuthProvider,
+  FileCredentialStore,
+  publicEndpointConfig,
+  registerLineTools,
+  registerLineResources,
+  ImportService,
+  createRequestClientFactory,
+  startSyncLoop,
+  type LinePrincipal,
+  type LineToolDeps,
+  type RequestLineClient,
+} from '@raidenyn/line-mcp';
 import { CachingLineClient } from './caching-line-client';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { CategoryStore } from './category-store';
 import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categorize, TransactionTemplateSchema, CategorySchema, Transaction, TransactionFilterSchema, TransactionFilter, validateFilters, filterTransactions } from './transaction-parser';
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
-import { startSyncLoop } from './sync';
 import { dataDir, authDir, secretPath } from './data-dir';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
-import { normalizeBasePath } from '@raidenyn/mcp-runtime';
+import { normalizeBasePath, type RequestContext } from '@raidenyn/mcp-runtime';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
-
-const CONTENT_TYPE_LABELS: Record<number, string> = {
-  0: 'text',
-  1: 'image',
-  2: 'video',
-  3: 'audio',
-  7: 'sticker',
-  13: 'location',
-  22: 'flex',
-};
 
 const SERVER_VERSION = '1.0.0';
 const server = new McpServer({ name: 'line-mcp', version: SERVER_VERSION });
 const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
+// Threads the resolved LINE principal (not just its raw AuthData) through to
+// the messenger tools' request-bound context — see lineToolContext below.
+const principalStore = new AsyncLocalStorage<LinePrincipal>();
 let sharedCache: SqliteMessageCache;
 let categoryStore: CategoryStore;
 
-// Import-upload flow state. This narrow, ephemeral, upload-only state stays
-// owned by the executable until the import service is formally extracted
-// (issue #75, Task 9) — it is intentionally not part of the auth package.
-const pendingUploads = new Map<string, { mid: string; expires: number }>();
-const pendingFiles   = new Map<string, { content: string; chatName: string; mid: string; expires: number }>();
+// The messenger tools/import-service/sync are constructed fresh inside every
+// main() call (issue #75, Task 9) — these module-level `let`s are reassigned
+// there, exactly like `sharedCache`/`categoryStore` above. registerLineTools()
+// itself runs exactly ONCE at module load (below), and its closures read
+// these mutable bindings — and lineToolContext's live getters — fresh on
+// every actual tool invocation, so they always see the CURRENT main() call's
+// wiring even across repeated main() calls in the same process (tests).
+let currentCreateRequestClient: ((principal: LinePrincipal) => Promise<RequestLineClient>) | undefined;
+let currentImportService: ImportService | undefined;
 
 // The executable owns secret loading: importing @raidenyn/line-mcp never reads
 // or creates data/secret. The signing key is loaded here and injected into
@@ -68,30 +77,11 @@ async function readGuideFile(relPath: string, uri: string) {
   }
 }
 
-server.registerResource(
-  'guide-overview',
-  'line://guide',
-  { description: 'Usage overview: workflow map, tool index, key facts about caching and auth', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/overview.md', 'line://guide'),
-);
-server.registerResource(
-  'guide-list_chats',
-  'line://guide/tools/list_chats',
-  { description: 'When to use list_chats, prerequisites, next steps', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/list_chats.md', 'line://guide/tools/list_chats'),
-);
-server.registerResource(
-  'guide-get_messages',
-  'line://guide/tools/get_messages',
-  { description: 'When to use get_messages, key parameters, workflow position', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/get_messages.md', 'line://guide/tools/get_messages'),
-);
-server.registerResource(
-  'guide-get_image',
-  'line://guide/tools/get_image',
-  { description: 'When to use get_image, URL source requirements', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/get_image.md', 'line://guide/tools/get_image'),
-);
+// Bank-tool guides only (sample_messages, manage_templates, manage_categories,
+// get_transactions, summarize_transactions) — these stay in root docs/guide
+// until Task 10 extracts bank-mcp. The messenger overview + its five tool
+// guides now live in @raidenyn/line-mcp's own docs/guide and are registered
+// below via registerLineResources().
 server.registerResource(
   'guide-sample_messages',
   'line://guide/tools/sample_messages',
@@ -122,132 +112,45 @@ server.registerResource(
   { description: 'When to use summarize_transactions, group_by options, final step in transaction workflow', mimeType: 'text/markdown' },
   (_uri) => readGuideFile('docs/guide/tools/summarize_transactions.md', 'line://guide/tools/summarize_transactions'),
 );
-server.registerResource(
-  'guide-initiate_import',
-  'line://guide/tools/initiate_import',
-  { description: 'When to use initiate_import, upload flow, expiry', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/initiate_import.md', 'line://guide/tools/initiate_import'),
-);
-server.registerResource(
-  'guide-complete_import',
-  'line://guide/tools/complete_import',
-  { description: 'When to use complete_import, timezone requirement, needs_info handling', mimeType: 'text/markdown' },
-  (_uri) => readGuideFile('docs/guide/tools/complete_import.md', 'line://guide/tools/complete_import'),
-);
 
-server.registerTool(
-  'list_chats',
-  {
-    description:
-      'List all LINE chats (group chats and 1:1 contacts). ' +
-      'Each chat shows its mid (required by get_messages), display name, type (GROUP or USER), and member count.',
-    inputSchema: {},
+// The one live RequestContext<LinePrincipal> registerLineTools() is ever
+// called with. Its fields are getters that read the CURRENT AsyncLocalStorage
+// stores at the moment each messenger tool handler actually executes — never
+// captured by value here at registration time. This is what lets ONE
+// registerLineTools() call (at module load, matching every other tool
+// registration in this file) work correctly against root's
+// reuse-forever-server model today, unchanged when a later task switches the
+// composed server to createMcpHost's fresh-context-per-request model.
+const lineToolContext: RequestContext<LinePrincipal> = {
+  get principal(): LinePrincipal {
+    const principal = principalStore.getStore();
+    if (!principal) throw new Error('No LINE principal in scope for this request');
+    return principal;
   },
-  async () => {
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    try {
-      const client = makeLineClient(authData);
-      const chats = await client.listChats();
-      const lines = chats.map((c) => {
-        const type = c.type === 'group' ? 'GROUP' : 'USER';
-        const members = c.memberCount != null ? ` (${c.memberCount} members)` : '';
-        const pic = c.pictureUrl ? `\n  pictureUrl: ${c.pictureUrl}` : '';
-        return `[${type}] ${c.name}${members}\n  mid: ${c.mid}${pic}`;
-      });
-      const chatText = lines.length > 0 ? lines.join('\n') : 'No chats found.';
-      return { content: [{ type: 'text' as const, text: chatText }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to list chats: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
+  get request(): ExpressRequest {
+    const req = requestStore.getStore();
+    if (!req) throw new Error('No request in scope for this call');
+    return req;
   },
-);
+};
 
-server.registerTool(
-  'get_messages',
-  {
-    description:
-      'Get recent messages from a LINE chat. Use the mid value from list_chats. ' +
-      'Sender names are resolved automatically. ' +
-      'Non-text messages (images, stickers, etc.) show a content-type label and preview URL when available.',
-    inputSchema: {
-      chatMid: z.string().describe('Chat MID from list_chats'),
-      count: z.number().int().min(1).max(200).default(50).describe('Number of recent messages to fetch'),
-    },
-  },
-  async ({ chatMid, count }) => {
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
+const lineToolDeps: LineToolDeps = {
+  createRequestClient: (principal) => {
+    if (!currentCreateRequestClient) {
+      throw new Error('LINE request-client factory not initialized — main() must run before tools are invoked');
     }
-    try {
-      const client = makeLineClient(authData);
-      const messages = await client.getMessages(chatMid, count);
-      if (messages.length === 0) {
-        return { content: [{ type: 'text' as const, text: 'No messages found.' }] };
-      }
-      const lines = messages.map((m) => {
-        const createdMs = parseInt(m.createdTime, 10);
-        const time = Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : 'unknown';
-        const sender = m.senderName ?? m.from;
-        const label = CONTENT_TYPE_LABELS[m.contentType] ?? `type:${m.contentType}`;
-        if (m.contentType === 0) {
-          return `[${time}] ${sender}: ${m.text ?? ''}`;
-        }
-        const extra = m.previewUrl ? ` (preview: ${m.previewUrl})` : '';
-        return `[${time}] ${sender}: [${label}]${extra}`;
-      });
-      return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to get messages: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
+    return currentCreateRequestClient(principal);
   },
-);
+  get importService(): ImportService {
+    if (!currentImportService) {
+      throw new Error('Import service not initialized — main() must run before tools are invoked');
+    }
+    return currentImportService;
+  },
+};
 
-server.registerTool(
-  'get_image',
-  {
-    description:
-      'Fetch an image from LINE and return it as inline base64 for display. ' +
-      'Pass a pictureUrl from list_chats, or a previewUrl/downloadUrl from get_messages. ' +
-      'Prefer previewUrl for faster loads; use downloadUrl for full-resolution.',
-    inputSchema: {
-      url: z.string().url().describe('Image URL to fetch'),
-    },
-  },
-  async ({ url }) => {
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    try {
-      const client = makeLineClient(authData);
-      const { buffer, mimeType } = await client.getImageBuffer(url);
-      return {
-        content: [
-          {
-            type: 'image' as const,
-            data: buffer.toString('base64'),
-            mimeType,
-          },
-        ],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Failed to fetch image: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
+registerLineTools(server, lineToolContext, lineToolDeps);
+registerLineResources(server); // messenger overview + list_chats/get_messages/get_image/initiate_import/complete_import guides
 
 server.registerTool(
   'manage_templates',
@@ -762,179 +665,6 @@ server.registerTool(
   },
 );
 
-server.registerTool(
-  'initiate_import',
-  {
-    description:
-      'Start a LINE chat export import. Returns a one-time upload URL (valid 15 minutes). ' +
-      'After receiving the URL, upload the export .txt file with: ' +
-      'curl -X POST --data-binary @/path/to/file.txt -H "Content-Type: text/plain" "<upload_url>" ' +
-      'The response includes a file_ref_id to use with complete_import.',
-    inputSchema: {},
-  },
-  async () => {
-    const req = requestStore.getStore();
-    const authData = authStore.getStore();
-    if (!req) {
-      return { content: [{ type: 'text' as const, text: 'Request context unavailable.' }], isError: true };
-    }
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-    // Prune expired upload tokens to prevent unbounded memory growth
-    const nowMs = Date.now();
-    for (const [k, v] of pendingUploads) {
-      if (v.expires < nowMs) pendingUploads.delete(k);
-    }
-    const token = crypto.randomUUID();
-    pendingUploads.set(token, { mid: authData.mid, expires: Date.now() + 900_000 }); // 15 min
-    const base = process.env['PUBLIC_URL']?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host')}`;
-    const uploadUrl = `${base}${normalizeBasePath(process.env.BASE_PATH)}/import-upload?token=${token}`;
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({ upload_url: uploadUrl }),
-      }],
-    };
-  },
-);
-
-server.registerTool(
-  'complete_import',
-  {
-    description:
-      'Complete a LINE chat export import started with initiate_import. ' +
-      'Always ask the user for their timezone (IANA name, e.g. "Asia/Bangkok") before calling if not already known. ' +
-      'Returns status "needs_info" when chat_mid or timezone are required — ask the user and retry. ' +
-      'Returns status "success" with import count and date range when done.',
-    inputSchema: {
-      file_ref_id: z.string().describe('From the curl response after uploading to upload_url'),
-      timezone: z.string().optional().describe('IANA timezone name, e.g. "Asia/Bangkok". Ask the user explicitly.'),
-      chat_mid: z.string().optional().describe('Override auto-detection. Use when complete_import returns candidates.'),
-    },
-  },
-  async ({ file_ref_id, timezone, chat_mid }) => {
-    const authData = authStore.getStore();
-    if (!authData) {
-      return { content: [{ type: 'text' as const, text: 'Not authenticated.' }], isError: true };
-    }
-
-    const fileEntry = pendingFiles.get(file_ref_id);
-    if (!fileEntry || fileEntry.expires < Date.now()) {
-      pendingFiles.delete(file_ref_id);
-      return {
-        content: [{ type: 'text' as const, text: 'Import session expired or not found. Call initiate_import to start again.' }],
-        isError: true,
-      };
-    }
-    if (fileEntry.mid !== authData.mid) {
-      return { content: [{ type: 'text' as const, text: 'File ref does not belong to this user.' }], isError: true };
-    }
-
-    if (!timezone) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            status: 'needs_info',
-            missing: ['timezone'],
-            message: 'What timezone are these messages in? e.g. "Asia/Bangkok", "UTC", "Europe/London"',
-          }),
-        }],
-      };
-    }
-
-    // Validate timezone
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: timezone });
-    } catch {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Invalid timezone "${timezone}". Use an IANA timezone name, e.g. "Asia/Bangkok", "UTC", "America/New_York".`,
-        }],
-        isError: true,
-      };
-    }
-
-    let resolvedMid = chat_mid;
-    const { content, chatName } = fileEntry;
-
-    if (!resolvedMid) {
-      try {
-        const client = makeLineClient(authData);
-        const chats = await client.listChats();
-        const lower = chatName.toLowerCase();
-        const matches = chats.filter(c => c.name.toLowerCase() === lower);
-        if (matches.length === 0) {
-          const available = chats.map(c => c.name).join(', ');
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                status: 'needs_info',
-                missing: ['chat_mid'],
-                message: `No chat found matching "${chatName}". Available chats: ${available}. Provide chat_mid explicitly.`,
-              }),
-            }],
-          };
-        }
-        if (matches.length > 1) {
-          return {
-            content: [{
-              type: 'text' as const,
-              text: JSON.stringify({
-                status: 'needs_info',
-                missing: ['chat_mid'],
-                candidates: matches.map(c => ({ chat_mid: c.mid, name: c.name })),
-                message: `Multiple chats match "${chatName}". Please provide chat_mid from the candidates list.`,
-              }),
-            }],
-          };
-        }
-        resolvedMid = matches[0].mid;
-      } catch (err) {
-        return {
-          content: [{ type: 'text' as const, text: `Failed to list chats: ${(err as Error).message}` }],
-          isError: true,
-        };
-      }
-    }
-
-    try {
-      const messages = parseExportFile(content, resolvedMid, timezone);
-      sharedCache.upsertMessages(authData.mid, resolvedMid, messages);
-      pendingFiles.delete(file_ref_id); // clean up after success
-
-      const timestamps = messages.map(m => parseInt(m.createdTime, 10)).filter(Number.isFinite);
-      const dateRange = timestamps.length > 0
-        ? {
-            from: new Date(timestamps.reduce((a, b) => b < a ? b : a)).toISOString(),
-            to:   new Date(timestamps.reduce((a, b) => b > a ? b : a)).toISOString(),
-          }
-        : null;
-
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            status: 'success',
-            imported: messages.length,
-            chat_mid: resolvedMid,
-            chat_name: chatName,
-            date_range: dateRange,
-          }),
-        }],
-      };
-    } catch (err) {
-      return {
-        content: [{ type: 'text' as const, text: `Import failed: ${(err as Error).message}` }],
-        isError: true,
-      };
-    }
-  },
-);
-
 function makeLineClient(authData: AuthData): CachingLineClient {
   return new CachingLineClient(
     // recordRefreshedAuth receives the refreshed AuthData snapshot directly —
@@ -977,9 +707,10 @@ export interface MainResult {
 
 // Startup order is the one cutover contract this function exists to enforce:
 // bootstrap the committed generation, then open the two stores against its
-// paths, then start sync, then start listening. Nothing here may construct
-// SqliteMessageCache/CategoryStore, or read/write persistence state, before
-// bootstrapPersistence() has returned.
+// paths, then construct the auth provider, then start sync (which needs a
+// request-client factory derived from that provider), then start listening.
+// Nothing here may construct SqliteMessageCache/CategoryStore, or read/write
+// persistence state, before bootstrapPersistence() has returned.
 export async function main(options: MainOptions = {}): Promise<MainResult> {
   const dataRoot = options.dataRoot ?? dataDir();
   const active = bootstrapPersistence({ dataRoot });
@@ -989,11 +720,6 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
   sharedCache = new SqliteMessageCache({ dbPath: active.lineDbPath });
   categoryStore = new CategoryStore(active.bankDbPath);
 
-  // Scope sync's auth lookups to the same dataRoot this generation was
-  // bootstrapped from — never the process-wide default when a caller (e.g. a
-  // test) has passed an explicit override.
-  const syncHandle = startSyncLoop(sharedCache, 24 * 60 * 60 * 1000, { authDir: authDir(dataRoot) });
-
   const PORT = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
   const basePath = normalizeBasePath(process.env.BASE_PATH);
 
@@ -1002,85 +728,76 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
   // resolution.
   const authStoreDir = authDir(dataRoot);
   const secret = loadOrCreateSecret(dataRoot);
+  const credentialStore = new FileCredentialStore(authStoreDir);
   const authProvider = new LineAuthProvider({
     secret,
     endpoints: publicEndpointConfig(PORT, basePath),
-    credentialStore: new FileCredentialStore(authStoreDir),
+    credentialStore,
     authStoreDir,
   });
   seedTestToken(authProvider);
+
+  // The SAME request-client factory backs both the messenger tools
+  // (currentCreateRequestClient, read by lineToolDeps above) and the sync
+  // loop below — one seam, one credential-resolution/cache-wrapping behavior.
+  currentCreateRequestClient = createRequestClientFactory({
+    cache: sharedCache,
+    resolveCredentials: (principal) => authProvider.resolveCredentials(principal),
+    onAuthRefreshed: (fresh) => recordRefreshedAuth(fresh, authStoreDir),
+  });
+  currentImportService = new ImportService({
+    basePath,
+    cache: sharedCache,
+    createRequestClient: currentCreateRequestClient,
+    publicUrl: process.env.PUBLIC_URL,
+  });
+
+  // Scoped to this generation's credentialStore/cache — never the
+  // process-wide default when a caller (e.g. a test) has passed an explicit
+  // dataRoot override.
+  const syncHandle = startSyncLoop(
+    { credentialStore, cache: sharedCache, createRequestClient: currentCreateRequestClient },
+    24 * 60 * 60 * 1000,
+  );
 
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
   authProvider.mountRoutes(app);
-
-  // Import-upload route (owned by the executable until Task 9 extracts the
-  // import service). One-time, token-guarded raw upload of a LINE chat export.
-  app.post(
-    `${basePath}/import-upload`,
-    express.raw({ type: '*/*', limit: '10mb' }),
-    (req, res) => {
-      const token = typeof req.query['token'] === 'string' ? req.query['token'] : '';
-      const entry = pendingUploads.get(token);
-      if (!entry || entry.expires < Date.now()) {
-        pendingUploads.delete(token);
-        res.status(401).json({ error: 'invalid_or_expired_token' });
-        return;
-      }
-      const { mid } = entry;
-      pendingUploads.delete(token); // consume — one-time use
-
-      if (!Buffer.isBuffer(req.body)) {
-        res.status(400).json({ error: 'Expected raw file body.' });
-        return;
-      }
-      const content = req.body.toString('utf8');
-      let chatName: string;
-      try {
-        chatName = parseExportHeader(content);
-      } catch {
-        res.status(400).json({ error: 'File does not appear to be a LINE chat export.' });
-        return;
-      }
-
-      // Prune expired entries to prevent unbounded memory growth
-      const now = Date.now();
-      for (const [k, v] of pendingFiles) {
-        if (v.expires < now) pendingFiles.delete(k);
-      }
-
-      const fileRefId = crypto.randomUUID();
-      pendingFiles.set(fileRefId, { content, chatName, mid, expires: Date.now() + 3_600_000 });
-
-      res.json({ file_ref_id: fileRefId, chat_name: chatName });
-    },
-  );
+  // Import-upload route: mounted independently of OAuth's routes, per the
+  // import service's own contract (issue #75, Task 9).
+  currentImportService.mountRoutes(app);
 
   app.get(`${basePath}/healthz`, (_req, res) => {
     res.status(200).json({ status: 'ok', version: SERVER_VERSION });
   });
 
   app.get(`${basePath}/`, (_req, res) => {
-    res.sendFile(join(__dirname, 'index.html'));
+    // index.html moved to @raidenyn/line-mcp's own assets/ (issue #75, Task 9).
+    // require.resolve() follows the package's "main" (dist/index.js) in both
+    // ts-node and compiled-dist modes, so this resolves correctly either way.
+    const packageEntry = require.resolve('@raidenyn/line-mcp');
+    res.sendFile(join(packageEntry, '..', '..', 'assets', 'index.html'));
   });
 
   app.post(`${basePath}/mcp`, async (req, res) => {
     const principal = await authProvider.authenticate(req);
     const authData = principal ? await authProvider.resolveCredentials(principal) : null;
 
-    if (!authData) {
+    if (!authData || !principal) {
       res.status(401).set('WWW-Authenticate', authProvider.challenge(req)).json({ error: 'invalid_token' });
       return;
     }
 
-    await requestStore.run(req, async () => {
-      await authStore.run(authData, async () => {
-        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-        res.on('close', () => { transport.close().catch(() => {}); });
-        await server.connect(transport);
-        await transport.handleRequest(req, res, req.body);
+    await principalStore.run(principal, async () => {
+      await requestStore.run(req, async () => {
+        await authStore.run(authData, async () => {
+          const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+          res.on('close', () => { transport.close().catch(() => {}); });
+          await server.connect(transport);
+          await transport.handleRequest(req, res, req.body);
+        });
       });
     });
   });

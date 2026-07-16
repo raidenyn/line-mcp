@@ -33,3 +33,28 @@ export {
   LineAuthProvider,
   publicEndpointConfig,
 } from './auth/line-auth-provider';
+
+// ─── Messenger tools, resources, import service, sync, standalone (Task 9) ──
+
+export {
+  type RequestLineClient,
+  type RequestClientFactoryOptions,
+  createRequestClientFactory,
+} from './request-client';
+
+export {
+  type ImportServiceOptions,
+  type CompleteImportOutcome,
+  ImportService,
+} from './import-service';
+
+export { type LineToolDeps, registerLineTools } from './tools';
+export { type RegisterLineResourcesOptions, registerLineResources } from './resources';
+
+export { type SyncOptions, syncAll, startSyncLoop } from './sync';
+
+export {
+  type StandaloneOptions,
+  type StandaloneServer,
+  createStandaloneServer,
+} from './standalone';

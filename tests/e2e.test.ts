@@ -12,7 +12,7 @@ import { main as startMain, type MainResult } from '../src/index';
 import * as persistenceMigrationModule from '../src/persistence-migration';
 import * as lineClientSqliteModule from '@raidenyn/line-client-sqlite';
 import * as categoryStoreModule from '../src/category-store';
-import * as syncModule from '../src/sync';
+import * as syncModule from '@raidenyn/line-mcp';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PORT = 13117; // Fixed port for tests to avoid collisions
