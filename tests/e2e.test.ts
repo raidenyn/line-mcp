@@ -1,4 +1,4 @@
-import { describe, beforeAll, afterAll, beforeEach, afterEach, it, expect, vi } from 'vitest';
+import { describe, beforeAll, afterAll, it, expect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
@@ -6,13 +6,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as http from 'http';
-import Database from 'better-sqlite3';
 import { spawn, ChildProcess } from 'child_process';
-import { main as startMain, type MainResult } from '../src/index';
-import * as persistenceMigrationModule from '../src/persistence-migration';
-import * as lineClientSqliteModule from '@raidenyn/line-client-sqlite';
-import * as categoryStoreModule from '../src/category-store';
-import * as syncModule from '@raidenyn/line-mcp';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const PORT = 13117; // Fixed port for tests to avoid collisions
@@ -29,12 +23,6 @@ let imagePreviewUrl: string | null = null;
 
 function mkdtemp(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-async function stopMain(result: MainResult | undefined): Promise<void> {
-  if (!result) return;
-  clearInterval(result.syncHandle);
-  await new Promise<void>((resolve) => result.server.close(() => resolve()));
 }
 
 type CallToolResult = Awaited<ReturnType<Client['callTool']>>;
@@ -69,12 +57,13 @@ async function waitForServer(baseUrl: string, timeoutMs = 30_000): Promise<void>
   throw new Error('Server did not become ready in time');
 }
 
-// This suite spawns the real compiled server against a genuine LINE account
-// (via .line-auth.json) — kept in its own describe with its own beforeAll/
-// afterAll so the startup-order and old-volume suites below (which run
-// in-process against isolated temp roots and need neither a LINE account nor
-// a spawned child process) are never gated behind it, and a `-t` filter that
-// only matches those suites never triggers this one's setup.
+// This suite spawns the real composed server (issue #75, Task 11:
+// packages/server/src/cli.ts — the same entry point `npm start` runs) against
+// a genuine LINE account (via .line-auth.json). Startup-order and
+// old-volume-migration coverage now lives in packages/server/src/startup.test.ts,
+// which runs in-process against the composed server's own createServer()
+// factory and needs neither a real LINE account nor a spawned child process —
+// it is part of `npm run test:unit` and does not require this suite's setup.
 describe('LINE MCP server e2e (real account)', () => {
   beforeAll(async () => {
     authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
@@ -86,7 +75,7 @@ describe('LINE MCP server e2e (real account)', () => {
 
     serverProcess = spawn(
       'npx',
-      ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
+      ['ts-node', path.join(PROJECT_ROOT, 'packages', 'server', 'src', 'cli.ts')],
       {
         cwd: PROJECT_ROOT,
         env: {
@@ -315,166 +304,5 @@ describe('LINE MCP server e2e (real account)', () => {
     if ('text' in item) {
       expect(item.text.length).toBeGreaterThan(0);
     }
-  });
-});
-
-// ─── Startup order (Task 3, Step 2) ──────────────────────────────────────────
-//
-// Runs main() in-process against an isolated temp dataRoot — no spawned
-// child, no .line-auth.json required. Spies wrap the exact functions/classes
-// src/index.ts's main() calls (bootstrapPersistence, SqliteMessageCache,
-// CategoryStore, startSyncLoop) and call through to the real implementation,
-// so this observes the real construction points, not a decoupled log.
-describe('startup order', () => {
-  let tempDataRoot: string;
-  let events: string[];
-  let result: MainResult | undefined;
-
-  beforeEach(() => {
-    tempDataRoot = mkdtemp('line-mcp-startup-');
-    events = [];
-  });
-
-  afterEach(async () => {
-    await stopMain(result);
-    result = undefined;
-    vi.restoreAllMocks();
-    fs.rmSync(tempDataRoot, { recursive: true, force: true });
-  });
-
-  it('boots in the committed order: bootstrap-persistence, open-line-cache, open-bank-store, start-sync, listen', async () => {
-    const originalBootstrap = persistenceMigrationModule.bootstrapPersistence;
-    vi.spyOn(persistenceMigrationModule, 'bootstrapPersistence').mockImplementation(
-      (...args: Parameters<typeof originalBootstrap>) => {
-        events.push('bootstrap-persistence');
-        return originalBootstrap(...args);
-      },
-    );
-
-    const OriginalMessageCache = lineClientSqliteModule.SqliteMessageCache;
-    vi.spyOn(lineClientSqliteModule, 'SqliteMessageCache').mockImplementation(function (
-      this: unknown,
-      ...args: ConstructorParameters<typeof OriginalMessageCache>
-    ) {
-      events.push('open-line-cache');
-      return new OriginalMessageCache(...args);
-    } as unknown as typeof OriginalMessageCache);
-
-    const OriginalCategoryStore = categoryStoreModule.CategoryStore;
-    vi.spyOn(categoryStoreModule, 'CategoryStore').mockImplementation(function (
-      this: unknown,
-      ...args: ConstructorParameters<typeof OriginalCategoryStore>
-    ) {
-      events.push('open-bank-store');
-      return new OriginalCategoryStore(...args);
-    } as unknown as typeof OriginalCategoryStore);
-
-    const originalStartSync = syncModule.startSyncLoop;
-    vi.spyOn(syncModule, 'startSyncLoop').mockImplementation(
-      (...args: Parameters<typeof originalStartSync>) => {
-        events.push('start-sync');
-        return originalStartSync(...args);
-      },
-    );
-
-    result = await startMain({ dataRoot: tempDataRoot, port: 0 });
-    // main()'s returned promise only resolves inside the real app.listen()
-    // success callback (see src/index.ts) — there is no other path to
-    // resolution, so recording this here is sequenced by the real event.
-    events.push('listen');
-
-    expect(events).toEqual([
-      'bootstrap-persistence',
-      'open-line-cache',
-      'open-bank-store',
-      'start-sync',
-      'listen',
-    ]);
-
-    // Confirms the spied constructors really were the ones index.ts used
-    // (not a coincidental unrelated call): the active generation's DB files
-    // must actually exist on disk afterwards.
-    expect(fs.existsSync(result.active.lineDbPath)).toBe(true);
-    expect(fs.existsSync(result.active.bankDbPath)).toBe(true);
-  });
-});
-
-// ─── Old-volume startup (Task 3, Step 2) ─────────────────────────────────────
-//
-// A legacy (pre-Task-1, un-owned) cache/messages.db + a single valid auth
-// record is the exact shape bootstrapPersistence() auto-attributes. Boots
-// main() in-process against it and asserts the compiled server actually
-// starts against the migrated generation, not the legacy file.
-describe('old volume migration', () => {
-  let tempDataRoot: string;
-  let result: MainResult | undefined;
-
-  beforeEach(() => {
-    tempDataRoot = mkdtemp('line-mcp-oldvol-');
-  });
-
-  afterEach(async () => {
-    await stopMain(result);
-    result = undefined;
-    fs.rmSync(tempDataRoot, { recursive: true, force: true });
-  });
-
-  it('starts successfully against a pre-owner-scoped legacy data root and migrates it on first boot', async () => {
-    const dbPath = path.join(tempDataRoot, 'cache', 'messages.db');
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    const legacyDb = new Database(dbPath);
-    legacyDb.exec(`
-      CREATE TABLE messages (
-        chat_mid     TEXT    NOT NULL,
-        message_id   TEXT    NOT NULL,
-        created_time INTEGER NOT NULL,
-        raw_json     TEXT    NOT NULL,
-        PRIMARY KEY (chat_mid, message_id)
-      );
-      CREATE TABLE categories (
-        id      INTEGER PRIMARY KEY AUTOINCREMENT,
-        name    TEXT NOT NULL UNIQUE,
-        pattern TEXT NOT NULL
-      );
-    `);
-    legacyDb.prepare(
-      'INSERT INTO messages (chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?)',
-    ).run(
-      'c1', 'm1', 1000,
-      JSON.stringify({
-        id: 'm1', from: 'c1', to: 'c1', toType: 1, createdTime: '1000',
-        contentType: 0, hasContent: false, text: 'hi',
-      }),
-    );
-    legacyDb.close();
-
-    const legacyAuthDir = path.join(tempDataRoot, 'auth');
-    fs.mkdirSync(legacyAuthDir, { recursive: true });
-    fs.writeFileSync(path.join(legacyAuthDir, 'u-legacy-owner.json'), JSON.stringify({
-      accessToken: 'a', refreshToken: 'r', certificate: 'c', mid: 'u-legacy-owner',
-      wrappedNonce: 'n', kdfParameter1: 'k1', kdfParameter2: 'k2',
-    }));
-
-    result = await startMain({ dataRoot: tempDataRoot, port: 0 });
-
-    expect(fs.existsSync(path.join(tempDataRoot, 'persistence-current.json'))).toBe(true);
-    const report = JSON.parse(fs.readFileSync(result.active.reportPath, 'utf8')) as {
-      legacySourcePresent: boolean;
-      ownerMid: string | null;
-      counts: { attributedMessages: number };
-    };
-    expect(report.legacySourcePresent).toBe(true);
-    expect(report.ownerMid).toBe('u-legacy-owner');
-    expect(report.counts.attributedMessages).toBe(1);
-
-    const cache = new lineClientSqliteModule.SqliteMessageCache({ dbPath: result.active.lineDbPath });
-    try {
-      expect(cache.getMessages('u-legacy-owner', 'c1')).toHaveLength(1);
-    } finally {
-      cache.close();
-    }
-
-    // The legacy source file is a read-only recovery snapshot — never mutated.
-    expect(fs.existsSync(dbPath)).toBe(true);
   });
 });

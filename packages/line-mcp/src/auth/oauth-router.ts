@@ -198,7 +198,7 @@ poll();
 }
 
 export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
-  const { base, origin, basePath, requiredScopes, authStoreDir, credentialStore } = deps;
+  const { base, basePath, requiredScopes, authStoreDir, credentialStore } = deps;
 
   // Ephemeral, login-flow-only state (never persisted, unlike StoredAuthRecord).
   const loginSessions = new Map<string, LoginSession>();

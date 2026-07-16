@@ -1,7 +1,6 @@
 {
   "files": [],
   "references": [
-    { "path": "./tsconfig.legacy.json" },
     { "path": "./packages/line-client" },
     { "path": "./packages/line-client-sqlite" },
     { "path": "./packages/mcp-runtime" },
