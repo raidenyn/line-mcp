@@ -188,6 +188,39 @@ describe('recoverQuarantinedMessagesSql', () => {
     expect(remaining[0].source_key).toBe('c1/m1');
   });
 
+  it('idempotently completes an interrupted recovery instead of misclassifying it as a conflict', () => {
+    // The crash window: a previous recovery run inserted c1/m1 into the line
+    // DB successfully but crashed before marking the quarantined row resolved.
+    // On replay, the byte-identical existing line row must be recognized as
+    // an interrupted recovery (recovered), NOT a conflict — otherwise the row
+    // is permanently misclassified as a conflict on every future run.
+    const preseed = new SqliteMessageCache({ dbPath: lineDbPath });
+    preseed.upsertMessages(OWNER, 'c1', [{
+      id: 'm1', from: 'c1', to: 'c1', toType: 1, createdTime: '1000',
+      contentType: 0, hasContent: false, text: 'hi',
+    }]);
+    preseed.close();
+
+    const result = recoverQuarantinedMessagesSql(
+      quarantineDbPath, lineDbPath,
+      { 'c1/m1': OWNER, 'c2/m2': OWNER },
+      new Set([OWNER]),
+    );
+    expect(result).toEqual({ recovered: 2, conflicts: 0, total: 2 });
+
+    // The previously-interrupted c1/m1 quarantine row is now marked resolved.
+    expect(quarantineRows(quarantineDbPath)).toHaveLength(0);
+    const db = new Database(quarantineDbPath, { readonly: true });
+    try {
+      const resolved = db.prepare(
+        'SELECT resolution_owner_mid FROM legacy_messages WHERE source_key = ?',
+      ).get('c1/m1') as { resolution_owner_mid: string } | undefined;
+      expect(resolved?.resolution_owner_mid).toBe(OWNER);
+    } finally {
+      db.close();
+    }
+  });
+
   it('leaves rows with no mapping entry at all untouched and unresolved', () => {
     const result = recoverQuarantinedMessagesSql(quarantineDbPath, lineDbPath, {}, new Set([OWNER]));
     expect(result).toEqual({ recovered: 0, conflicts: 0, total: 2 });

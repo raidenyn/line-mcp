@@ -637,6 +637,67 @@ describe('persistence-migration: quarantine recovery', () => {
     expect(remaining[0].resolution_owner_mid).toBeNull(); // conflict never marked resolved
   });
 
+  it('idempotently completes an interrupted recovery (line-DB row present, quarantine still unresolved)', () => {
+    // Simulate the crash window the reviewer flagged: a previous recovery
+    // run inserted the row into the line DB but crashed before marking the
+    // quarantined row resolved. On replay, the byte-identical existing line
+    // row must be recognized as an interrupted recovery (recovered), NOT
+    // permanently misclassified as a conflict — which is the silent failure
+    // mode the fix targets.
+    buildFixture('zero-auth', dataRoot);
+    const active = bootstrapPersistence({ dataRoot });
+    writeValidAuthRecord(dataRoot, OWNER);
+
+    // Replay the exact staging bytes stageLineDb would have written for c1/m1
+    // at createdTime 1000 (see buildLegacyDb's raw_json shape).
+    const interruptedRaw = JSON.stringify({
+      id: 'm1', from: 'c1', to: 'c1', toType: 1,
+      createdTime: '1000', contentType: 0, hasContent: false, text: 'hi',
+    });
+    const preseed = new SqliteMessageCache({ dbPath: active.lineDbPath });
+    try {
+      preseed.upsertMessages(OWNER, 'c1', [{
+        id: 'm1', from: 'c1', to: 'c1', toType: 1, createdTime: '1000',
+        contentType: 0, hasContent: false, text: 'hi',
+      }]);
+    } finally {
+      preseed.close();
+    }
+
+    const result = recoverQuarantinedMessages(active, {
+      messages: { 'c1/m1': OWNER, 'c2/m2': OWNER },
+    });
+
+    // c1/m1: interrupted-recovery replay → recovered (not conflict).
+    // c2/m2: normal recovery → recovered.
+    expect(result).toEqual({ recovered: 2, unresolved: 0, conflicts: 0 });
+
+    const cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
+    try {
+      expect(cache.getMessages(OWNER, 'c1')).toHaveLength(1);
+      expect(cache.getMessages(OWNER, 'c2')).toHaveLength(1);
+    } finally {
+      cache.close();
+    }
+    // The previously-unresolved c1/m1 quarantine row is now marked resolved
+    // (rawQuarantineRow returns the row itself regardless of resolution state,
+    // while quarantineRows filters to resolution_owner_mid IS NULL).
+    expect(quarantineRows(active.quarantineDbPath)).toHaveLength(0);
+    const c1Row = rawQuarantineRow(active.quarantineDbPath, 'c1/m1');
+    expect(c1Row?.resolution_owner_mid).toBe(OWNER);
+    // Sanity: the line-DB row's raw_json is byte-identical to what we staged —
+    // if upsertMessages normalized it, this test would wrongly pass via conflict.
+    const db = new Database(active.lineDbPath, { readonly: true });
+    try {
+      const row = db.prepare(
+        'SELECT raw_json FROM messages WHERE owner_mid = ? AND chat_mid = ? AND message_id = ?',
+      ).get(OWNER, 'c1', 'm1') as { raw_json: string } | undefined;
+      expect(row?.raw_json).toBe(interruptedRaw);
+    } finally {
+      db.close();
+    }
+  });
+
   it('accumulates recovery counts in the report across multiple calls', () => {
     buildFixture('zero-auth', dataRoot);
     const active = bootstrapPersistence({ dataRoot });

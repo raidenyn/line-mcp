@@ -105,6 +105,12 @@ export function createServer(options: ServerOptions): ComposedServer {
 
       const secret = loadOrCreateSecret(layout.secretPath);
       const credentialStore = new FileCredentialStore(layout.authDir);
+      // Endpoint config derives issuer/audience from the *requested* port. With
+      // `port: 0` (ephemeral, tests-only), the OAuth discovery docs and token
+      // claims embed `:0` while the server actually listens elsewhere — token
+      // verification stays self-consistent (same codec config both sides), but
+      // any client dereferencing the advertised metadata URL will fail. Tests
+      // using `port: 0` do not rely on externally dereferencable metadata.
       const authProvider = new LineAuthProvider({
         secret,
         endpoints: publicEndpointConfig(port, basePath),

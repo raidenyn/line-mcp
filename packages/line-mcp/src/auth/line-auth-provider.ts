@@ -139,11 +139,14 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
     if (!token) return null;
 
     // e2e bypass: a seeded token maps straight to its AuthData. Prime the
-    // freshness cache so resolveCredentials() finds it, mirroring how the old
-    // validateBearerToken returned AuthData directly.
+    // freshness cache ONLY if nothing is there yet, mirroring the priming-only
+    // guard in issueTokens(). A mid-session LINE token rotation
+    // (recordRefreshedAuth) updates latestAuthData; an unconditional set here
+    // on every request would stomp that fresher snapshot back to the stale
+    // seeded snapshot and serve an already-superseded credential downstream.
     const override = this.testOverrides.get(token);
     if (override) {
-      latestAuthData.set(override.mid, override);
+      if (!latestAuthData.has(override.mid)) latestAuthData.set(override.mid, override);
       return this.makePrincipal(override.mid, this.scopes);
     }
 

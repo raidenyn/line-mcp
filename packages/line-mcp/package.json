@@ -1,7 +1,7 @@
 {
   "name": "@raidenyn/line-mcp",
   "version": "1.0.0",
-  "description": "LINE messenger MCP product package: chat/message/template/category tools.",
+  "description": "LINE messenger MCP product package: five messenger tools, LINE OAuth provider, import service, and sync loop.",
   "private": true,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -207,6 +207,15 @@ export function recoverQuarantinedMessagesSql(
     const insertLine = ldb.prepare(
       'INSERT INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?, ?)',
     );
+    // Reads an existing row at the same (owner_mid, chat_mid, message_id) key,
+    // used to recognize an interrupted-recovery replay: if the line-DB row is
+    // byte-identical to the quarantined row, the previous run inserted it
+    // successfully but crashed before marking the quarantined row resolved.
+    // Treating that as a recovered (not conflicting) row is idempotent replay
+    // of an explicitly-mapped recovery, not ownership inference.
+    const findExistingLine = ldb.prepare(
+      'SELECT created_time, raw_json FROM messages WHERE owner_mid = ? AND chat_mid = ? AND message_id = ?',
+    );
     const markResolved = qdb.prepare(
       'UPDATE legacy_messages SET resolution_owner_mid = ?, resolved_at = ? WHERE source_key = ?',
     );
@@ -222,9 +231,26 @@ export function recoverQuarantinedMessagesSql(
         insertLine.run(ownerMid, row.chat_mid, row.message_id, row.created_time, row.raw_json);
       } catch (err) {
         if (!isConstraintViolation(err)) throw err;
-        // A row already exists at (owner_mid, chat_mid, message_id) — never
-        // overwrite; retain the quarantined row untouched for audit.
-        conflicts++;
+        // A row already exists at (owner_mid, chat_mid, message_id). If it is
+        // byte-identical to this quarantined row, the previous recovery was
+        // interrupted between the line-DB insert and the quarantine-DB
+        // mark-resolved — idempotently complete that recovery instead of
+        // permanently misclassifying the row as a conflict. Otherwise (a
+        // genuinely different row at the same key) retain the quarantined row
+        // untouched for audit and count it as a real conflict.
+        const existing = findExistingLine.get(ownerMid, row.chat_mid, row.message_id) as
+          | { created_time: number; raw_json: string }
+          | undefined;
+        if (
+          existing &&
+          existing.created_time === row.created_time &&
+          existing.raw_json === row.raw_json
+        ) {
+          markResolved.run(ownerMid, nowIso, row.source_key);
+          recovered++;
+        } else {
+          conflicts++;
+        }
         continue;
       }
 

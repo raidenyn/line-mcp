@@ -105,7 +105,30 @@ function updateReportWithRecovery(
     conflictsTotal: prev.conflictsTotal + delta.conflicts,
     lastRunAt: new Date().toISOString(),
   };
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+  // Atomic visibility: write to a sibling temp file then rename. A plain
+  // writeFileSync here would leave a truncated/corrupt report on a mid-write
+  // crash, and readPointer() still treats the (intact) pointer as
+  // authoritative while the audit artifact behind it is garbage. Mirrors the
+  // crash-safety the pointer itself gets via publishPointer().
+  const dir = path.dirname(reportPath);
+  const tmp = path.join(
+    dir,
+    `.migration-report.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
+  );
+  let writeErr: unknown;
+  try {
+    const fd = fs.openSync(tmp, 'wx', 0o600);
+    try {
+      fs.writeSync(fd, JSON.stringify(report, null, 2));
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, reportPath);
+  } catch (err) {
+    writeErr = err;
+    try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+  }
+  if (writeErr !== undefined) throw writeErr;
 }
 
 // Explicit-mapping recovery for rows quarantined by bootstrapPersistence.

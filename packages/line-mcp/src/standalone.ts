@@ -71,12 +71,27 @@ function hasUnmigratedLegacyDatabase(dataRoot: string): boolean {
   return !fs.existsSync(pointerPath(dataRoot)) && fs.existsSync(legacyCacheDbPath(dataRoot));
 }
 
-/** Resolves the line-messages DB path for this data root: pointer-committed generation if present, else a fresh standalone layout. */
+/**
+ * Resolves the line-messages DB path for this data root: pointer-committed
+ * generation if present, else a fresh standalone layout. Mirrors the composed
+ * server's `readPointer()` authority check — a pointer is only followed when
+ * the named generation's line DB actually exists on disk. A pointer to a
+ * deleted/hand-edited-to-nonexistent generation is treated as "no pointer
+ * yet" rather than followed into a fabricated empty DB inside the generations
+ * tree (which would silently hide the user's real cached messages).
+ */
 function resolveLineDbPath(dataRoot: string): string {
   try {
     const manifest = JSON.parse(fs.readFileSync(pointerPath(dataRoot), 'utf8')) as { generation?: string };
     if (typeof manifest.generation === 'string' && GENERATION_ID_PATTERN.test(manifest.generation)) {
-      return path.join(dataRoot, 'persistence-generations', manifest.generation, 'line', 'messages.db');
+      const genDbPath = path.join(
+        dataRoot,
+        'persistence-generations',
+        manifest.generation,
+        'line',
+        'messages.db',
+      );
+      if (fs.existsSync(genDbPath)) return genDbPath;
     }
   } catch {
     // No pointer, or an unreadable one — treat as a fresh standalone layout.
@@ -132,6 +147,9 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
       const authStoreDir = authDirOf(dataRoot);
       const secret = loadOrCreateSecret(dataRoot);
       const credentialStore = new FileCredentialStore(authStoreDir);
+      // See packages/server/src/server.ts: with `port: 0` (ephemeral, tests-
+      // only) the OAuth discovery docs and token claims embed `:0` while the
+      // server listens elsewhere; token verification stays self-consistent.
       const authProvider = new LineAuthProvider({
         secret,
         endpoints: publicEndpointConfig(port, basePath),
