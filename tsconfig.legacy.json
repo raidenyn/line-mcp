@@ -22,5 +22,5 @@
   // @raidenyn/line-client-sqlite (Task 6) — these references make `tsc -b`
   // build those packages first so their dist/*.d.ts exist before this
   // project's files that import them are type-checked.
-  "references": [{ "path": "./packages/line-client" }, { "path": "./packages/line-client-sqlite" }]
+  "references": [{ "path": "./packages/line-client" }, { "path": "./packages/line-client-sqlite" }, { "path": "./packages/mcp-runtime" }]
 }

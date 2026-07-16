@@ -17,7 +17,7 @@ import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { startSyncLoop } from './sync';
 import { dataDir, authDir } from './data-dir';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
-import { normalizeBasePath } from './base-path';
+import { normalizeBasePath } from '@raidenyn/mcp-runtime';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
 import fs from 'fs';
 
