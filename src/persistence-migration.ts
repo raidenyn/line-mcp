@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { cacheDbPath, authDir } from './data-dir';
-import { inventoryStoredAuthRecords, type AuthRecordInventory } from './oauth';
+import { inventoryStoredAuthRecords, type AuthRecordInventory } from '@raidenyn/line-mcp';
 import {
   stageLineDb,
   stageQuarantineDb,

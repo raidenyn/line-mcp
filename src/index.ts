@@ -6,8 +6,8 @@ import express from 'express';
 import type { Request as ExpressRequest } from 'express';
 import { join } from 'path';
 import { z } from 'zod';
-import { LineClient, AuthData, parseExportFile } from '@raidenyn/line-client';
-import { setupOAuthRoutes, validateBearerToken, recordRefreshedAuth, seedTestToken as oauthSeedTestToken, makeWwwAuthenticate, pendingUploads, pendingFiles } from './oauth';
+import { LineClient, AuthData, parseExportFile, parseExportHeader } from '@raidenyn/line-client';
+import { recordRefreshedAuth, LineAuthProvider, FileCredentialStore, publicEndpointConfig } from '@raidenyn/line-mcp';
 import { CachingLineClient } from './caching-line-client';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { CategoryStore } from './category-store';
@@ -15,7 +15,7 @@ import { parseTransaction, summarize, expandUntilBound, applyBalanceDiffs, categ
 import { upsertTemplate, deleteTemplate, listTemplates, filterByTime, loadTemplates, upsertAlias, deleteAlias, listAliases, NamedTemplateSchema } from './template-store';
 import { loadAllPresets, getPreset, detectPresets } from './preset-store';
 import { startSyncLoop } from './sync';
-import { dataDir, authDir } from './data-dir';
+import { dataDir, authDir, secretPath } from './data-dir';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
 import { normalizeBasePath } from '@raidenyn/mcp-runtime';
 import { filterSampleMessages, parseSampleUntilBound } from './sample-messages';
@@ -37,6 +37,27 @@ const authStore = new AsyncLocalStorage<AuthData>();
 const requestStore = new AsyncLocalStorage<ExpressRequest>();
 let sharedCache: SqliteMessageCache;
 let categoryStore: CategoryStore;
+
+// Import-upload flow state. This narrow, ephemeral, upload-only state stays
+// owned by the executable until the import service is formally extracted
+// (issue #75, Task 9) — it is intentionally not part of the auth package.
+const pendingUploads = new Map<string, { mid: string; expires: number }>();
+const pendingFiles   = new Map<string, { content: string; chatName: string; mid: string; expires: number }>();
+
+// The executable owns secret loading: importing @raidenyn/line-mcp never reads
+// or creates data/secret. The signing key is loaded here and injected into
+// LineAuthProvider.
+function loadOrCreateSecret(dataRoot: string): string {
+  const file = secretPath(dataRoot);
+  try {
+    return fs.readFileSync(file, 'utf8').trim();
+  } catch {
+    const secret = crypto.randomBytes(32).toString('hex');
+    fs.mkdirSync(join(file, '..'), { recursive: true });
+    fs.writeFileSync(file, secret, 'utf8');
+    return secret;
+  }
+}
 
 async function readGuideFile(relPath: string, uri: string) {
   try {
@@ -924,13 +945,13 @@ function makeLineClient(authData: AuthData): CachingLineClient {
   );
 }
 
-function seedTestToken(): void {
+function seedTestToken(provider: LineAuthProvider): void {
   const testToken = process.env.TEST_TOKEN;
   const authRaw = process.env.LINE_AUTH_DATA;
   if (!testToken || !authRaw) return;
   try {
     const authData: AuthData = JSON.parse(authRaw);
-    oauthSeedTestToken(testToken, authData);
+    provider.seedTestToken(testToken, authData);
     process.stderr.write('[LINE] Test token seeded from TEST_TOKEN + LINE_AUTH_DATA\n');
   } catch {
     process.stderr.write('[LINE] Warning: failed to seed test token — LINE_AUTH_DATA is not valid JSON\n');
@@ -975,14 +996,67 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
 
   const PORT = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
   const basePath = normalizeBasePath(process.env.BASE_PATH);
-  const WWW_AUTH = makeWwwAuthenticate(PORT, basePath);
-  seedTestToken();
+
+  // Construct the typed LINE auth provider. The executable owns secret loading
+  // and endpoint derivation; the provider owns tokens, routes, and credential
+  // resolution.
+  const authStoreDir = authDir(dataRoot);
+  const secret = loadOrCreateSecret(dataRoot);
+  const authProvider = new LineAuthProvider({
+    secret,
+    endpoints: publicEndpointConfig(PORT, basePath),
+    credentialStore: new FileCredentialStore(authStoreDir),
+    authStoreDir,
+  });
+  seedTestToken(authProvider);
 
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
-  setupOAuthRoutes(app, PORT, basePath);
+  authProvider.mountRoutes(app);
+
+  // Import-upload route (owned by the executable until Task 9 extracts the
+  // import service). One-time, token-guarded raw upload of a LINE chat export.
+  app.post(
+    `${basePath}/import-upload`,
+    express.raw({ type: '*/*', limit: '10mb' }),
+    (req, res) => {
+      const token = typeof req.query['token'] === 'string' ? req.query['token'] : '';
+      const entry = pendingUploads.get(token);
+      if (!entry || entry.expires < Date.now()) {
+        pendingUploads.delete(token);
+        res.status(401).json({ error: 'invalid_or_expired_token' });
+        return;
+      }
+      const { mid } = entry;
+      pendingUploads.delete(token); // consume — one-time use
+
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(400).json({ error: 'Expected raw file body.' });
+        return;
+      }
+      const content = req.body.toString('utf8');
+      let chatName: string;
+      try {
+        chatName = parseExportHeader(content);
+      } catch {
+        res.status(400).json({ error: 'File does not appear to be a LINE chat export.' });
+        return;
+      }
+
+      // Prune expired entries to prevent unbounded memory growth
+      const now = Date.now();
+      for (const [k, v] of pendingFiles) {
+        if (v.expires < now) pendingFiles.delete(k);
+      }
+
+      const fileRefId = crypto.randomUUID();
+      pendingFiles.set(fileRefId, { content, chatName, mid, expires: Date.now() + 3_600_000 });
+
+      res.json({ file_ref_id: fileRefId, chat_name: chatName });
+    },
+  );
 
   app.get(`${basePath}/healthz`, (_req, res) => {
     res.status(200).json({ status: 'ok', version: SERVER_VERSION });
@@ -993,12 +1067,11 @@ export async function main(options: MainOptions = {}): Promise<MainResult> {
   });
 
   app.post(`${basePath}/mcp`, async (req, res) => {
-    const authHeader = req.headers.authorization ?? '';
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const authData = validateBearerToken(token);
+    const principal = await authProvider.authenticate(req);
+    const authData = principal ? await authProvider.resolveCredentials(principal) : null;
 
     if (!authData) {
-      res.status(401).set('WWW-Authenticate', WWW_AUTH).json({ error: 'invalid_token' });
+      res.status(401).set('WWW-Authenticate', authProvider.challenge(req)).json({ error: 'invalid_token' });
       return;
     }
 

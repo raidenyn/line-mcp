@@ -7,7 +7,7 @@ import {
   listStoredAuthRecords,
   maskMid,
   recordRefreshedAuth,
-} from './oauth';
+} from '@raidenyn/line-mcp';
 import { authDir as getAuthDir } from './data-dir';
 
 type SyncClient = { getMessagesInRange(chatMid: string, sinceMs: number): Promise<unknown> };

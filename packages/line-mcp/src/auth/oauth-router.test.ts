@@ -1,20 +1,19 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import type { AuthData } from '@raidenyn/line-client';
-import express from 'express';
+import express, { type Express, type Request } from 'express';
 import * as http from 'http';
 import * as crypto from 'crypto';
+import { LineAuthProvider, publicEndpointConfig } from './line-auth-provider';
+import { FileCredentialStore, latestAuthData } from './credential-store';
 
 vi.mock('fs', async importOriginal => {
   const original = await importOriginal<typeof import('fs')>();
   return { ...original, renameSync: vi.fn(original.renameSync) };
 });
 
-// Mock LineClient so /authorize doesn't hit the real LINE API. parseExportHeader
-// is re-exported from the real module so oauth.ts's /import-upload route (which
-// this file doesn't otherwise exercise) still has a working implementation.
+// Mock LineClient so /authorize doesn't hit the real LINE API.
 vi.mock('@raidenyn/line-client', async importOriginal => {
   const original = await importOriginal<typeof import('@raidenyn/line-client')>();
   const mockAuthData = {
@@ -54,7 +53,26 @@ vi.mock('@raidenyn/line-client', async importOriginal => {
   };
 });
 
-import { setupOAuthRoutes, latestAuthData, validateBearerToken, seedTestToken, makeWwwAuthenticate } from './oauth';
+const TEST_SECRET = 'oauth-router-test-secret';
+
+function providerFor(port: number, basePath: string, authStoreDir: string): LineAuthProvider {
+  return new LineAuthProvider({
+    secret: TEST_SECRET,
+    endpoints: publicEndpointConfig(port, basePath),
+    credentialStore: new FileCredentialStore(authStoreDir),
+    authStoreDir,
+  });
+}
+
+// Adapter mirroring the old setupOAuthRoutes(app, port, basePath, authStoreDir)
+// signature the router tests were written against.
+function setupOAuthRoutes(app: Express, port: number, basePath: string, authStoreDir: string): LineAuthProvider {
+  const provider = providerFor(port, basePath, authStoreDir);
+  provider.mountRoutes(app);
+  return provider;
+}
+
+const stubReq = { headers: {} } as unknown as Request;
 
 // --- helpers ---
 
@@ -66,10 +84,7 @@ let authStoreDir: string;
 let authStoreDir2: string;
 const BASE_PATH_2 = '/line-mcp';
 
-async function req(
-  url: string,
-  init?: RequestInit,
-): Promise<{ status: number; body: unknown }> {
+async function req(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
   const res = await fetch(url, init);
   const ct = res.headers.get('content-type') ?? '';
   const body = ct.includes('application/json') ? await res.json() : await res.text();
@@ -104,11 +119,7 @@ function bodyAsHtml(response: { body: unknown }): string {
   return response.body as string;
 }
 
-function parseSelector(html: string): {
-  selectionSession: string;
-  personalChoice: string;
-  workChoice: string;
-} {
+function parseSelector(html: string): { selectionSession: string; personalChoice: string; workChoice: string } {
   const selectionSession = html.match(/name="selection_session" value="([^"]+)"/)?.[1];
   const rows = [...html.matchAll(/value="([^"]+)"[^>]*>\s*([^<]+)/g)];
   const choiceFor = (label: string) => rows.find(([, , text]) => text.trim() === label)?.[1];
@@ -120,12 +131,7 @@ function parseSelector(html: string): {
   return { selectionSession, personalChoice, workChoice };
 }
 
-async function postSelection(
-  selectionSession: string,
-  choice: string,
-  targetBase = base,
-  targetPath = '',
-) {
+async function postSelection(selectionSession: string, choice: string, targetBase = base, targetPath = '') {
   return req(`${targetBase}${targetPath}/authorize/select`, {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -149,18 +155,14 @@ const routeParams = () => new URLSearchParams({
   state: 'st',
 });
 
-async function withOAuthServer(
-  authStorePath: string,
-  run: (serverBase: string) => Promise<void>,
-  setupRoutes: typeof setupOAuthRoutes = setupOAuthRoutes,
-): Promise<void> {
+async function withOAuthServer(authStorePath: string, run: (serverBase: string) => Promise<void>): Promise<void> {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   const localServer = http.createServer(app);
   await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
   const port = (localServer.address() as { port: number }).port;
-  setupRoutes(app, port, '', authStorePath);
+  setupOAuthRoutes(app, port, '', authStorePath);
   try {
     await run(`http://127.0.0.1:${port}`);
   } finally {
@@ -209,10 +211,9 @@ beforeAll(async () => {
 
   await new Promise<void>((resolve) => {
     server2 = http.createServer(app2);
-    // Bind on 'localhost' (not '127.0.0.1'): setupOAuthRoutes hardcodes
-    // `http://localhost:${port}` when building issuer/resource URLs (see oauth.ts),
-    // independent of the actual request host, so base2 must match that scheme
-    // for exact-equality assertions below to hold.
+    // Bind on 'localhost': the provider derives issuer/resource URLs from
+    // `http://localhost:${port}` independent of the request host, so base2 must
+    // match that scheme for exact-equality assertions.
     server2.listen(0, 'localhost', () => {
       const addr = server2.address() as { port: number };
       base2 = `http://localhost:${addr.port}`;
@@ -226,7 +227,7 @@ beforeAll(async () => {
 afterAll(() => Promise.all([
   new Promise<void>((resolve) => server.close(() => resolve())),
   new Promise<void>((resolve) => server2.close(() => resolve())),
-] ).then(() => {
+]).then(() => {
   fs.rmSync(authStoreDir, { recursive: true, force: true });
   fs.rmSync(authStoreDir2, { recursive: true, force: true });
 }));
@@ -249,64 +250,20 @@ beforeEach(async () => {
 });
 
 // ───────────────────────────────────────────────────────────
-// makeWwwAuthenticate
+// challenge (WWW-Authenticate)
 // ───────────────────────────────────────────────────────────
 
-describe('makeWwwAuthenticate', () => {
+describe('challenge / WWW-Authenticate', () => {
   it('includes port and resource_metadata URL', () => {
-    const header = makeWwwAuthenticate(3001, '');
+    const header = providerFor(3001, '', authStoreDir).challenge(stubReq);
     expect(header).toContain('Bearer error="invalid_token"');
     expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/mcp');
   });
 
-  it('appends basePath after the well-known segment, not before, and mirrors the /mcp resource path', () => {
-    const header = makeWwwAuthenticate(3001, '/line-mcp');
+  it('appends basePath after the well-known segment, not before, mirroring the /mcp resource path', () => {
+    const header = providerFor(3001, '/line-mcp', authStoreDir).challenge(stubReq);
     expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/line-mcp/mcp');
     expect(header).not.toContain('/line-mcp/.well-known');
-  });
-});
-
-// ───────────────────────────────────────────────────────────
-// validateBearerToken
-// ───────────────────────────────────────────────────────────
-
-describe('validateBearerToken', () => {
-  it('returns null for a garbage token', () => {
-    expect(validateBearerToken('notavalidtoken')).toBeNull();
-  });
-
-  it('returns null for a token with bad HMAC', () => {
-    const data = Buffer.from(JSON.stringify({ authData: sampleAuthData, expiresAt: Date.now() + 99999 })).toString('base64url');
-    expect(validateBearerToken(`${data}.badsig`)).toBeNull();
-  });
-
-  it('returns null for an expired signed token', () => {
-    // Issue a token that expires in the past via the POST /token flow
-    // We can't sign directly, so use seedTestToken bypass first and confirm expiry logic
-    // via a workaround: issue real tokens via the full flow is complex in unit tests.
-    // Instead test via the test bypass path with null check.
-    expect(validateBearerToken('')).toBeNull();
-  });
-
-  it('returns authData for a valid test-bypass token', () => {
-    const token = 'mytesttoken-' + crypto.randomBytes(4).toString('hex');
-    seedTestToken(token, sampleAuthData);
-    const result = validateBearerToken(token);
-    expect(result).not.toBeNull();
-    expect(result!.mid).toBe('testmid');
-  });
-
-  it('returns latestAuthData entry when available for the same mid', () => {
-    const token = 'bypass-' + crypto.randomBytes(4).toString('hex');
-    seedTestToken(token, sampleAuthData);
-    const fresher = { ...sampleAuthData, accessToken: 'fresher-token' };
-    latestAuthData.set(sampleAuthData.mid, fresher);
-    // test-bypass path returns the bypass authData directly (not latestAuthData)
-    // For self-contained tokens, latestAuthData is consulted. Test that separately.
-    const result = validateBearerToken(token);
-    expect(result).not.toBeNull();
-    // bypass always returns stored authData, not latestAuthData
-    expect(result!.accessToken).toBe('at');
   });
 });
 
@@ -586,16 +543,12 @@ describe('GET /authorize', () => {
     const params = new URLSearchParams(validParams);
     params.set('redirect_uri', 'http://127.0.0.1:9000/callback');
     const { status, body } = await req(`${base}/authorize?${params}`);
-    // A 400 means validation rejected it — anything else means it passed validation
     expect(status).not.toBe(400);
     if (status === 400) expect(body as string).not.toContain('loopback');
   });
 
   // Regression: non-http(s) schemes whose authority is `localhost`/`127.0.0.1`
-  // used to pass isLoopbackRedirectUri() because only the hostname was checked,
-  // never the scheme. After login the authorize page would then navigate the
-  // victim's browser to javascript:/data:/file: URIs — a reflected-XSS /
-  // token-exfiltration vector (issue #34).
+  // used to pass isLoopbackRedirectUri() because only the hostname was checked.
   for (const redirectUri of [
     'javascript://localhost/evil',
     'data://localhost',
@@ -780,328 +733,12 @@ describe('POST /token', () => {
 });
 
 // ───────────────────────────────────────────────────────────
-// stored auth records
-// ───────────────────────────────────────────────────────────
-
-const TEST_AUTH: AuthData = {
-  accessToken: 'stale-access-token',
-  refreshToken: 'stale-refresh-token',
-  certificate: 'test-cert',
-  mid: 'u1234567890test',
-  wrappedNonce: 'test-nonce',
-  kdfParameter1: 'test-kdf1',
-  kdfParameter2: 'test-kdf2',
-};
-
-const FRESH_AUTH: AuthData = {
-  ...TEST_AUTH,
-  accessToken: 'fresh-access-token',
-  refreshToken: 'fresh-refresh-token',
-};
-
-describe('stored auth records', () => {
-  let tmpdir: string;
-  let mod: typeof import('./oauth');
-
-  beforeEach(async () => {
-    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
-    vi.resetModules();
-    process.env.DATA_DIR = tmpdir;
-    mod = await import('./oauth');
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpdir, { recursive: true, force: true });
-    delete process.env.DATA_DIR;
-  });
-
-  it('atomically writes a complete record with displayName and restrictive modes', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    const dir = path.join(tmpdir, 'auth');
-    const file = path.join(dir, `${TEST_AUTH.mid}.json`);
-    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({
-      ...TEST_AUTH,
-      displayName: 'Personal LINE',
-    });
-    expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
-    expect(fs.readdirSync(dir)).toEqual([`${TEST_AUTH.mid}.json`]);
-  });
-
-  it('preserves an existing displayName when refreshed credentials omit it', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    mod.persistAuthData(FRESH_AUTH);
-
-    expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
-      ...FRESH_AUTH,
-      displayName: 'Personal LINE',
-    });
-  });
-
-  describe('recordRefreshedAuth', () => {
-    it('updates memory and disk while preserving the account display name', () => {
-      mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-      mod.latestAuthData.clear();
-
-      mod.recordRefreshedAuth(FRESH_AUTH);
-
-      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
-      expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
-        ...FRESH_AUTH,
-        displayName: 'Personal LINE',
-      });
-    });
-
-    it('keeps refreshed credentials in memory when persistence fails', () => {
-      const blocked = path.join(tmpdir, 'blocked-auth');
-      fs.writeFileSync(blocked, 'not a directory');
-
-      expect(() => mod.recordRefreshedAuth(FRESH_AUTH, blocked)).not.toThrow();
-      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
-    });
-  });
-
-  it('throws without replacing the previous record when rename fails', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    vi.mocked(fs.renameSync).mockImplementationOnce(() => {
-      throw new Error('rename denied');
-    });
-
-    expect(() => mod.persistAuthData(FRESH_AUTH)).toThrow('rename denied');
-    expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)?.accessToken).toBe(TEST_AUTH.accessToken);
-    expect(fs.readdirSync(path.join(tmpdir, 'auth'))).toEqual([`${TEST_AUTH.mid}.json`]);
-  });
-
-  it('lists valid legacy and named records while isolating invalid files', () => {
-    const dir = path.join(tmpdir, 'auth');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
-    fs.writeFileSync(path.join(dir, 'u-second.json'), JSON.stringify({
-      ...TEST_AUTH,
-      mid: 'u-second',
-      displayName: 'Work LINE',
-    }));
-    fs.writeFileSync(path.join(dir, 'u-corrupt.json'), '{');
-    fs.writeFileSync(path.join(dir, 'u-incomplete.json'), JSON.stringify({ mid: 'u-incomplete' }));
-    fs.writeFileSync(path.join(dir, 'u-mismatch.json'), JSON.stringify({
-      ...TEST_AUTH,
-      mid: 'u-other',
-    }));
-    fs.writeFileSync(path.join(dir, 'u-empty-name.json'), JSON.stringify({
-      ...TEST_AUTH,
-      mid: 'u-empty-name',
-      displayName: '',
-    }));
-
-    expect(mod.listStoredAuthRecords().map(record => record.mid).sort()).toEqual([
-      TEST_AUTH.mid,
-      'u-second',
-    ].sort());
-  });
-
-  describe('inventoryStoredAuthRecords', () => {
-    it('reports every invalid file with a structural reason instead of dropping it', () => {
-      const dir = path.join(tmpdir, 'auth');
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
-      fs.writeFileSync(path.join(dir, 'u-second.json'), JSON.stringify({
-        ...TEST_AUTH,
-        mid: 'u-second',
-        displayName: 'Work LINE',
-      }));
-      fs.writeFileSync(path.join(dir, 'u-corrupt.json'), '{');
-      fs.writeFileSync(path.join(dir, 'u-incomplete.json'), JSON.stringify({ mid: 'u-incomplete' }));
-      fs.writeFileSync(path.join(dir, 'u-mismatch.json'), JSON.stringify({
-        ...TEST_AUTH,
-        mid: 'u-other',
-      }));
-      fs.writeFileSync(path.join(dir, 'u-empty-name.json'), JSON.stringify({
-        ...TEST_AUTH,
-        mid: 'u-empty-name',
-        displayName: '',
-      }));
-
-      const inventory = mod.inventoryStoredAuthRecords(dir);
-
-      expect(inventory.valid.map(v => v.mid).sort()).toEqual([TEST_AUTH.mid, 'u-second'].sort());
-      expect(inventory.valid.every(v => typeof v.path === 'string' && v.path.length > 0)).toBe(true);
-      expect(inventory.invalid.map(i => i.path.split(path.sep).pop()).sort()).toEqual([
-        'u-corrupt.json',
-        'u-empty-name.json',
-        'u-incomplete.json',
-        'u-mismatch.json',
-      ].sort());
-      // Every invalid entry must carry a non-empty structural reason.
-      for (const entry of inventory.invalid) {
-        expect(entry.reason.length).toBeGreaterThan(0);
-      }
-      // Reasons must never leak credential values (accessToken/refreshToken/
-      // certificate/etc.), only describe the structural problem.
-      const serializedReasons = JSON.stringify(inventory.invalid.map(i => i.reason));
-      expect(serializedReasons).not.toContain(TEST_AUTH.accessToken);
-      expect(serializedReasons).not.toContain(TEST_AUTH.refreshToken);
-      expect(serializedReasons).not.toContain(TEST_AUTH.certificate);
-      expect(serializedReasons).not.toContain(TEST_AUTH.wrappedNonce);
-    });
-
-    it('returns empty valid/invalid arrays when the directory does not exist', () => {
-      const inventory = mod.inventoryStoredAuthRecords(path.join(tmpdir, 'does-not-exist'));
-      expect(inventory).toEqual({ valid: [], invalid: [] });
-    });
-
-    it('agrees with listStoredAuthRecords on which records are valid', () => {
-      const dir = path.join(tmpdir, 'auth');
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, `${TEST_AUTH.mid}.json`), JSON.stringify(TEST_AUTH));
-      fs.writeFileSync(path.join(dir, 'u-bad.json'), JSON.stringify({ mid: 'u-bad' }));
-
-      const inventory = mod.inventoryStoredAuthRecords(dir);
-      const listed = mod.listStoredAuthRecords(dir);
-      expect(inventory.valid.map(v => v.mid).sort()).toEqual(listed.map(r => r.mid).sort());
-      expect(inventory.invalid).toHaveLength(1);
-    });
-  });
-
-  it('rejects unsafe MIDs and non-string auth fields', () => {
-    expect(mod.loadStoredAuthRecord('../escape')).toBeNull();
-    const dir = path.join(tmpdir, 'auth');
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'u-bad.json'), JSON.stringify({
-      ...TEST_AUTH,
-      mid: 'u-bad',
-      certificate: 42,
-    }));
-    expect(mod.loadStoredAuthRecord('u-bad')).toBeNull();
-  });
-
-  it('does not populate latestAuthData during enumeration', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    mod.latestAuthData.clear();
-    mod.listStoredAuthRecords();
-    expect(mod.latestAuthData.size).toBe(0);
-  });
-
-  it('strips selector metadata before caching LINE auth data', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    mod.latestAuthData.clear();
-
-    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toEqual(TEST_AUTH);
-    expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(TEST_AUTH);
-    expect(mod.latestAuthData.get(TEST_AUTH.mid)).not.toHaveProperty('displayName');
-  });
-});
-
-describe('issueTokens lazy load', () => {
-  let tmpdir: string;
-  let mod: typeof import('./oauth');
-
-  beforeEach(async () => {
-    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
-    vi.resetModules();
-    process.env.DATA_DIR = tmpdir;
-    mod = await import('./oauth');
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpdir, { recursive: true, force: true });
-    delete process.env.DATA_DIR;
-  });
-
-  it('embeds fresh credentials from disk when latestAuthData is empty', () => {
-    // Write FRESH_AUTH to disk; latestAuthData is empty (fresh module)
-    mod.persistAuthData(FRESH_AUTH);
-    // Issue a token with stale auth — issueTokens should lazy-load FRESH_AUTH from disk
-    const { access_token } = mod.issueTokens(TEST_AUTH);
-    // The token should embed FRESH_AUTH, so validateBearerToken returns it
-    const result = mod.validateBearerToken(access_token);
-    expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
-  });
-});
-
-describe('refresh token after restart', () => {
-  let tmpdir: string;
-
-  beforeEach(() => {
-    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
-    process.env.DATA_DIR = tmpdir;
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpdir, { recursive: true, force: true });
-    delete process.env.DATA_DIR;
-  });
-
-  it('uses persisted fresh LINE credentials without starting authorization', async () => {
-    vi.resetModules();
-    const first = await import('./oauth');
-    first.persistAuthData(FRESH_AUTH, 'Personal LINE');
-    const { refresh_token } = first.issueTokens(TEST_AUTH);
-
-    vi.resetModules();
-    const restarted = await import('./oauth');
-    const { LineClient } = await import('@raidenyn/line-client');
-    vi.mocked(LineClient).mockClear();
-    await withOAuthServer(path.join(tmpdir, 'auth'), async restartBase => {
-      const response = await fetch(`${restartBase}/token`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ grant_type: 'refresh_token', refresh_token }),
-      });
-
-      expect(response.status).toBe(200);
-      const body = await response.json() as { access_token: string };
-      expect(restarted.validateBearerToken(body.access_token)?.accessToken)
-        .toBe(FRESH_AUTH.accessToken);
-      expect(restarted.latestAuthData.get(TEST_AUTH.mid)?.accessToken)
-        .toBe(FRESH_AUTH.accessToken);
-      expect(LineClient).not.toHaveBeenCalled();
-    }, restarted.setupOAuthRoutes);
-  });
-});
-
-describe('validateBearerToken lazy load', () => {
-  let tmpdir: string;
-  let mod: typeof import('./oauth');
-
-  beforeEach(async () => {
-    tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-test-'));
-    vi.resetModules();
-    process.env.DATA_DIR = tmpdir;
-    mod = await import('./oauth');
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpdir, { recursive: true, force: true });
-    delete process.env.DATA_DIR;
-  });
-
-  it('returns fresh credentials from disk when latestAuthData is empty', () => {
-    // Issue a token that embeds stale auth (no disk file yet — latestAuthData is empty)
-    const { access_token } = mod.issueTokens(TEST_AUTH);
-    // Now write FRESH_AUTH to disk (latestAuthData still empty)
-    mod.persistAuthData(FRESH_AUTH);
-    // Validate — should lazy-load FRESH_AUTH from disk
-    const result = mod.validateBearerToken(access_token);
-    expect(result?.accessToken).toBe(FRESH_AUTH.accessToken);
-    // Subsequent access hits in-memory cache (disk loaded into latestAuthData)
-    expect(mod.latestAuthData.get(TEST_AUTH.mid)?.accessToken).toBe(FRESH_AUTH.accessToken);
-  });
-});
-
-// ───────────────────────────────────────────────────────────
 // Non-root basePath ('/line-mcp')
 // ───────────────────────────────────────────────────────────
 
 describe('non-root basePath', () => {
   it('serves account selection submission under the configured base path', async () => {
-    const params = new URLSearchParams({
-      response_type: 'code',
-      client_id: 'claude-code',
-      redirect_uri: 'http://localhost:8765/callback',
-      code_challenge: s256('verifier123'),
-      code_challenge_method: 'S256',
-      state: 'st',
-    });
+    const params = routeParams();
     fs.writeFileSync(path.join(authStoreDir2, 'u-personal.json'), JSON.stringify({
       ...sampleAuthData,
       mid: 'u-personal',
@@ -1117,12 +754,7 @@ describe('non-root basePath', () => {
     const selector = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
     const { selectionSession, workChoice } = parseSelector(bodyAsHtml(selector));
 
-    const selected = await postSelection(
-      selectionSession,
-      workChoice,
-      base2,
-      BASE_PATH_2,
-    );
+    const selected = await postSelection(selectionSession, workChoice, base2, BASE_PATH_2);
 
     expect(selected.status).toBe(200);
     expect((await lastCreatedClient()).login).toHaveBeenCalledWith('work-cert');
@@ -1162,14 +794,7 @@ describe('non-root basePath', () => {
   });
 
   it('serves /authorize under the prefix, not at root', async () => {
-    const params = new URLSearchParams({
-      response_type: 'code',
-      client_id: 'claude-code',
-      redirect_uri: 'http://localhost:8765/callback',
-      code_challenge: s256('verifier123'),
-      code_challenge_method: 'S256',
-      state: 'st',
-    });
+    const params = routeParams();
     const prefixed = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
     expect(prefixed.status).not.toBe(400);
 
@@ -1178,14 +803,7 @@ describe('non-root basePath', () => {
   });
 
   it('embeds the basePath in the authorize page OAuth context', async () => {
-    const params = new URLSearchParams({
-      response_type: 'code',
-      client_id: 'claude-code',
-      redirect_uri: 'http://localhost:8765/callback',
-      code_challenge: s256('verifier123'),
-      code_challenge_method: 'S256',
-      state: 'st',
-    });
+    const params = routeParams();
     const { body: html } = await req(`${base2}${BASE_PATH_2}/authorize?${params}`);
     const page = html as string;
     const context = page.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/)?.[1];
@@ -1199,13 +817,13 @@ describe('non-root basePath', () => {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ grant_type: 'implicit' }),
     });
-    expect(prefixed.status).toBe(400); // reaches the handler, rejected for bad grant_type
+    expect(prefixed.status).toBe(400);
 
     const unprefixed = await req(`${base2}/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ grant_type: 'implicit' }),
     });
-    expect(unprefixed.status).toBe(404); // route doesn't exist at root
+    expect(unprefixed.status).toBe(404);
   });
 });
