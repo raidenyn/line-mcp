@@ -24,6 +24,18 @@ function legacyCacheDbPath(dataRoot: string): string {
   return path.join(dataRoot, 'cache', 'messages.db');
 }
 
+/**
+ * Dedicated path for a fresh standalone-layout database — never the legacy
+ * monolith's `cache/messages.db`, and never `persistence-generations/...`
+ * (that tree is the composed server's migration output). Keeping this
+ * distinct from `legacyCacheDbPath` is what lets `hasUnmigratedLegacyDatabase`
+ * keep meaning "a real legacy monolith database exists" even after this
+ * standalone server has run (and persisted its own data) many times.
+ */
+function standaloneLineDbPath(dataRoot: string): string {
+  return path.join(dataRoot, 'line-mcp', 'messages.db');
+}
+
 function pointerPath(dataRoot: string): string {
   return path.join(dataRoot, 'persistence-current.json');
 }
@@ -67,7 +79,7 @@ function resolveLineDbPath(dataRoot: string): string {
   } catch {
     // No pointer, or an unreadable one — treat as a fresh standalone layout.
   }
-  return legacyCacheDbPath(dataRoot);
+  return standaloneLineDbPath(dataRoot);
 }
 
 export interface StandaloneOptions {

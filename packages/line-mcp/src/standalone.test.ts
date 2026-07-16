@@ -179,4 +179,36 @@ describe('createStandaloneServer — in-process start/stop', () => {
       fs.rmSync(tmpDataDir, { recursive: true, force: true });
     }
   });
+
+  it('restarts cleanly against its own previously-persisted dataRoot (no false legacy-database refusal)', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-restart-'));
+    try {
+      // First run against a completely fresh dataRoot: no pointer, no
+      // cache/messages.db — this is the "first ever start" case.
+      const first = createStandaloneServer({ dataRoot: tmpDataDir, port: 0 });
+      await first.start();
+      await first.stop();
+
+      // The standalone server must have created its own dedicated DB file,
+      // and must NOT have created (or touched) the legacy monolith path.
+      const ownDbPath = path.join(tmpDataDir, 'line-mcp', 'messages.db');
+      const legacyDbPath = path.join(tmpDataDir, 'cache', 'messages.db');
+      expect(fs.existsSync(ownDbPath)).toBe(true);
+      expect(fs.existsSync(legacyDbPath)).toBe(false);
+
+      // Second run against the SAME dataRoot simulates a process restart.
+      // Before the fix, this incorrectly threw "legacy combined database"
+      // because the standalone server's own first run had left a file at
+      // cache/messages.db with no persistence-current.json pointer.
+      const second = createStandaloneServer({ dataRoot: tmpDataDir, port: 0 });
+      await expect(second.start()).resolves.toMatchObject({ port: expect.any(Number) });
+      await second.stop();
+
+      // Same dedicated DB file is reused across the restart, not replaced.
+      expect(fs.existsSync(ownDbPath)).toBe(true);
+      expect(fs.existsSync(legacyDbPath)).toBe(false);
+    } finally {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
 });
