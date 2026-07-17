@@ -102,6 +102,23 @@ export class MockLineState {
     this.registerScenarioTokens();
   }
 
+  setOrigin(newOrigin: string): void {
+    this.input.origin = newOrigin;
+    if (this.config) {
+      this.fixtures = buildMockFixtures({ origin: newOrigin, epochSeconds: this.config.epochSeconds });
+    } else {
+      this.fixtures = buildMockFixtures({ origin: newOrigin, epochSeconds: Math.floor(Date.now() / 1000) });
+    }
+  }
+
+  nextSessionCounter(): number {
+    return this.sessionCounter + 1;
+  }
+
+  recordRoute(route: string): void {
+    this.routeCounts[route] = (this.routeCounts[route] ?? 0) + 1;
+  }
+
   private reset(): void {
     this.config = null;
     this.issuedAccessTokens.clear();
@@ -202,24 +219,23 @@ export class MockLineState {
     };
   }
 
-  createSession(): { authSessionId: string } {
+  createSession(authSessionId?: string): { authSessionId: string } {
     this.sessionCounter += 1;
-    const authSessionId = `auth-session-${this.sessionCounter}`;
-    this.sessions.set(authSessionId, {
-      authSessionId,
+    const id = authSessionId ?? `auth-session-${this.sessionCounter}`;
+    this.sessions.set(id, {
+      authSessionId: id,
       phase: 'created',
       certificate: null,
       pinRequired: false,
       branch: null,
       issuedAuth: null,
     });
-    return { authSessionId };
+    return { authSessionId: id };
   }
 
   requireSession(authSessionId: string): Session {
     const session = this.sessions.get(authSessionId);
     if (!session) {
-      this.reject('invalid_session', '', { authSessionId });
       throw new Error(`unknown authSessionId: ${authSessionId}`);
     }
     return session;
@@ -228,7 +244,6 @@ export class MockLineState {
   markQrCreated(authSessionId: string): void {
     const session = this.requireSession(authSessionId);
     if (session.phase !== 'created') {
-      this.reject('illegal_transition', '', { authSessionId, from: session.phase, to: 'qr-created' });
       throw new Error(`illegal transition: ${session.phase} -> qr-created`);
     }
     session.phase = 'qr-created';
@@ -237,7 +252,6 @@ export class MockLineState {
   markQrVerified(authSessionId: string): void {
     const session = this.requireSession(authSessionId);
     if (session.phase !== 'qr-created') {
-      this.reject('illegal_transition', '', { authSessionId, from: session.phase, to: 'qr-verified' });
       throw new Error(`illegal transition: ${session.phase} -> qr-verified`);
     }
     session.phase = 'qr-verified';
@@ -246,7 +260,6 @@ export class MockLineState {
   verifyCertificate(authSessionId: string, certificate: string): { accepted: boolean; pinRequired: boolean } {
     const session = this.requireSession(authSessionId);
     if (session.phase !== 'qr-verified') {
-      this.reject('illegal_transition', '', { authSessionId, from: session.phase, to: 'verifyCertificate' });
       throw new Error(`illegal transition: ${session.phase} -> verifyCertificate`);
     }
     const cert = certificate.trim();
@@ -267,7 +280,6 @@ export class MockLineState {
   markPinVerified(authSessionId: string): void {
     const session = this.requireSession(authSessionId);
     if (session.phase !== 'qr-verified') {
-      this.reject('illegal_transition', '', { authSessionId, from: session.phase, to: 'pin-verified' });
       throw new Error(`illegal transition: ${session.phase} -> pin-verified`);
     }
     session.phase = 'pin-verified';
@@ -284,7 +296,6 @@ export class MockLineState {
   } {
     const session = this.requireSession(authSessionId);
     if (session.phase !== 'pin-verified' && session.phase !== 'cert-accepted') {
-      this.reject('illegal_transition', '', { authSessionId, from: session.phase, to: 'completed' });
       throw new Error(`illegal transition: ${session.phase} -> completed`);
     }
     const epoch = this.config?.epochSeconds ?? Math.floor(Date.now() / 1000);
@@ -329,13 +340,19 @@ export class MockLineState {
   }
 
   reject(kind: ExpectedRejectionKind, route: string = '', diagnostic?: unknown): void {
-    if (route) this.routeCounts[route] = (this.routeCounts[route] ?? 0) + 1;
     const remaining = this.remainingExpectedRejections[kind] ?? 0;
     if (remaining > 0) {
       this.remainingExpectedRejections[kind] = remaining - 1;
       this.observedExpectedRejections[kind] = (this.observedExpectedRejections[kind] ?? 0) + 1;
     } else {
       this.violations.push({ route, kind, diagnostic: this.redact(diagnostic) });
+    }
+  }
+
+  abandonSession(authSessionId: string): void {
+    const session = this.sessions.get(authSessionId);
+    if (session && session.phase !== 'completed') {
+      session.phase = 'completed';
     }
   }
 
