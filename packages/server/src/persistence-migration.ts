@@ -222,6 +222,20 @@ interface PointerManifest {
 
 // ─── Durable publication marker helpers ──────────────────────────────────────
 
+// Test-only seam for verifying fsync ordering without spying on the fs
+// namespace (vi.spyOn(fs, ...) is not supported in this vitest/ESM setup —
+// the fs module's properties are non-configurable). Tests set this hook via
+// __setTestEventHook and the implementation calls it at each durability step
+// inside publishPointer / ensureDurablePublicationMarker. Production code
+// never sets it; the hook is a no-op when undefined.
+let testEventHook: ((event: string) => void) | undefined = undefined;
+
+// Exported setter so tests can install/clear the hook without relying on
+// live-binding semantics. The hook variable itself stays module-private.
+export function __setTestEventHook(hook: ((event: string) => void) | undefined): void {
+  testEventHook = hook;
+}
+
 // Sentinel file written inside a generation directory at publication time
 // (BEFORE the pointer rename — see publishPointer for the ordering
 // rationale). Its presence is the durable signal that this generation was
@@ -264,11 +278,13 @@ function ensureDurablePublicationMarker(generationDir: string): void {
   const markerPath = path.join(generationDir, PUBLICATION_MARKER);
   const markerExists = safeMarkerExists(markerPath);
   const fd = fs.openSync(markerPath, markerExists ? 'r' : 'wx', 0o600);
+  testEventHook?.('repair-marker-open');
   try {
     if (!markerExists) {
       fs.writeSync(fd, new Date().toISOString());
     }
     fs.fsyncSync(fd);
+    testEventHook?.('repair-marker-fsync');
   } finally {
     fs.closeSync(fd);
   }
@@ -276,15 +292,28 @@ function ensureDurablePublicationMarker(generationDir: string): void {
   // durable before the pointer is committed (publishPointer path) or
   // before the generation is returned as authoritative (readPointer path).
   fsyncDirectory(generationDir);
+  testEventHook?.('repair-generation-dir-fsync');
 }
 
 // Checks whether the marker file exists as a regular file. Returns false
 // only for ENOENT; any other stat error is propagated (fail closed — see
-// Task 2 for the strict error-classification rationale).
+// Task 2 for the strict error-classification rationale). Uses lstatSync so
+// symlinks (including dangling ones) and directories are NOT classified as
+// "absent" — classifying a damaged marker (a replaced directory, a symlink
+// to nowhere) as absent would let discardUnpublishedGenerations delete the
+// committed generation and bootstrap publish a divergent one, losing data.
+// lstatSync on a dangling symlink does NOT throw; it returns a symlink
+// stat, so the isFile() check converts it to a throw rather than false.
 function safeMarkerExists(markerPath: string): boolean {
   try {
-    const stat = fs.statSync(markerPath);
-    return stat.isFile();
+    const stat = fs.lstatSync(markerPath);
+    if (!stat.isFile()) {
+      throw new Error(
+        `Persistence marker ${markerPath} exists but is not a regular file (possibly a directory, symlink, or special file). ` +
+        'Refusing to classify as absent — a non-file marker is a damaged data root that requires operator inspection.',
+      );
+    }
+    return true;
   } catch (err) {
     if (isErrnoCode(err, 'ENOENT')) return false;
     throw err;
@@ -429,6 +458,7 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
   } finally {
     fs.closeSync(fd);
   }
+  testEventHook?.('pointer-tmp-fsync');
 
   // Write the publication marker BEFORE the pointer rename. The marker is
   // the generation's durable "this was once committed, never silently
@@ -465,14 +495,17 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
   const markerPath = path.join(generationDir, PUBLICATION_MARKER);
   const markerExisted = safeMarkerExists(markerPath);
   const markerFd = fs.openSync(markerPath, markerExisted ? 'r' : 'wx', 0o600);
+  testEventHook?.('marker-open');
   try {
     if (!markerExisted) {
       fs.writeSync(markerFd, new Date().toISOString());
+      testEventHook?.('marker-write');
     }
     if (failAt === 'after-marker-write') {
       throw new Error('Simulated crash: after-marker-write');
     }
     fs.fsyncSync(markerFd);
+    testEventHook?.('marker-fsync');
   } finally {
     fs.closeSync(markerFd);
   }
@@ -480,6 +513,7 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
     throw new Error('Simulated crash: after-marker-fsync');
   }
   fsyncDirectory(generationDir);
+  testEventHook?.('generation-dir-fsync');
   if (failAt === 'after-generation-dir-fsync') {
     throw new Error('Simulated crash: after-generation-dir-fsync');
   }
@@ -489,6 +523,7 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
   }
 
   fs.renameSync(tmp, file);
+  testEventHook?.('pointer-rename');
 
   const dirFd = fs.openSync(dir, 'r');
   try {

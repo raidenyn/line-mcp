@@ -9,6 +9,7 @@ import {
   resolveGenerationPaths,
   validateMigrationCounts,
   recoverQuarantinedMessages,
+  __setTestEventHook,
   type ActivePersistence,
   type FailPoint,
   type MigrationReport,
@@ -695,8 +696,22 @@ describe('persistence-migration: interruption and pointer authority', () => {
     // if the marker write had not completed (no fsync, or write ordered
     // after the rename), the crash would leave either no marker or a
     // pointer file alongside it — both violating the invariant.
-    buildFixture('single-valid-auth', dataRoot);
-    expect(() => bootstrapPersistence({ dataRoot, failAt: 'before-pointer-rename' })).toThrow();
+    //
+    // In addition to the behavioral proxy, we record the ordered durability
+    // events via the test-only __setTestEventHook seam and assert the
+    // fsync ordering explicitly: the pointer tmp fsync precedes the marker
+    // open, and both the marker fsync and the generation-directory fsync
+    // precede the pointer rename. Removing any load-bearing fsync would
+    // drop the corresponding event from the recording, regressing the
+    // assertions below.
+    const events: string[] = [];
+    __setTestEventHook((e) => events.push(e));
+    try {
+      buildFixture('single-valid-auth', dataRoot);
+      expect(() => bootstrapPersistence({ dataRoot, failAt: 'before-pointer-rename' })).toThrow();
+    } finally {
+      __setTestEventHook(undefined);
+    }
 
     const gensRoot = path.join(dataRoot, 'persistence-generations');
     const onDisk = fs.readdirSync(gensRoot);
@@ -719,6 +734,20 @@ describe('persistence-migration: interruption and pointer authority', () => {
     // itself being present on disk (the dir fsync's effect is what made the
     // marker entry visible post-crash).
     expect(fs.existsSync(path.join(gensRoot, gen))).toBe(true);
+
+    // Ordered durability assertions. The crash fires at 'before-pointer-rename',
+    // so 'pointer-rename' must NOT be present; every preceding fsync must have
+    // been recorded in the required order.
+    expect(events).toContain('pointer-tmp-fsync');
+    expect(events).toContain('marker-open');
+    expect(events).toContain('marker-fsync');
+    expect(events).toContain('generation-dir-fsync');
+    expect(events).not.toContain('pointer-rename');
+    // Strict ordering: pointer tmp fsync before marker open, marker fsync
+    // before generation-dir fsync, both before any pointer rename.
+    expect(events.indexOf('pointer-tmp-fsync')).toBeLessThan(events.indexOf('marker-open'));
+    expect(events.indexOf('marker-fsync')).toBeLessThan(events.indexOf('generation-dir-fsync'));
+    expect(events.indexOf('generation-dir-fsync')).toBeLessThan(events.length);
   });
 
   it('repairs a missing marker for an authoritative pointer without changing generations', () => {
@@ -738,13 +767,33 @@ describe('persistence-migration: interruption and pointer authority', () => {
     fs.rmSync(markerPath);
     expect(fs.existsSync(markerPath)).toBe(false);
 
-    // Bootstrap with a valid pointer and all artifacts intact must RETURN
-    // THE SAME generation (no divergence) AND durably repair the marker.
-    const second = bootstrapPersistence({ dataRoot });
+    // Record the durability events fired by the repair path so we can
+    // assert the repair's fsync ordering explicitly (marker fsync before
+    // generation-dir fsync). Removing the load-bearing fsyncs in
+    // ensureDurablePublicationMarker would drop these events and regress
+    // the assertions.
+    const repairEvents: string[] = [];
+    __setTestEventHook((e) => repairEvents.push(e));
+    let second: ActivePersistence;
+    try {
+      // Bootstrap with a valid pointer and all artifacts intact must RETURN
+      // THE SAME generation (no divergence) AND durably repair the marker.
+      second = bootstrapPersistence({ dataRoot });
+    } finally {
+      __setTestEventHook(undefined);
+    }
     expect(second).toEqual(first);
     expect(fs.existsSync(markerPath)).toBe(true);
     const repairedContent = fs.readFileSync(markerPath, 'utf8');
     expect(repairedContent.length).toBeGreaterThan(0);
+
+    // The repair path durably fsynced the marker file and then the
+    // generation directory before re-authorizing the generation.
+    expect(repairEvents).toContain('repair-marker-open');
+    expect(repairEvents).toContain('repair-marker-fsync');
+    expect(repairEvents).toContain('repair-generation-dir-fsync');
+    expect(repairEvents.indexOf('repair-marker-fsync'))
+      .toBeLessThan(repairEvents.indexOf('repair-generation-dir-fsync'));
 
     // Now verify the repair is load-bearing: remove the pointer and assert
     // bootstrap fails closed on the REPAIRED marker rather than discarding
@@ -756,6 +805,84 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(fs.existsSync(first.lineDbPath)).toBe(true);
     expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
       .toEqual([first.generation]);
+  });
+
+  it('rejects a non-file marker (directory or symlink) rather than classifying as absent', () => {
+    // The data-loss bug safeMarkerExists guards against: if a committed
+    // generation's `.published` marker is replaced with a directory or a
+    // (possibly dangling) symlink, the old statSync-based implementation
+    // followed the link and returned isFile() === false, classifying the
+    // marker as "absent". discardUnpublishedGenerations would then delete
+    // the committed generation and bootstrap would publish a divergent one,
+    // silently losing the persisted messages in the committed generation's
+    // line DB. The lstatSync-based fix throws for any non-regular-file
+    // entry (directory, symlink, special file) so a damaged data root
+    // surfaces for operator inspection instead of being silently discarded.
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+    const generationDir = path.dirname(first.reportPath);
+    const markerPath = path.join(generationDir, '.published');
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    // Add a post-migration message — the canonical data the throw protects.
+    const cache = new SqliteMessageCache({ dbPath: first.lineDbPath });
+    try {
+      cache.upsertMessages(OWNER, 'cProtected', [{ id: 'mProtected', createdTime: 9999 } as never]);
+    } finally {
+      cache.close();
+    }
+
+    // Subtest A: replace the marker with a directory and remove the pointer.
+    // bootstrap must throw (fail closed) rather than delete the generation
+    // or publish a divergent active one.
+    fs.rmSync(markerPath);
+    fs.mkdirSync(markerPath);
+    fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+    // The committed generation SURVIVES — nothing was deleted.
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
+      .toEqual([first.generation]);
+    // No divergent generation was published.
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+
+    // Reset the marker to a valid file so subtest B starts clean.
+    fs.rmSync(markerPath, { recursive: true, force: true });
+    fs.writeFileSync(markerPath, new Date().toISOString());
+
+    // Subtest B: replace the marker with a (dangling) symlink and remove the
+    // pointer. lstatSync on a dangling symlink does NOT throw — it returns a
+    // symlink stat — so the isFile() check must convert that to a throw
+    // rather than treating the marker as absent.
+    fs.rmSync(markerPath);
+    fs.symlinkSync(path.join(generationDir, 'does-not-exist-target'), markerPath);
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
+      .toEqual([first.generation]);
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+
+    // Subtest C: a symlink that points at a regular file is still rejected
+    // (it is not itself a regular file via lstat). This blocks an attacker
+    // who replaces the marker with a symlink to an unrelated file to bypass
+    // the marker check.
+    fs.rmSync(markerPath);
+    const decoy = path.join(generationDir, 'decoy-target');
+    fs.writeFileSync(decoy, 'decoy');
+    fs.symlinkSync(decoy, markerPath);
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
+      .toEqual([first.generation]);
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+
+    // The protected post-migration message is still readable throughout.
+    const forensic = new SqliteMessageCache({ dbPath: first.lineDbPath });
+    try {
+      expect(forensic.getMessages(OWNER, 'cProtected').map((m) => m.id)).toEqual(['mProtected']);
+    } finally {
+      forensic.close();
+    }
   });
 
   it('rejects a pointer naming a path-traversal generation id rather than escaping dataRoot', () => {
