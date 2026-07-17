@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts", "dist"],
+  "references": [
+    { "path": "../line-client" },
+    { "path": "../line-client-sqlite" },
+    { "path": "../mcp-runtime" },
+    { "path": "../line-mcp" },
+    { "path": "../bank-mcp" }
+  ]
+}

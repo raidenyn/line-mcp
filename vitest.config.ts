@@ -6,7 +6,7 @@ export default defineConfig({
     pool: 'forks',
     testTimeout: 60_000,
     hookTimeout: 30_000,
-    include: ['tests/**/*.test.ts', 'src/**/*.test.ts'],
+    include: ['tests/**/*.test.ts', 'src/**/*.test.ts', 'packages/**/*.test.ts'],
     reporters: ['verbose'],
   },
 });

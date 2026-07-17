@@ -6,7 +6,17 @@ const tseslint = require('typescript-eslint');
 // eslint-disable-next-line no-undef -- module is not declared as a global for this file
 module.exports = tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'package/**', 'src/ltsm/ltsmSandbox.js'],
+    ignores: [
+      '**/dist/**',
+      'node_modules/**',
+      'package/**',
+      // Vendored/generated JS run outside the TS project (npm lifecycle
+      // scripts, extracted third-party sandboxes) — not part of this repo's
+      // authored TypeScript source, so it's excluded from the same-rules
+      // linting the rest of the workspace gets.
+      'packages/line-client/assets/ltsm/ltsmSandbox.js',
+      'packages/line-client/scripts/vendor-happy-dom.js',
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

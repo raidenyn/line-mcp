@@ -74,8 +74,10 @@ line-qr.png
 data/
 
 # Legacy data paths (pre-reorganization, kept for safety)
+# Root-anchored so it only matches the old top-level runtime dir, not source
+# directories that happen to be named auth/ (e.g. packages/line-mcp/src/auth).
 .line-mcp-secret
-auth/
+/auth/
 .line-templates/
 .line-cache/
 

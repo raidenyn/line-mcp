@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema#/provenance",
+  "description": "Provenance record for the LTSM crypto assets bundled with @raidenyn/line-client. These are binary/generated artifacts extracted as-is from a third-party Chrome extension, not authored by this project. See ../../THIRD_PARTY_NOTICES.md for the accompanying legal notice.",
+  "source": {
+    "extensionName": "LINE Messenger (Chrome extension)",
+    "extensionId": "ophjlpahpchlmihnnnihgmmeilfjmjjc",
+    "extensionOrigin": "chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc",
+    "sourceVersion": "3.7.2",
+    "sourceVersionEvidence": "Observed in captured HTTP traffic as the `x-line-chrome-version: 3.7.2` request header and the `&version=3.7.2` query parameter (see specs/LINE_Chrome_API_Specification.md, which documents both). The extension's own internal token derivation (`lS = tm(\"3.7.2\")`) is likewise keyed to this version string.",
+    "retrievalSource": "Installed copy of the LINE Messenger Chrome extension, Chrome Web Store distribution, extension id ophjlpahpchlmihnnnihgmmeilfjmjjc.",
+    "retrievalMethod": "Files copied as-is from the unpacked extension's installed directory; no decompilation, transpilation, or modification applied.",
+    "retrievalDate": "2026-06-11",
+    "retrievalDateEvidence": "Date of the HAR capture (ophjlpahpchlmihnnnihgmmeilfjmjjc.har) recorded against this same extension version and referenced in specs/LINE_Chrome_API_Specification.md; the ltsm assets were pulled from the same installed extension copy that produced that capture.",
+    "originalPaths": {
+      "note": "Paths as they existed inside the unpacked extension package at retrieval time. Only the two filenames themselves are independently corroborated by the extension's own runtime behavior (it fetches \"ltsm.wasm\" by that literal name, see packages/line-client/src/signer.ts); the exact original sub-directory beneath the extension root was not separately recorded beyond what's captured here.",
+      "ltsm.wasm": "<extension-root>/ltsm.wasm",
+      "ltsmSandbox.js": "<extension-root>/ltsmSandbox.js"
+    }
+  },
+  "ownership": {
+    "owner": "LINE Corporation",
+    "statement": "These files are proprietary binary/generated artifacts embedded in LINE Corporation's Chrome extension. This project does not claim any authorship or ownership over them. They are vendored here solely because @raidenyn/line-client's HMAC-signing code (packages/line-client/src/signer.ts) must load and execute the exact same WASM module and JS sandbox wrapper the real extension uses, to remain protocol-compatible with LINE's servers."
+  },
+  "redistributionStatus": {
+    "knownLicense": "none — no license grant from LINE Corporation is known or has been sought for redistribution of these files outside of running the genuine LINE Messenger Chrome extension.",
+    "riskStatement": "Redistribution of proprietary extension binaries without an explicit license is a legal risk. This is a reverse-engineering / interoperability project, not a licensed redistribution, and the assets have not been reviewed or cleared by LINE Corporation.",
+    "doNotEdit": "Do not edit, decompile, or otherwise transform these files — see packages/line-client/assets/ltsm/README.md."
+  },
+  "approvedDistributionForms": {
+    "sourceRepository": "Approved — committed to this private/internal git repository as build-time dependencies of the reverse-engineered LINE client.",
+    "dockerImage": "Approved — may be copied into internal Docker images for running this server, per existing Dockerfile practice (see CLAUDE.md).",
+    "internalTarball": "Approved — may be packed (`npm pack`) and installed from a tarball for internal use, testing, or private distribution within organizations that already have a license/right to run the genuine LINE extension (e.g. via `tests/artifacts/line-client-pack.test.ts`, which packs and installs into a temp directory as a supported-standalone-tarball smoke test, not a publish).",
+    "publicNpmPublish": "NOT approved. Publishing @raidenyn/line-client (or any package bundling these two files) to the public npm registry, or any other public package index, is explicitly blocked until a legal review of redistribution rights for these LINE Corporation assets has been completed and has granted approval. No task in issue #75 performs or should perform a public `npm publish` of this package."
+  },
+  "assets": {
+    "ltsm.wasm": {
+      "sizeBytes": 2254973,
+      "sha256": "58bb4e189ab9bbd7d72ed415258da36afd50e306cb019bab75329d4f5f1b65b3"
+    },
+    "ltsmSandbox.js": {
+      "sizeBytes": 5028088,
+      "sha256": "bdc9398d348ec8a0e8cf76479df82a638c1078c92fcb73f89e0db2eadda0c5b6"
+    }
+  }
+}

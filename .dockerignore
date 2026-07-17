@@ -1,9 +1,18 @@
-node_modules
+# Regenerated inside the build — never send from the host context.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+# Local state, VCS, and CI/dev-only trees.
 .git
+.github
+.devcontainer
+.superpowers
 data
-dist
-*.md
-!docs/guide/**
+coverage
 .env
 .env.*
-coverage
+
+# Design/planning scratch that must never enter an image.
+docs/superpowers
+specs/proposals

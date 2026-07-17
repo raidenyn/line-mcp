@@ -1,0 +1,33 @@
+{
+  "name": "@raidenyn/bank-mcp",
+  "version": "1.0.0",
+  "description": "Bank/transaction MCP product package: template-driven transaction parsing and reporting tools.",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "assets",
+    "docs"
+  ],
+  "type": "commonjs",
+  "dependencies": {
+    "@raidenyn/line-client": "^1.0.0",
+    "@raidenyn/mcp-runtime": "^1.0.0",
+    "better-sqlite3": "^12.11.1",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}

@@ -1,0 +1,721 @@
+import * as crypto from 'crypto';
+import { getHmac, initStorageKey, signForAccount } from './signer';
+
+const BASE_URL = 'https://line-chrome-gw.line-apps.com';
+
+const BASE_HEADERS: Record<string, string> = {
+  accept: 'application/json, text/plain, */*',
+  'accept-language': 'en-US',
+  'content-type': 'application/json',
+  origin: 'chrome-extension://ophjlpahpchlmihnnnihgmmeilfjmjjc',
+  'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36',
+  'x-lal': 'en_US',
+  'x-line-chrome-version': '3.7.2',
+};
+
+export interface AuthData {
+  accessToken: string;
+  refreshToken: string;
+  certificate: string;
+  mid: string;
+  wrappedNonce: string;
+  kdfParameter1: string;
+  kdfParameter2: string;
+}
+
+export interface Chat {
+  mid: string;
+  name: string;
+  type: 'group' | 'user';
+  memberCount?: number;
+  pictureUrl?: string;
+}
+
+export interface Message {
+  id: string;
+  from: string;
+  senderName?: string;
+  to: string;
+  toType: number;
+  createdTime: string;
+  contentType: number;
+  text?: string;
+  hasContent: boolean;
+  contentMetadata?: Record<string, string>;
+  previewUrl?: string;
+  downloadUrl?: string;
+}
+
+interface RawMessage {
+  id: string;
+  from: string;
+  to: string;
+  toType: number;
+  createdTime: string;
+  deliveredTime?: string;
+  contentType: number;
+  text?: string;
+  hasContent: boolean;
+  contentMetadata?: Record<string, string>;
+}
+
+class LineHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly path: string,
+    readonly apiStatus?: number,
+  ) {
+    super(`HTTP ${status} on ${path}`);
+  }
+}
+
+class LineApiError extends Error {
+  constructor(
+    readonly code: number,
+    readonly path: string,
+    readonly nestedCode?: number,
+  ) {
+    super(`LINE API error ${code} on ${path}`);
+  }
+}
+
+export class LineClient {
+  private auth: AuthData | null = null;
+  private completedAuth: AuthData | null = null;
+  private contactNameCache = new Map<string, string>();
+  private pendingLogin: (() => Promise<void>) | null = null;
+  private pendingLoginError: Error | null = null;
+  private pendingAuthSessionId: string | null = null;
+  private pendingCertificate: string | null = null;
+  private pendingLongPollingMaxCount = 2;
+  // Resolves with the PIN code once createPinCode is called, or null if no PIN needed
+  private loginPinPromise: Promise<string | null> | null = null;
+  private loginPinResolve: ((v: string | null) => void) | null = null;
+  private pinAcknowledged = false;
+  // Aborts all in-flight fetch calls when a new login() cancels the previous session
+  private loginAbortController: AbortController | null = null;
+  private loginGeneration = 0;
+
+  // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
+  private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
+
+  constructor(
+    auth?: AuthData | null,
+    private readonly fetchFn: typeof globalThis.fetch = globalThis.fetch,
+    private readonly onTokenRefreshed?: (snapshot: Readonly<AuthData>) => void | Promise<void>,
+  ) {
+    // Clone rather than store the caller's reference: refreshIfExpired() mutates
+    // this.auth in place, and doing that on the caller's own object would be a
+    // hidden side effect on state the caller still holds a reference to. The
+    // refreshed data is instead surfaced explicitly via onTokenRefreshed below.
+    if (auth) this.auth = { ...auth };
+  }
+
+  isAuthenticated(): boolean {
+    return this.auth !== null || this.pendingLogin !== null;
+  }
+
+  getCompletedAuth(): AuthData | null {
+    return this.completedAuth;
+  }
+
+  async getProfileDisplayName(): Promise<string> {
+    if (!this.auth) throw new Error('Not authenticated');
+    const profile = await this.request<{ mid: string; displayName: string }>(
+      '/api/talk/thrift/Talk/TalkService/getProfile',
+      [2],
+    );
+    if (profile.mid !== this.auth.mid) throw new Error('LINE profile MID mismatch');
+    const displayName = profile.displayName?.trim();
+    if (!displayName) throw new Error('LINE profile missing display name');
+    return displayName;
+  }
+
+  async waitForPin(): Promise<string | null> {
+    return this.loginPinPromise;
+  }
+
+  async waitForCompletion(): Promise<void> {
+    if (this.pendingLogin) await this.pendingLogin();
+    if (this.pendingLoginError) throw this.pendingLoginError;
+  }
+
+  private async request<T>(
+    path: string,
+    args: unknown[],
+    opts: { longPoll?: boolean; sessionId?: string; signal?: AbortSignal; unauthenticated?: boolean } = {},
+  ): Promise<T> {
+    const body = JSON.stringify(args);
+    const accessToken = opts.unauthenticated ? '' : this.auth?.accessToken ?? '';
+    // Once the account's real storage-key material is known (wrappedNonce is
+    // populated), sign via signForAccount(): it checks the loaded storage key
+    // and computes the HMAC as one atomic queued operation, so a concurrent
+    // request for a *different* account can't swap the loaded storage key out
+    // from under this one between the check and the sign (see signer.ts).
+    // Unauthenticated calls and the brief in-flight window during login (after
+    // qrCodeLoginV2 but before getEncryptedIdentityV3 resolves the identity,
+    // when wrappedNonce is still '') fall back to plain getHmac, exactly as
+    // before — there is no account-scoped storage key to coordinate yet.
+    const hmac = !opts.unauthenticated && this.auth?.wrappedNonce
+      ? await signForAccount(
+          {
+            mid: this.auth.mid,
+            wrappedNonce: this.auth.wrappedNonce,
+            kdfParameter1: this.auth.kdfParameter1,
+            kdfParameter2: this.auth.kdfParameter2,
+          },
+          { accessToken, path, body },
+        )
+      : await getHmac({ accessToken, path, body });
+
+    const headers: Record<string, string> = {
+      ...BASE_HEADERS,
+      'x-hmac': hmac,
+    };
+    if (!opts.unauthenticated && this.auth?.accessToken) {
+      headers['x-line-access'] = this.auth.accessToken;
+    }
+    if (opts.longPoll) {
+      headers['x-lst'] = '150000';
+      if (opts.sessionId) headers['x-line-session-id'] = opts.sessionId;
+    }
+
+    const response = await this.fetchFn(BASE_URL + path, {
+      method: 'POST',
+      headers,
+      body,
+      signal: opts.signal,
+    });
+
+    if (!response.ok) {
+      const errBody = await response.text().catch(() => '');
+      let apiStatus: number | undefined;
+      try {
+        const parsed = JSON.parse(errBody) as { statusCode?: unknown };
+        if (typeof parsed.statusCode === 'number') apiStatus = parsed.statusCode;
+      } catch {
+        // Non-JSON error responses have no status metadata beyond HTTP status.
+      }
+      process.stderr.write(`[LINE] HTTP ${response.status} on ${path}\n`);
+      throw new LineHttpError(response.status, path, apiStatus);
+    }
+    const rawText = await response.text();
+    const json = JSON.parse(rawText) as { code: number; message: string; data: T };
+    if (json.code !== 0) {
+      const nestedCode = typeof (json.data as { code?: unknown } | null)?.code === 'number'
+        ? (json.data as { code: number }).code
+        : undefined;
+      throw new LineApiError(json.code, path, nestedCode);
+    }
+    return json.data;
+  }
+
+  private jwtExp(): number {
+    if (!this.auth) return 0;
+    try {
+      const payload = Buffer.from(this.auth.accessToken.split('.')[1], 'base64').toString('utf8');
+      return (JSON.parse(payload) as { exp: number }).exp;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async refreshIfExpired(): Promise<void> {
+    if (!this.auth) return;
+    const exp = this.jwtExp();
+    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return;
+
+    const mid = this.auth.mid;
+    const auth = this.auth;
+
+    if (!LineClient.refreshLocks.has(mid)) {
+      const p = (async () => {
+        const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
+          method: 'POST',
+          headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: auth.refreshToken }),
+        });
+        if (!response.ok) return null;
+        const data = await response.json() as { accessToken: string; refreshToken?: string };
+        auth.accessToken = data.accessToken;
+        if (data.refreshToken) auth.refreshToken = data.refreshToken;
+        // Pass an immutable snapshot rather than relying on the caller having
+        // kept a reference to the (now-mutated) internal `auth` object.
+        await this.onTokenRefreshed?.({ ...auth });
+        return data;
+      })().finally(() => { LineClient.refreshLocks.delete(mid); });
+      LineClient.refreshLocks.set(mid, p);
+      await p;
+    } else {
+      // Another concurrent request is refreshing — wait and apply the result
+      const data = await LineClient.refreshLocks.get(mid)!;
+      if (data) {
+        this.auth.accessToken = data.accessToken;
+        if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
+      }
+    }
+  }
+
+  private async ensureAuthenticated(): Promise<void> {
+    if (this.pendingLogin) {
+      // If PIN hasn't been shown yet, wait for it to become available, then surface it
+      if (this.loginPinPromise && !this.pinAcknowledged) {
+        const pin = await this.loginPinPromise;
+        if (pin !== null) {
+          this.pinAcknowledged = true;
+          throw new Error(
+            `PIN required: Enter "${pin}" in your LINE mobile app to confirm the login, then call list_chats again.`,
+          );
+        }
+      }
+      // PIN not needed (certificate accepted) or already acknowledged — wait for full completion
+      await this.pendingLogin();
+      // If we reach here, the current session succeeded. An aborted previous session's .catch()
+      // may have set pendingLoginError (AbortError) before we got here — clear it so callers
+      // don't see a stale failure after a successful re-login.
+      this.pendingLoginError = null;
+    }
+    if (this.pendingLoginError) {
+      throw new Error(`Login failed: ${this.pendingLoginError.message}`);
+    }
+    if (!this.auth) {
+      throw new Error('Not authenticated. Call the login tool first and scan the QR code.');
+    }
+    // Storage-key selection now happens inside request() itself, atomically with
+    // the HMAC computation (see signForAccount in signer.ts) — no separate
+    // ensure-then-sign pair of queued operations that a concurrent request for
+    // another account could interleave with.
+    await this.refreshIfExpired();
+  }
+
+  async login(certificate?: string): Promise<{ qrUrl: string }> {
+    const generation = ++this.loginGeneration;
+    // Cancel any in-flight HTTP requests from a previous login session
+    if (this.loginAbortController) {
+      this.loginAbortController.abort();
+    }
+    const abortController = new AbortController();
+    this.loginAbortController = abortController;
+    // QR bootstrap must not reuse an existing account credential.
+    this.auth = null;
+    this.completedAuth = null;
+    this.pendingLogin = null;
+    this.pendingLoginError = null;
+    this.pendingAuthSessionId = null;
+    this.pendingCertificate = null;
+
+    const { authSessionId } = await this.request<{ authSessionId: string }>(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      [{}],
+      { unauthenticated: true },
+    );
+
+    const { callbackUrl, longPollingMaxCount } = await this.request<{
+      callbackUrl: string;
+      longPollingMaxCount: number;
+      longPollingIntervalSec: number;
+    }>(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode',
+      [{ authSessionId }],
+      { unauthenticated: true },
+    );
+
+    if (generation !== this.loginGeneration) return { qrUrl: callbackUrl };
+
+    // Generate a valid X25519 (Curve25519) keypair — LINE mobile app performs
+    // ECDH with the public key, so it must be a valid curve point.
+    const { publicKey: pubKeyObj } = crypto.generateKeyPairSync('x25519', {
+      publicKeyEncoding: { type: 'spki', format: 'der' },
+    });
+    // SPKI DER wraps the 32-byte raw key with a 12-byte header; strip the header.
+    const rawPublicKey = Buffer.from(pubKeyObj).slice(-32);
+    // Chrome extension uses window.btoa (standard base64) and adds e2eeVersion=1
+    const qrUrlObj = new URL(callbackUrl);
+    qrUrlObj.searchParams.set('secret', rawPublicKey.toString('base64'));
+    qrUrlObj.searchParams.set('e2eeVersion', '1');
+    const qrUrl = qrUrlObj.toString();
+
+    // Save the caller-selected certificate for verification after QR scan confirmation.
+    this.pendingCertificate = certificate?.trim() ? certificate : null;
+
+    this.pendingAuthSessionId = authSessionId;
+    this.pendingLongPollingMaxCount = longPollingMaxCount ?? 2;
+
+    // Set up PIN signal promise before starting background task
+    this.pinAcknowledged = false;
+    this.loginPinPromise = new Promise<string | null>(resolve => {
+      this.loginPinResolve = resolve;
+    });
+
+    // Start the long-poll immediately so it's active while the user scans.
+    // completeLogin() blocks on checkQrCodeVerified — must be running before scan.
+    this.pendingLoginError = null;
+    const completionPromise = this.completeLogin(
+      generation,
+      authSessionId,
+      this.pendingCertificate,
+      this.pendingLongPollingMaxCount,
+      abortController,
+    ).catch((err: Error) => {
+      if (generation !== this.loginGeneration) return;
+      this.pendingLoginError = err;
+      if (this.pendingLogin === loginCompletion) {
+        this.pendingLogin = null;
+      }
+      this.loginPinResolve?.(null);
+      this.loginPinResolve = null;
+      process.stderr.write('[LINE] Login completion failed\n');
+    });
+    const loginCompletion = () => completionPromise;
+    this.pendingLogin = loginCompletion;
+
+    return { qrUrl };
+  }
+
+  private async completeLogin(
+    generation: number,
+    authSessionId: string,
+    certificate: string | null,
+    longPollingMaxCount: number,
+    abortController: AbortController,
+  ): Promise<void> {
+
+    // Long-poll until QR is scanned. A 400 means the session may already be confirmed
+    // (race: mobile confirmed before our poll registered) — treat as success and proceed.
+    for (let i = 0; i < longPollingMaxCount; i++) {
+      try {
+        process.stderr.write(`[LINE] checkQrCodeVerified attempt ${i + 1}/${longPollingMaxCount}\n`);
+        await this.request(
+          '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified',
+          [{ authSessionId }],
+          { longPoll: true, sessionId: authSessionId, signal: abortController.signal },
+        );
+        if (generation !== this.loginGeneration) return;
+        break;
+      } catch (err) {
+        process.stderr.write('[LINE] checkQrCodeVerified failed\n');
+        if (generation !== this.loginGeneration) return;
+        if (err instanceof LineHttpError && (err.status === 400 || err.status === 403)) {
+          // 400/403 may mean the scan already completed before our poll arrived — proceed anyway
+          break;
+        }
+        if (i === longPollingMaxCount - 1) throw err;
+      }
+    }
+
+    // verifyCertificate is always required as a state-machine transition on the server.
+    // With a valid saved certificate it skips PIN; with no/invalid certificate the server
+    // returns an error and we proceed to PIN flow.
+    let pinRequired = true;
+    try {
+      await this.request(
+        '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate',
+        [{ authSessionId, certificate: certificate ?? '' }],
+      );
+      if (generation !== this.loginGeneration) return;
+      pinRequired = false; // Certificate accepted — skip PIN
+    } catch (err) {
+      if (generation !== this.loginGeneration) return;
+      const isCertificateRejection =
+        err instanceof LineApiError && err.code === 10051 && err.nestedCode === 2;
+      if (!isCertificateRejection) {
+        throw err; // Transient network or 5xx — don't silently swallow
+      }
+      process.stderr.write('[LINE] verifyCertificate: certificate rejected, proceeding with PIN\n');
+    }
+
+    if (pinRequired) {
+      // Get PIN from server and signal it to any waiting list_chats call
+      const pinData = await this.request<{ pinCode: string }>(
+        '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode',
+        [{ authSessionId }],
+      );
+      if (generation !== this.loginGeneration) return;
+      const pinCode = pinData.pinCode;
+      this.loginPinResolve?.(pinCode);
+      this.loginPinResolve = null;
+
+      // Long-poll until user enters PIN in LINE mobile app. LINE may return 410
+      // when the long-poll window expires without a response — retry in that case.
+      process.stderr.write(`[LINE] Waiting for PIN entry...\n`);
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await this.request(
+            '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified',
+            [{ authSessionId }],
+            { longPoll: true, sessionId: authSessionId, signal: abortController.signal },
+          );
+          if (generation !== this.loginGeneration) return;
+          break; // confirmed
+        } catch (err) {
+          if (generation !== this.loginGeneration) return;
+          // 410 = long-poll window expired but session is still alive — retry
+          if (err instanceof LineHttpError && err.status === 400 && err.apiStatus === 410) {
+            process.stderr.write(`[LINE] checkPinCodeVerified poll expired (attempt ${attempt + 1}), retrying...\n`);
+            continue;
+          }
+          throw err;
+        }
+      }
+      process.stderr.write(`[LINE] PIN confirmed\n`);
+    } else {
+      if (generation !== this.loginGeneration) return;
+      this.loginPinResolve?.(null);
+      this.loginPinResolve = null;
+    }
+
+    const loginData = await this.request<{
+      certificate: string;
+      tokenV3IssueResult: { accessToken: string; refreshToken: string };
+      mid: string;
+    }>(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2',
+      [{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }],
+    );
+
+    const { accessToken, refreshToken } = loginData.tokenV3IssueResult;
+
+    if (generation !== this.loginGeneration) return;
+
+    // Set auth so HMAC uses accessToken for the identity fetch below
+    this.auth = {
+      accessToken,
+      refreshToken,
+      certificate: loginData.certificate,
+      mid: loginData.mid,
+      wrappedNonce: '',
+      kdfParameter1: '',
+      kdfParameter2: '',
+    };
+
+    const identityData = await this.request<{
+      wrappedNonce: string;
+      kdfParameter1: string;
+      kdfParameter2: string;
+    }>('/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3', []);
+
+    if (generation !== this.loginGeneration) return;
+
+    await initStorageKey({
+      mid: loginData.mid,
+      wrappedNonce: identityData.wrappedNonce,
+      kdfParameter1: identityData.kdfParameter1,
+      kdfParameter2: identityData.kdfParameter2,
+    });
+
+    if (generation !== this.loginGeneration) return;
+
+    this.completedAuth = {
+      accessToken,
+      refreshToken,
+      certificate: loginData.certificate,
+      mid: loginData.mid,
+      wrappedNonce: identityData.wrappedNonce,
+      kdfParameter1: identityData.kdfParameter1,
+      kdfParameter2: identityData.kdfParameter2,
+    };
+    this.auth = this.completedAuth;
+
+    this.pendingLogin = null;
+    this.pendingAuthSessionId = null;
+  }
+
+  async listChats(): Promise<Chat[]> {
+    await this.ensureAuthenticated();
+
+    const [chatMidsData, contactIds] = await Promise.all([
+      this.request<{ memberChatMids: string[]; invitedChatMids: string[] }>(
+        '/api/talk/thrift/Talk/TalkService/getAllChatMids',
+        [{ withMemberChats: true, withInvitedChats: true }, 2],
+      ),
+      this.request<string[]>('/api/talk/thrift/Talk/TalkService/getAllContactIds', [2]),
+    ]);
+
+    const groupMids = chatMidsData.memberChatMids ?? [];
+
+    const [groupChatsData, contactsData] = await Promise.all([
+      groupMids.length > 0
+        ? this.request<{ chats: Array<{ chatMid: string; chatName: string; memberCount: number; picturePath?: string }> }>(
+            '/api/talk/thrift/Talk/TalkService/getChats',
+            [{ chatMids: groupMids }, 2],
+          )
+        : Promise.resolve({ chats: [] }),
+      contactIds.length > 0
+        ? this.fetchContactsV2(contactIds)
+        : Promise.resolve([] as Array<{ mid: string; displayName: string; pictureStatus?: string }>),
+    ]);
+
+    const groups: Chat[] = (groupChatsData.chats ?? []).map((c) => ({
+      mid: c.chatMid,
+      name: c.chatName,
+      type: 'group' as const,
+      memberCount: c.memberCount,
+      pictureUrl: c.picturePath ? `https://profile.line-scdn.net${c.picturePath}/preview` : undefined,
+    }));
+
+    const contacts: Chat[] = contactsData.map((c) => ({
+      mid: c.mid,
+      name: c.displayName,
+      type: 'user' as const,
+      pictureUrl: c.pictureStatus ? `https://profile.line-scdn.net/${c.pictureStatus}/preview` : undefined,
+    }));
+
+    for (const c of contactsData) {
+      this.contactNameCache.set(c.mid, c.displayName);
+    }
+
+    return [...groups, ...contacts];
+  }
+
+  private async fetchContactsV2(
+    mids: string[],
+  ): Promise<Array<{ mid: string; displayName: string; pictureStatus?: string }>> {
+    const batches: string[][] = [];
+    for (let i = 0; i < mids.length; i += 50) {
+      batches.push(mids.slice(i, i + 50));
+    }
+    const batchResults = await Promise.all(
+      batches.map(async (batch) => {
+        const data = await this.request<{
+          contacts: Record<string, { contact: { mid: string; displayName: string; pictureStatus?: string } }>;
+        }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }]);
+        return Object.values(data.contacts ?? {})
+          .filter((entry) => entry?.contact != null)
+          .map((entry) => ({
+            mid: entry.contact.mid,
+            displayName: entry.contact.displayName,
+            pictureStatus: entry.contact.pictureStatus,
+          }));
+      }),
+    );
+    return batchResults.flat();
+  }
+
+  private async fetchRawPage(chatMid: string, count: number): Promise<RawMessage[]> {
+    return this.request<RawMessage[]>(
+      '/api/talk/thrift/Talk/TalkService/getRecentMessagesV2',
+      [chatMid, count],
+    );
+  }
+
+  private async fetchPreviousRawPage(
+    chatMid: string,
+    endMessageId: { messageId: string; deliveredTime: string },
+    count: number,
+  ): Promise<RawMessage[]> {
+    return this.request<RawMessage[]>(
+      '/api/talk/thrift/Talk/TalkService/getPreviousMessagesV2WithRequest',
+      [{ messageBoxId: chatMid, endMessageId, messagesCount: count }, 1],
+    );
+  }
+
+  private async resolveContactNames(mids: string[]): Promise<void> {
+    const unknownMids = [...new Set(mids)].filter(mid => !this.contactNameCache.has(mid));
+    if (unknownMids.length > 0) {
+      const resolved = await this.fetchContactsV2(unknownMids);
+      for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
+    }
+  }
+
+  private mapRawMessages(raw: RawMessage[]): Message[] {
+    return (raw ?? []).map((m) => ({
+      id: m.id,
+      from: m.from,
+      senderName: this.contactNameCache.get(m.from),
+      to: m.to,
+      toType: m.toType,
+      createdTime: m.createdTime,
+      contentType: m.contentType,
+      text: m.text,
+      hasContent: m.hasContent,
+      contentMetadata: m.contentMetadata,
+      previewUrl: m.contentType === 1 ? m.contentMetadata?.['PREVIEW_URL'] : undefined,
+      downloadUrl: m.contentType === 1 ? m.contentMetadata?.['DOWNLOAD_URL'] : undefined,
+    }));
+  }
+
+  async getMessages(chatMid: string, count = 50, resolveNames = true): Promise<Message[]> {
+    await this.ensureAuthenticated();
+    const raw = await this.fetchRawPage(chatMid, count);
+    if (resolveNames) {
+      await this.resolveContactNames((raw ?? []).map(m => m.from));
+    }
+    return this.mapRawMessages(raw);
+  }
+
+  async getMessagesInRange(
+    chatMid: string,
+    sinceMs: number,
+    resolveNames = true,
+    pageSize = 200,
+  ): Promise<Message[]> {
+    await this.ensureAuthenticated();
+
+    const MAX_ITERATIONS = 1000;
+
+    const firstPage = await this.fetchRawPage(chatMid, pageSize);
+    const page0 = firstPage ?? [];
+
+    // Dedupe by message id. A Set is seeded from the first page so that any
+    // boundary message re-included by getPreviousMessagesV2WithRequest is
+    // dropped on subsequent iterations rather than accumulated.
+    const seenIds = new Set<string>(page0.map(m => m.id));
+    const allRaw: RawMessage[] = [...page0];
+
+    let currentPage = page0;
+    let iterations = 0;
+    while (currentPage.length >= pageSize && iterations < MAX_ITERATIONS) {
+      iterations++;
+
+      const oldest = currentPage.reduce((a, b) =>
+        parseInt(a.createdTime, 10) < parseInt(b.createdTime, 10) ? a : b,
+      );
+      const oldestTime = parseInt(oldest.createdTime, 10);
+      if (oldestTime < sinceMs) break;
+
+      const prevPage = await this.fetchPreviousRawPage(
+        chatMid,
+        { messageId: oldest.id, deliveredTime: oldest.deliveredTime ?? oldest.createdTime },
+        pageSize,
+      );
+      const page = prevPage ?? [];
+
+      // Keep only genuinely new messages, dropping any boundary re-includes.
+      const fresh = page.filter(m => !seenIds.has(m.id));
+
+      // Progress guard (issue #37): the oldest timestamp of the fresh
+      // messages must move strictly backwards relative to the current
+      // page's oldest. If the API re-uses the boundary (fresh is empty) or
+      // returns a full page pinned to the same millisecond (clock tie),
+      // there is no forward progress and we break — discarding the non-
+      // advancing messages — to avoid a non-terminating loop.
+      if (fresh.length === 0) break;
+      const freshOldestTime = fresh.reduce((min, m) => {
+        const t = parseInt(m.createdTime, 10);
+        return t < min ? t : min;
+      }, Infinity);
+      if (freshOldestTime >= oldestTime) break;
+
+      for (const m of fresh) seenIds.add(m.id);
+      allRaw.push(...fresh);
+
+      currentPage = page;
+    }
+
+    const filtered = allRaw.filter(m => parseInt(m.createdTime, 10) >= sinceMs);
+
+    if (resolveNames) {
+      await this.resolveContactNames(filtered.map(m => m.from));
+    }
+
+    return this.mapRawMessages(filtered);
+  }
+
+  async getImageBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }> {
+    const response = await this.fetchFn(url);
+    if (!response.ok) throw new Error(`Image fetch failed: ${response.status} ${url}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim() ?? 'image/jpeg';
+    return { buffer, mimeType };
+  }
+}

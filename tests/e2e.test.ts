@@ -1,8 +1,9 @@
-import { beforeAll, afterAll, it, expect } from 'vitest';
+import { describe, beforeAll, afterAll, it, expect } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import * as crypto from 'crypto';
 import * as http from 'http';
 import { spawn, ChildProcess } from 'child_process';
@@ -16,8 +17,13 @@ let transport: StreamableHTTPClientTransport;
 let serverProcess: ChildProcess;
 let authJson: string;
 let testToken: string;
+let isolatedDataDir: string;
 let firstChatMid: string;
 let imagePreviewUrl: string | null = null;
+
+function mkdtemp(prefix: string): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+}
 
 type CallToolResult = Awaited<ReturnType<Client['callTool']>>;
 
@@ -51,237 +57,252 @@ async function waitForServer(baseUrl: string, timeoutMs = 30_000): Promise<void>
   throw new Error('Server did not become ready in time');
 }
 
-beforeAll(async () => {
-  authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
-  testToken = crypto.randomBytes(32).toString('hex');
+// This suite spawns the real composed server (issue #75, Task 11:
+// packages/server/src/cli.ts — the same entry point `npm start` runs) against
+// a genuine LINE account (via .line-auth.json). Startup-order and
+// old-volume-migration coverage now lives in packages/server/src/startup.test.ts,
+// which runs in-process against the composed server's own createServer()
+// factory and needs neither a real LINE account nor a spawned child process —
+// it is part of `npm run test:unit` and does not require this suite's setup.
+describe('LINE MCP server e2e (real account)', () => {
+  beforeAll(async () => {
+    authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
+    testToken = crypto.randomBytes(32).toString('hex');
+    // Isolated DATA_DIR: since the server now runs bootstrapPersistence() on
+    // every boot (Task 3 cutover), the spawned child must never be allowed to
+    // migrate the developer's real data/ directory.
+    isolatedDataDir = mkdtemp('line-mcp-e2e-data-');
 
-  serverProcess = spawn(
-    'npx',
-    ['ts-node', path.join(PROJECT_ROOT, 'src', 'index.ts')],
-    {
-      cwd: PROJECT_ROOT,
-      env: {
-        ...process.env,
-        PORT: String(PORT),
-        LINE_AUTH_DATA: authJson,
-        TEST_TOKEN: testToken,
+    serverProcess = spawn(
+      'npx',
+      ['ts-node', path.join(PROJECT_ROOT, 'packages', 'server', 'src', 'cli.ts')],
+      {
+        cwd: PROJECT_ROOT,
+        env: {
+          ...process.env,
+          PORT: String(PORT),
+          LINE_AUTH_DATA: authJson,
+          TEST_TOKEN: testToken,
+          DATA_DIR: isolatedDataDir,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+        detached: true, // spawn as process group leader so we can kill the whole group
       },
-      stdio: ['ignore', 'ignore', 'pipe'],
-      detached: true, // spawn as process group leader so we can kill the whole group
-    },
-  );
+    );
 
-  serverProcess.stderr?.on('data', (chunk: Buffer) => {
-    process.stderr.write(`[server] ${chunk}`);
-  });
-
-  await waitForServer(`http://localhost:${PORT}`, 30_000);
-
-  transport = new StreamableHTTPClientTransport(MCP_URL, {
-    requestInit: { headers: { Authorization: `Bearer ${testToken}` } },
-  });
-  mcpClient = new Client({ name: 'e2e-test', version: '1.0.0' });
-  await mcpClient.connect(transport);
-}, 60_000);
-
-afterAll(async () => {
-  // Categories are global (not per-chat) and persist in the real data/ dir — always
-  // clean up test-created categories so this suite never leaks state into production use.
-  try {
-    await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
-    await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
-  } catch {
-    // best-effort cleanup
-  }
-  await transport?.close().catch(() => {});
-  try {
-    // Kill the whole process group (npx → ts-node → node) so nothing lingers on the port
-    process.kill(-serverProcess.pid!, 'SIGTERM');
-  } catch {
-    serverProcess.kill();
-  }
-});
-
-it('list_chats returns at least one chat with a mid', async () => {
-  const result = await mcpClient.callTool({ name: 'list_chats', arguments: {} });
-  expect(result.isError).toBeFalsy();
-  const text = extractText(result);
-  expect(text).toMatch(/\[(?:GROUP|USER)\]/);
-  const mids = [...text.matchAll(/^\s+mid:\s+(\S+)/gm)].map((m) => m[1]);
-  expect(mids.length).toBeGreaterThan(0);
-  firstChatMid = mids[0];
-  (globalThis as Record<string, unknown>).__allChatMids = mids;
-});
-
-it('get_messages returns messages for a valid chatMid', async () => {
-  const allMids: string[] = ((globalThis as Record<string, unknown>).__allChatMids as string[]) ?? [firstChatMid];
-  let messagesText: string | null = null;
-  for (const mid of allMids) {
-    const result = await mcpClient.callTool({
-      name: 'get_messages',
-      arguments: { chatMid: mid, count: 20 },
+    serverProcess.stderr?.on('data', (chunk: Buffer) => {
+      process.stderr.write(`[server] ${chunk}`);
     });
-    if (result.isError) continue;
+
+    await waitForServer(`http://localhost:${PORT}`, 30_000);
+
+    transport = new StreamableHTTPClientTransport(MCP_URL, {
+      requestInit: { headers: { Authorization: `Bearer ${testToken}` } },
+    });
+    mcpClient = new Client({ name: 'e2e-test', version: '1.0.0' });
+    await mcpClient.connect(transport);
+  }, 60_000);
+
+  afterAll(async () => {
+    // Categories are global (not per-chat) and persist in the isolated data dir — always
+    // clean up test-created categories so this suite never leaks state across runs.
+    try {
+      await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
+      await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
+    } catch {
+      // best-effort cleanup
+    }
+    await transport?.close().catch(() => {});
+    try {
+      // Kill the whole process group (npx → ts-node → node) so nothing lingers on the port
+      process.kill(-serverProcess.pid!, 'SIGTERM');
+    } catch {
+      serverProcess.kill();
+    }
+    fs.rmSync(isolatedDataDir, { recursive: true, force: true });
+  });
+
+  it('list_chats returns at least one chat with a mid', async () => {
+    const result = await mcpClient.callTool({ name: 'list_chats', arguments: {} });
+    expect(result.isError).toBeFalsy();
     const text = extractText(result);
-    if (text === 'No messages found.') continue;
-    messagesText = text;
-    firstChatMid = mid;
-    break;
-  }
-  if (!messagesText) {
-    console.warn('No chat with messages found — skipping timestamp assertion');
-    return;
-  }
-  expect(messagesText).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
-  const previewMatch = messagesText.match(/\(preview:\s+(https?:\/\/\S+)\)/);
-  if (previewMatch) imagePreviewUrl = previewMatch[1];
-});
-
-it('get_messages rejects count > 200', async () => {
-  expect(firstChatMid).toBeTruthy();
-  const result = await mcpClient.callTool({
-    name: 'get_messages',
-    arguments: { chatMid: firstChatMid, count: 999 },
+    expect(text).toMatch(/\[(?:GROUP|USER)\]/);
+    const mids = [...text.matchAll(/^\s+mid:\s+(\S+)/gm)].map((m) => m[1]);
+    expect(mids.length).toBeGreaterThan(0);
+    firstChatMid = mids[0];
+    (globalThis as Record<string, unknown>).__allChatMids = mids;
   });
-  expect(result.isError).toBe(true);
-});
 
-it('get_image returns a base64 image when a previewUrl is available', async ({ skip }) => {
-  if (!imagePreviewUrl) {
-    skip();
-  }
-  const result = await mcpClient.callTool({
-    name: 'get_image',
-    arguments: { url: imagePreviewUrl },
-  });
-  expect(result.isError).toBeFalsy();
-  const item = result.content[0];
-  expect(item.type).toBe('image');
-  if (item.type === 'image') {
-    expect(item.mimeType).toMatch(/^image\//);
-    expect(Buffer.from(item.data, 'base64').length).toBeGreaterThan(0);
-  }
-});
-
-it('get_image returns isError for a bad URL', async () => {
-  const result = await mcpClient.callTool({
-    name: 'get_image',
-    arguments: { url: 'https://invalid.example.test/no-such.jpg' },
-  });
-  expect(result.isError).toBe(true);
-  expect(extractText(result)).toMatch(/Failed to fetch image/);
-});
-
-it('summarize_transactions accepts chatMid directly', async () => {
-  expect(firstChatMid).toBeTruthy();
-  const result = await mcpClient.callTool({
-    name: 'summarize_transactions',
-    arguments: { chatMid: firstChatMid, group_by: 'month' },
-  });
-  // Either a valid summary or "no saved templates" — both prove the new interface is wired
-  const text = extractText(result);
-  const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
-  const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
-  expect(isValidSummary || isNoTemplatesError).toBe(true);
-});
-
-it('manage_categories upsert/list/delete round-trip', async () => {
-  const upsertResult = await mcpClient.callTool({
-    name: 'manage_categories',
-    arguments: { action: 'upsert', category: { name: 'E2E-Test-Category', pattern: 'DOES_NOT_MATCH_ANYTHING_XYZ123' } },
-  });
-  expect(upsertResult.isError).toBeFalsy();
-
-  const listAfterUpsert = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
-  const categoriesAfterUpsert = JSON.parse(listAfterUpsert) as Array<{ name: string; pattern: string }>;
-  expect(categoriesAfterUpsert.find((c) => c.name === 'E2E-Test-Category')?.pattern).toBe('DOES_NOT_MATCH_ANYTHING_XYZ123');
-
-  const deleteResult = await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
-  expect(deleteResult.isError).toBeFalsy();
-
-  const listAfterDelete = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
-  const categoriesAfterDelete = listAfterDelete.startsWith('[') ? (JSON.parse(listAfterDelete) as Array<{ name: string }>) : [];
-  expect(categoriesAfterDelete.find((c) => c.name === 'E2E-Test-Category')).toBeUndefined();
-});
-
-it('get_transactions stamps a category on every transaction it returns', async () => {
-  // Catchall pattern matches merchant/rawText on any transaction, proving categorize()
-  // runs against real parsed data end-to-end — not just unit-level mocked transactions.
-  const upsertResult = await mcpClient.callTool({
-    name: 'manage_categories',
-    arguments: { action: 'upsert', category: { name: 'E2E-Catchall', pattern: '.' } },
-  });
-  expect(upsertResult.isError).toBeFalsy();
-
-  // firstChatMid is picked for message presence, not saved-template presence — search all
-  // known chats for one that actually has templates, so this test exercises real transaction
-  // data whenever any chat in the account has saved templates.
-  const allMids: string[] = ((globalThis as Record<string, unknown>).__allChatMids as string[]) ?? [firstChatMid];
-  let transactions: Array<{ category?: string }> | null = null;
-  for (const mid of allMids) {
-    const result = await mcpClient.callTool({ name: 'get_transactions', arguments: { chatMid: mid } });
-    const parsed = (() => { try { return JSON.parse(extractText(result)) as Array<{ category?: string }>; } catch { return null; } })();
-    if (parsed !== null) {
-      transactions = parsed;
+  it('get_messages returns messages for a valid chatMid', async () => {
+    const allMids: string[] = ((globalThis as Record<string, unknown>).__allChatMids as string[]) ?? [firstChatMid];
+    let messagesText: string | null = null;
+    for (const mid of allMids) {
+      const result = await mcpClient.callTool({
+        name: 'get_messages',
+        arguments: { chatMid: mid, count: 20 },
+      });
+      if (result.isError) continue;
+      const text = extractText(result);
+      if (text === 'No messages found.') continue;
+      messagesText = text;
+      firstChatMid = mid;
       break;
     }
-  }
-
-  if (transactions === null) {
-    // No chat in the account has saved templates — categorization has nothing to run
-    // against. Still proves the tool is wired; parsing/categorizing logic is unit-tested.
-    console.warn('No chat with saved templates found — skipping category-value assertions');
-  } else {
-    expect(transactions.length).toBeGreaterThan(0);
-    for (const tx of transactions) {
-      expect(typeof tx.category).toBe('string');
-      expect(tx.category!.length).toBeGreaterThan(0);
+    if (!messagesText) {
+      console.warn('No chat with messages found — skipping timestamp assertion');
+      return;
     }
-  }
-
-  await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
-});
-
-it('summarize_transactions accepts group_by: category', async () => {
-  expect(firstChatMid).toBeTruthy();
-  const result = await mcpClient.callTool({
-    name: 'summarize_transactions',
-    arguments: { chatMid: firstChatMid, group_by: 'category' },
+    expect(messagesText).toMatch(/\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+    const previewMatch = messagesText.match(/\(preview:\s+(https?:\/\/\S+)\)/);
+    if (previewMatch) imagePreviewUrl = previewMatch[1];
   });
-  const text = extractText(result);
-  const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
-  const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
-  expect(isValidSummary || isNoTemplatesError).toBe(true);
-});
 
-it('resources/list returns all 11 guide URIs', async () => {
-  const result = await mcpClient.listResources();
-  const uris = result.resources.map((r) => r.uri);
-  const expected = [
-    'line://guide',
-    'line://guide/tools/list_chats',
-    'line://guide/tools/get_messages',
-    'line://guide/tools/get_image',
-    'line://guide/tools/sample_messages',
-    'line://guide/tools/manage_templates',
-    'line://guide/tools/manage_categories',
-    'line://guide/tools/get_transactions',
-    'line://guide/tools/summarize_transactions',
-    'line://guide/tools/initiate_import',
-    'line://guide/tools/complete_import',
-  ];
-  for (const uri of expected) {
-    expect(uris).toContain(uri);
-  }
-});
+  it('get_messages rejects count > 200', async () => {
+    expect(firstChatMid).toBeTruthy();
+    const result = await mcpClient.callTool({
+      name: 'get_messages',
+      arguments: { chatMid: firstChatMid, count: 999 },
+    });
+    expect(result.isError).toBe(true);
+  });
 
-it('resources/read returns non-empty markdown for line://guide', async () => {
-  const result = await mcpClient.readResource({ uri: 'line://guide' });
-  expect(result.contents).toHaveLength(1);
-  const item = result.contents[0];
-  expect(item.mimeType).toBe('text/markdown');
-  expect('text' in item).toBe(true);
-  if ('text' in item) {
-    expect(item.text.length).toBeGreaterThan(0);
-  }
+  it('get_image returns a base64 image when a previewUrl is available', async ({ skip }) => {
+    if (!imagePreviewUrl) {
+      skip();
+    }
+    const result = await mcpClient.callTool({
+      name: 'get_image',
+      arguments: { url: imagePreviewUrl },
+    });
+    expect(result.isError).toBeFalsy();
+    const item = result.content[0];
+    expect(item.type).toBe('image');
+    if (item.type === 'image') {
+      expect(item.mimeType).toMatch(/^image\//);
+      expect(Buffer.from(item.data, 'base64').length).toBeGreaterThan(0);
+    }
+  });
+
+  it('get_image returns isError for a bad URL', async () => {
+    const result = await mcpClient.callTool({
+      name: 'get_image',
+      arguments: { url: 'https://invalid.example.test/no-such.jpg' },
+    });
+    expect(result.isError).toBe(true);
+    expect(extractText(result)).toMatch(/Failed to fetch image/);
+  });
+
+  it('summarize_transactions accepts chatMid directly', async () => {
+    expect(firstChatMid).toBeTruthy();
+    const result = await mcpClient.callTool({
+      name: 'summarize_transactions',
+      arguments: { chatMid: firstChatMid, group_by: 'month' },
+    });
+    // Either a valid summary or "no saved templates" — both prove the new interface is wired
+    const text = extractText(result);
+    const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+    const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
+    expect(isValidSummary || isNoTemplatesError).toBe(true);
+  });
+
+  it('manage_categories upsert/list/delete round-trip', async () => {
+    const upsertResult = await mcpClient.callTool({
+      name: 'manage_categories',
+      arguments: { action: 'upsert', category: { name: 'E2E-Test-Category', pattern: 'DOES_NOT_MATCH_ANYTHING_XYZ123' } },
+    });
+    expect(upsertResult.isError).toBeFalsy();
+
+    const listAfterUpsert = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
+    const categoriesAfterUpsert = JSON.parse(listAfterUpsert) as Array<{ name: string; pattern: string }>;
+    expect(categoriesAfterUpsert.find((c) => c.name === 'E2E-Test-Category')?.pattern).toBe('DOES_NOT_MATCH_ANYTHING_XYZ123');
+
+    const deleteResult = await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Test-Category' } });
+    expect(deleteResult.isError).toBeFalsy();
+
+    const listAfterDelete = extractText(await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'list' } }));
+    const categoriesAfterDelete = listAfterDelete.startsWith('[') ? (JSON.parse(listAfterDelete) as Array<{ name: string }>) : [];
+    expect(categoriesAfterDelete.find((c) => c.name === 'E2E-Test-Category')).toBeUndefined();
+  });
+
+  it('get_transactions stamps a category on every transaction it returns', async () => {
+    // Catchall pattern matches merchant/rawText on any transaction, proving categorize()
+    // runs against real parsed data end-to-end — not just unit-level mocked transactions.
+    const upsertResult = await mcpClient.callTool({
+      name: 'manage_categories',
+      arguments: { action: 'upsert', category: { name: 'E2E-Catchall', pattern: '.' } },
+    });
+    expect(upsertResult.isError).toBeFalsy();
+
+    // firstChatMid is picked for message presence, not saved-template presence — search all
+    // known chats for one that actually has templates, so this test exercises real transaction
+    // data whenever any chat in the account has saved templates.
+    const allMids: string[] = ((globalThis as Record<string, unknown>).__allChatMids as string[]) ?? [firstChatMid];
+    let transactions: Array<{ category?: string }> | null = null;
+    for (const mid of allMids) {
+      const result = await mcpClient.callTool({ name: 'get_transactions', arguments: { chatMid: mid } });
+      const parsed = (() => { try { return JSON.parse(extractText(result)) as Array<{ category?: string }>; } catch { return null; } })();
+      if (parsed !== null) {
+        transactions = parsed;
+        break;
+      }
+    }
+
+    if (transactions === null) {
+      // No chat in the account has saved templates — categorization has nothing to run
+      // against. Still proves the tool is wired; parsing/categorizing logic is unit-tested.
+      console.warn('No chat with saved templates found — skipping category-value assertions');
+    } else {
+      expect(transactions.length).toBeGreaterThan(0);
+      for (const tx of transactions) {
+        expect(typeof tx.category).toBe('string');
+        expect(tx.category!.length).toBeGreaterThan(0);
+      }
+    }
+
+    await mcpClient.callTool({ name: 'manage_categories', arguments: { action: 'delete', name: 'E2E-Catchall' } });
+  });
+
+  it('summarize_transactions accepts group_by: category', async () => {
+    expect(firstChatMid).toBeTruthy();
+    const result = await mcpClient.callTool({
+      name: 'summarize_transactions',
+      arguments: { chatMid: firstChatMid, group_by: 'category' },
+    });
+    const text = extractText(result);
+    const isValidSummary = (() => { try { JSON.parse(text); return true; } catch { return false; } })();
+    const isNoTemplatesError = text.includes('No templates') || text.includes('no saved templates');
+    expect(isValidSummary || isNoTemplatesError).toBe(true);
+  });
+
+  it('resources/list returns all 11 guide URIs', async () => {
+    const result = await mcpClient.listResources();
+    const uris = result.resources.map((r) => r.uri);
+    const expected = [
+      'line://guide',
+      'line://guide/tools/list_chats',
+      'line://guide/tools/get_messages',
+      'line://guide/tools/get_image',
+      'line://guide/tools/sample_messages',
+      'line://guide/tools/manage_templates',
+      'line://guide/tools/manage_categories',
+      'line://guide/tools/get_transactions',
+      'line://guide/tools/summarize_transactions',
+      'line://guide/tools/initiate_import',
+      'line://guide/tools/complete_import',
+    ];
+    for (const uri of expected) {
+      expect(uris).toContain(uri);
+    }
+  });
+
+  it('resources/read returns non-empty markdown for line://guide', async () => {
+    const result = await mcpClient.readResource({ uri: 'line://guide' });
+    expect(result.contents).toHaveLength(1);
+    const item = result.contents[0];
+    expect(item.mimeType).toBe('text/markdown');
+    expect('text' in item).toBe(true);
+    if ('text' in item) {
+      expect(item.text.length).toBeGreaterThan(0);
+    }
+  });
 });

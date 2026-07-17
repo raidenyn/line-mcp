@@ -1,0 +1,912 @@
+import { describe, it, expect, vi } from 'vitest';
+
+// Mock signer so no WASM is loaded
+vi.mock('./signer', () => ({
+  getHmac: vi.fn().mockResolvedValue('fake-hmac'),
+  initStorageKey: vi.fn().mockResolvedValue(undefined),
+  ensureStorageKey: vi.fn().mockResolvedValue(undefined),
+  signForAccount: vi.fn().mockResolvedValue('fake-hmac'),
+}));
+
+import { LineClient, AuthData } from './client';
+import { getHmac } from './signer';
+
+// JWT with exp 10 days from now so refreshIfExpired never triggers
+function makeFakeJwt(expOffsetSec = 86400 * 10): string {
+  const payload = Buffer.from(
+    JSON.stringify({ exp: Math.floor(Date.now() / 1000) + expOffsetSec }),
+  ).toString('base64url');
+  return `header.${payload}.sig`;
+}
+
+const baseAuth: AuthData = {
+  accessToken: makeFakeJwt(),
+  refreshToken: 'rt',
+  certificate: 'cert',
+  mid: 'u123',
+  wrappedNonce: 'wn',
+  kdfParameter1: 'k1',
+  kdfParameter2: 'k2',
+};
+
+function apiOk(data: unknown): Response {
+  return new Response(JSON.stringify({ code: 0, message: 'ok', data }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function apiErr(code: number, message: string, data: unknown = null): Response {
+  return new Response(JSON.stringify({ code, message, data }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function httpErr(status: number, body = 'error body'): Response {
+  return new Response(body, { status });
+}
+
+// ───────────────────────────────────────────────────────────
+// Initial state
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient — initial state', () => {
+  it('isAuthenticated() returns false with no auth', () => {
+    const client = new LineClient();
+    expect(client.isAuthenticated()).toBe(false);
+  });
+
+  it('isAuthenticated() returns true when auth is passed to constructor', () => {
+    const client = new LineClient(baseAuth);
+    expect(client.isAuthenticated()).toBe(true);
+  });
+
+  it('getCompletedAuth() returns null before login', () => {
+    const client = new LineClient(baseAuth);
+    expect(client.getCompletedAuth()).toBeNull();
+  });
+
+  it('waitForPin() resolves to null when no login is in progress', async () => {
+    // No pending login promise — waitForPin returns the stored null promise
+    const client = new LineClient(baseAuth);
+    // loginPinPromise is null → waitForPin() returns it; await null resolves to null
+    const result = await client.waitForPin();
+    expect(result).toBeNull();
+  });
+
+  it('waitForCompletion() resolves immediately when no pending login', async () => {
+    const client = new LineClient(baseAuth);
+    await expect(client.waitForCompletion()).resolves.toBeUndefined();
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// getImageBuffer
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.getImageBuffer', () => {
+  it('returns buffer and mimeType on success', async () => {
+    const imageBytes = Buffer.from([0xff, 0xd8, 0xff]);
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(imageBytes, {
+        status: 200,
+        headers: { 'content-type': 'image/jpeg' },
+      }),
+    );
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getImageBuffer('https://example.com/img.jpg');
+    expect(result.mimeType).toBe('image/jpeg');
+    expect(result.buffer).toEqual(imageBytes);
+  });
+
+  it('strips charset from content-type', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(Buffer.from([1]), {
+        status: 200,
+        headers: { 'content-type': 'image/png; charset=utf-8' },
+      }),
+    );
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getImageBuffer('https://example.com/img.png');
+    expect(result.mimeType).toBe('image/png');
+  });
+
+  it('defaults mimeType to image/jpeg when content-type header is absent', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(Buffer.from([1]), { status: 200 }),
+    );
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getImageBuffer('https://example.com/img');
+    expect(result.mimeType).toBe('image/jpeg');
+  });
+
+  it('throws on non-ok response', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(httpErr(404));
+    const client = new LineClient(baseAuth, mockFetch);
+    await expect(client.getImageBuffer('https://example.com/img.jpg')).rejects.toThrow('404');
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// listChats
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.listChats', () => {
+  function makeFetch(routes: Record<string, unknown>) {
+    return vi.fn().mockImplementation((url: string) => {
+      for (const [fragment, data] of Object.entries(routes)) {
+        if (url.includes(fragment)) return Promise.resolve(apiOk(data));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+  }
+
+  it('returns groups and contacts merged', async () => {
+    const mockFetch = makeFetch({
+      getAllChatMids: { memberChatMids: ['g1'], invitedChatMids: [] },
+      getAllContactIds: ['u1'],
+      getChats: {
+        chats: [{ chatMid: 'g1', chatName: 'Test Group', memberCount: 5, picturePath: null }],
+      },
+      getContactsV2: {
+        contacts: {
+          u1: { contact: { mid: 'u1', displayName: 'Alice', pictureStatus: null } },
+        },
+      },
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+
+    expect(chats).toHaveLength(2);
+    const group = chats.find((c) => c.type === 'group');
+    const user = chats.find((c) => c.type === 'user');
+    expect(group).toMatchObject({ mid: 'g1', name: 'Test Group', memberCount: 5 });
+    expect(user).toMatchObject({ mid: 'u1', name: 'Alice' });
+  });
+
+  it('handles empty contacts list', async () => {
+    const mockFetch = makeFetch({
+      getAllChatMids: { memberChatMids: ['g1'], invitedChatMids: [] },
+      getAllContactIds: [],
+      getChats: { chats: [{ chatMid: 'g1', chatName: 'Solo Group', memberCount: 1 }] },
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+    expect(chats).toHaveLength(1);
+    expect(chats[0].type).toBe('group');
+  });
+
+  it('handles empty groups list', async () => {
+    const mockFetch = makeFetch({
+      getAllChatMids: { memberChatMids: [], invitedChatMids: [] },
+      getAllContactIds: ['u2'],
+      getContactsV2: {
+        contacts: {
+          u2: { contact: { mid: 'u2', displayName: 'Bob' } },
+        },
+      },
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+    expect(chats).toHaveLength(1);
+    expect(chats[0].type).toBe('user');
+  });
+
+  it('builds pictureUrl from picturePath for groups', async () => {
+    const mockFetch = makeFetch({
+      getAllChatMids: { memberChatMids: ['g1'], invitedChatMids: [] },
+      getAllContactIds: [],
+      getChats: {
+        chats: [{ chatMid: 'g1', chatName: 'G', memberCount: 2, picturePath: '/pic/abc' }],
+      },
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+    expect(chats[0].pictureUrl).toBe('https://profile.line-scdn.net/pic/abc/preview');
+  });
+
+  it('builds pictureUrl from pictureStatus for contacts', async () => {
+    const mockFetch = makeFetch({
+      getAllChatMids: { memberChatMids: [], invitedChatMids: [] },
+      getAllContactIds: ['u1'],
+      getContactsV2: {
+        contacts: {
+          u1: { contact: { mid: 'u1', displayName: 'Alice', pictureStatus: 'pic123' } },
+        },
+      },
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+    expect(chats[0].pictureUrl).toBe('https://profile.line-scdn.net/pic123/preview');
+  });
+
+  it('throws when LINE API returns non-zero code', async () => {
+    const mockFetch = vi.fn().mockImplementation(() => Promise.resolve(apiErr(401, 'not authed')));
+    const client = new LineClient(baseAuth, mockFetch);
+    await expect(client.listChats()).rejects.toThrow('LINE API error 401');
+  });
+
+  it('throws when HTTP response is non-ok', async () => {
+    const mockFetch = vi.fn().mockImplementation(() => Promise.resolve(httpErr(500)));
+    const client = new LineClient(baseAuth, mockFetch);
+    await expect(client.listChats()).rejects.toThrow('HTTP 500');
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// getMessages
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.getMessages', () => {
+  const rawMessages = [
+    {
+      id: 'm1',
+      from: 'u1',
+      to: 'g1',
+      toType: 2,
+      createdTime: '1700000000000',
+      contentType: 0,
+      text: 'Hello',
+      hasContent: false,
+    },
+    {
+      id: 'm2',
+      from: 'u2',
+      to: 'g1',
+      toType: 2,
+      createdTime: '1700000001000',
+      contentType: 1,
+      hasContent: true,
+      contentMetadata: {
+        PREVIEW_URL: 'https://obs.line-cdn.net/preview/img.jpg',
+        DOWNLOAD_URL: 'https://obs.line-cdn.net/img.jpg',
+      },
+    },
+  ];
+
+  function makeFetch(messages = rawMessages, contacts?: Record<string, unknown>) {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(messages));
+      if (url.includes('getContactsV2'))
+        return Promise.resolve(
+          apiOk({
+            contacts: contacts ?? {
+              u1: { contact: { mid: 'u1', displayName: 'Alice' } },
+              u2: { contact: { mid: 'u2', displayName: 'Bob' } },
+            },
+          }),
+        );
+      return Promise.resolve(apiOk(null));
+    });
+  }
+
+  it('resolves sender names from contacts', async () => {
+    const client = new LineClient(baseAuth, makeFetch());
+    const messages = await client.getMessages('g1', 50);
+    expect(messages[0].senderName).toBe('Alice');
+    expect(messages[1].senderName).toBe('Bob');
+  });
+
+  it('sets previewUrl and downloadUrl for image messages (contentType 1)', async () => {
+    const client = new LineClient(baseAuth, makeFetch());
+    const messages = await client.getMessages('g1', 50);
+    const imgMsg = messages.find((m) => m.contentType === 1);
+    expect(imgMsg?.previewUrl).toBe('https://obs.line-cdn.net/preview/img.jpg');
+    expect(imgMsg?.downloadUrl).toBe('https://obs.line-cdn.net/img.jpg');
+  });
+
+  it('does not set previewUrl for non-image messages', async () => {
+    const client = new LineClient(baseAuth, makeFetch());
+    const messages = await client.getMessages('g1', 50);
+    const textMsg = messages.find((m) => m.contentType === 0);
+    expect(textMsg?.previewUrl).toBeUndefined();
+    expect(textMsg?.downloadUrl).toBeUndefined();
+  });
+
+  it('returns empty array for empty response', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(apiOk([]));
+    const client = new LineClient(baseAuth, mockFetch);
+    const messages = await client.getMessages('g1', 50);
+    expect(messages).toHaveLength(0);
+  });
+
+  it('uses cached contact names and skips re-fetching', async () => {
+    const mockFetch = makeFetch();
+    const client = new LineClient(baseAuth, mockFetch);
+
+    // First call populates the cache
+    await client.getMessages('g1', 2);
+    const callsAfterFirst = mockFetch.mock.calls.length;
+
+    // Second call with the same senders should not fetch contacts again
+    await client.getMessages('g1', 2);
+    const callsAfterSecond = mockFetch.mock.calls.length;
+
+    // Only getRecentMessagesV2 was called again, not getContactsV2
+    expect(callsAfterSecond - callsAfterFirst).toBe(1);
+  });
+
+  it('leaves senderName undefined when contact resolution fails', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(rawMessages));
+      if (url.includes('getContactsV2')) return Promise.resolve(apiOk({ contacts: {} }));
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const messages = await client.getMessages('g1', 50);
+    expect(messages[0].senderName).toBeUndefined();
+  });
+
+  it('throws on LINE API error', async () => {
+    const mockFetch = vi.fn().mockImplementation(() => Promise.resolve(apiErr(500, 'internal')));
+    const client = new LineClient(baseAuth, mockFetch);
+    await expect(client.getMessages('g1', 10)).rejects.toThrow('LINE API error 500');
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// JWT expiry parsing
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient — JWT expiry', () => {
+  it('refreshes token when JWT exp is within 24 hours', async () => {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600; // 1h from now
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+
+    const newToken = makeFakeJwt();
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('tokenRefresh'))
+        return Promise.resolve(
+          new Response(JSON.stringify({ accessToken: newToken }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      if (url.includes('getAllChatMids')) return Promise.resolve(apiOk({ memberChatMids: [], invitedChatMids: [] }));
+      if (url.includes('getAllContactIds')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+
+    const auth: AuthData = { ...baseAuth, accessToken: soonJwt };
+    const onTokenRefreshed = vi.fn();
+    const client = new LineClient(auth, mockFetch, onTokenRefreshed);
+    await client.listChats();
+
+    const refreshCall = mockFetch.mock.calls.find(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCall).toBeTruthy();
+    // The fresh token is surfaced via the onTokenRefreshed callback as an
+    // immutable snapshot — the caller's own `auth` object must NOT be mutated
+    // in place (that used to be how callers picked up the refreshed token,
+    // which meant refreshIfExpired() silently mutated shared caller state).
+    expect(onTokenRefreshed).toHaveBeenCalledWith(expect.objectContaining({ accessToken: newToken }));
+    expect(auth.accessToken).toBe(soonJwt);
+  });
+
+  it('does not refresh when JWT exp is more than 24 hours away', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getAllChatMids')) return Promise.resolve(apiOk({ memberChatMids: [], invitedChatMids: [] }));
+      if (url.includes('getAllContactIds')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    await client.listChats();
+
+    const refreshCall = mockFetch.mock.calls.find(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCall).toBeFalsy();
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// Contact name batching
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient — contact batching in fetchContactsV2', () => {
+  it('batches contacts into groups of 50', async () => {
+    const mids = Array.from({ length: 110 }, (_, i) => `u${i}`);
+
+    const mockFetch = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (url.includes('getAllChatMids')) return Promise.resolve(apiOk({ memberChatMids: [], invitedChatMids: [] }));
+      if (url.includes('getAllContactIds')) return Promise.resolve(apiOk(mids));
+      if (url.includes('getContactsV2')) {
+        // Return only the mids requested in this batch
+        const body = JSON.parse((opts?.body as string) ?? '[[]]');
+        const batch: string[] = body[0]?.targetUserMids ?? [];
+        const contacts: Record<string, unknown> = {};
+        for (const mid of batch) contacts[mid] = { contact: { mid, displayName: mid } };
+        return Promise.resolve(apiOk({ contacts }));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+
+    const client = new LineClient(baseAuth, mockFetch);
+    const chats = await client.listChats();
+
+    const contactCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getContactsV2'),
+    );
+    // 110 contacts → ceil(110/50) = 3 batches
+    expect(contactCalls.length).toBe(3);
+    expect(chats.filter((c) => c.type === 'user')).toHaveLength(110);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// getMessagesInRange
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.getMessagesInRange', () => {
+  function rawMsg(id: string, createdTime: string, from = 'u1') {
+    return { id, from, to: 'g1', toType: 2, createdTime, contentType: 0, text: 'txt', hasContent: false };
+  }
+
+  it('returns empty array when no messages exist', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false);
+    expect(result).toHaveLength(0);
+  });
+
+  it('returns messages within range from a single page', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1700000002000'),
+          rawMsg('m2', '1700000003000'),
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000001000, false);
+    expect(result).toHaveLength(2);
+    expect(result.map(m => m.id)).toEqual(['m1', 'm2']);
+  });
+
+  it('filters out messages older than sinceMs', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000'), // before sinceMs
+          rawMsg('m2', '1700000002000'), // after sinceMs
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('m2');
+  });
+
+  it('paginates backwards and stops when oldest message is before sinceMs', async () => {
+    // pageSize=2: first page is full → triggers pagination
+    // second page contains one message before sinceMs → stops
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m3', '1700000003000'),
+          rawMsg('m4', '1700000004000'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000'), // before sinceMs
+          rawMsg('m2', '1700000002000'), // after sinceMs
+        ]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // m1 filtered out; m2, m3, m4 kept
+    expect(result).toHaveLength(3);
+    expect(result.map(m => m.id).sort()).toEqual(['m2', 'm3', 'm4']);
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+  });
+
+  it('stops pagination when previous page is empty (end of history)', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1700000001000'),
+          rawMsg('m2', '1700000002000'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([]));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    expect(result).toHaveLength(2);
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+  });
+
+  it('resolves contact names once across all pages', async () => {
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m3', '1700000003000', 'u1'),
+          rawMsg('m4', '1700000004000', 'u2'),
+        ]));
+      }
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk([
+          rawMsg('m1', '1699999999000', 'u3'), // before sinceMs — filtered out
+          rawMsg('m2', '1700000002000', 'u4'),
+        ]));
+      }
+      if (url.includes('getContactsV2')) {
+        return Promise.resolve(apiOk({
+          contacts: {
+            u1: { contact: { mid: 'u1', displayName: 'Alice' } },
+            u2: { contact: { mid: 'u2', displayName: 'Bob' } },
+            u4: { contact: { mid: 'u4', displayName: 'Dave' } },
+          },
+        }));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, true, 2);
+    const contactCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getContactsV2'),
+    );
+    expect(contactCalls).toHaveLength(1); // one batch for all in-range messages
+    expect(result.find(m => m.id === 'm4')?.senderName).toBe('Bob');
+    expect(result.find(m => m.id === 'm2')?.senderName).toBe('Dave');
+  });
+
+  // Progress guard tests (issue #37): non-advancing pagination must terminate
+
+  it('terminates when the boundary message is re-included by every previous-page call', async () => {
+    // pageSize=2, first page is full and above sinceMs. The previous-page API
+    // re-includes the boundary message (oldest of the current page) every call,
+    // alongside genuinely older messages — so without a progress guard the
+    // loop would re-request the same boundary forever.
+    const recent = [
+      rawMsg('m4', '1700000004000'),
+      rawMsg('m3', '1700000003000'),
+    ];
+    // First previous-page call: re-includes m3 (the boundary) plus an older m2.
+    // Second previous-page call: re-includes m2 (now the boundary) plus older m1.
+    // Third previous-page call: re-includes m1 plus nothing newer → m1 is the
+    // boundary again and the only returned message is m1 itself.
+    const prevPages = [
+      [rawMsg('m3', '1700000003000'), rawMsg('m2', '1700000002000')],
+      [rawMsg('m2', '1700000002000'), rawMsg('m1', '1699999999000')],
+      [rawMsg('m1', '1699999999000')],
+    ];
+    let prevCall = 0;
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(recent));
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk(prevPages[prevCall++] ?? []));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // No duplicates despite boundary re-inclusion.
+    const ids = result.map(m => m.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    // m1 (before sinceMs) filtered out; m2, m3, m4 kept.
+    expect(ids.sort()).toEqual(['m2', 'm3', 'm4']);
+    // Loop must terminate: at most prevPages.length previous-page calls.
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls.length).toBeLessThanOrEqual(prevPages.length);
+  });
+
+  it('terminates when a full page is returned at the same createdTime (clock tie)', async () => {
+    // pageSize=2, first page is full and above sinceMs. The previous-page API
+    // returns a full page whose every message shares the current oldest
+    // createdTime (clock collision). Without a strict-backwards guard the
+    // loop would never advance past that millisecond.
+    const recent = [
+      rawMsg('m4', '1700000004000'),
+      rawMsg('m3', '1700000003000'),
+    ];
+    let prevCall = 0;
+    const prevPages = [
+      // Both at the same ms as m3 (the current oldest). Different ids, so a
+      // naive dedupe-only guard would still loop forever.
+      [rawMsg('m5', '1700000003000'), rawMsg('m6', '1700000003000')],
+    ];
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('getRecentMessagesV2')) return Promise.resolve(apiOk(recent));
+      if (url.includes('getPreviousMessagesV2WithRequest')) {
+        return Promise.resolve(apiOk(prevPages[prevCall++] ?? []));
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient(baseAuth, mockFetch);
+    const result = await client.getMessagesInRange('g1', 1700000000000, false, 2);
+    // Loop terminates after the single non-advancing previous-page call.
+    const prevCalls = mockFetch.mock.calls.filter(([url]: string[]) =>
+      url.includes('getPreviousMessagesV2WithRequest'),
+    );
+    expect(prevCalls).toHaveLength(1);
+    // m3, m4 from the recent page are in range and kept.
+    expect(result.map(m => m.id).sort()).toEqual(['m3', 'm4']);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// Concurrent refresh deduplication
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient — concurrent refresh deduplication', () => {
+  function makeSoonAuth(mid: string): AuthData {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600;
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+    return { ...baseAuth, mid, accessToken: soonJwt };
+  }
+
+  function makeRefreshFetch() {
+    return vi.fn().mockImplementation((url: string) => {
+      if (url.includes('tokenRefresh'))
+        return Promise.resolve(new Response(JSON.stringify({ accessToken: makeFakeJwt() }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }));
+      if (url.includes('getAllChatMids')) return Promise.resolve(apiOk({ memberChatMids: [], invitedChatMids: [] }));
+      if (url.includes('getAllContactIds')) return Promise.resolve(apiOk([]));
+      return Promise.resolve(apiOk(null));
+    });
+  }
+
+  it('two instances with the same mid fire only one tokenRefresh call', async () => {
+    const auth = makeSoonAuth('concurrent-mid-1');
+    const mockFetch = makeRefreshFetch();
+    const client1 = new LineClient(auth, mockFetch);
+    const client2 = new LineClient(auth, mockFetch);
+
+    await Promise.all([client1.listChats(), client2.listChats()]);
+
+    const refreshCalls = mockFetch.mock.calls.filter(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCalls).toHaveLength(1);
+  });
+
+  it('calls onTokenRefreshed exactly once after a successful refresh', async () => {
+    const auth = makeSoonAuth('callback-mid-1');
+    const mockFetch = makeRefreshFetch();
+    const callback = vi.fn();
+    const client = new LineClient(auth, mockFetch, callback);
+
+    await client.listChats();
+
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LineClient QR login', () => {
+  function makeLoginFetch(verifyResponse: Response) {
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      const headers = init?.headers as Record<string, string>;
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) return apiOk({ authSessionId: 'session-1' });
+      if (url.includes('createQrCode')) return apiOk({
+        callbackUrl: 'https://line.me/R/nv/QRLogin?sid=session-1',
+        longPollingMaxCount: 1,
+        longPollingIntervalSec: 1,
+      });
+      if (url.includes('checkQrCodeVerified')) return apiOk({});
+      if (url.includes('verifyCertificate')) return verifyResponse;
+      if (url.includes('createPinCode')) return apiOk({ pinCode: '123456' });
+      if (url.includes('checkPinCodeVerified')) return apiOk({});
+      if (url.includes('qrCodeLoginV2')) return apiOk({
+        certificate: 'replacement-cert',
+        tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+        mid: 'u123',
+      });
+      if (url.includes('getEncryptedIdentityV3')) return apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      });
+      return apiOk({});
+    });
+    return { fetchFn, calls };
+  }
+
+  it('uses an explicit certificate, keeps QR bootstrap unauthenticated, and skips PIN when accepted', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiOk({}));
+    const client = new LineClient(baseAuth, fetchFn);
+    vi.mocked(getHmac).mockClear();
+
+    await client.login('saved-cert');
+    await expect(client.waitForPin()).resolves.toBeNull();
+    await client.waitForCompletion();
+
+    const bootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'));
+    expect(bootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    expect(vi.mocked(getHmac).mock.calls.slice(0, 2).every(([input]) => input.accessToken === '')).toBe(true);
+    const verify = calls.find(call => call.url.includes('verifyCertificate'))!;
+    expect(verify.body).toEqual([{ authSessionId: 'session-1', certificate: 'saved-cert' }]);
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+    expect(calls.some(call => call.url.includes('checkPinCodeVerified'))).toBe(false);
+  });
+
+  it('falls back to one PIN flow for LINE certificate rejection status', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+    await client.waitForCompletion();
+
+    expect(calls.filter(call => call.url.includes('createPinCode'))).toHaveLength(1);
+    expect(calls.filter(call => call.url.includes('checkPinCodeVerified'))).toHaveLength(1);
+    expect(client.getCompletedAuth()?.certificate).toBe('replacement-cert');
+  });
+
+  it('delivers a rejected-certificate PIN without writing it to stderr', async () => {
+    const pinCode = '123456';
+    const { fetchFn } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe(pinCode);
+    await client.waitForCompletion();
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(pinCode);
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate server failure', async () => {
+    const { fetchFn, calls } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on a verifyCertificate API server error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(500, 'internal server error'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 500');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('fails login instead of entering PIN on an unrelated verifyCertificate client error', async () => {
+    const { fetchFn, calls } = makeLoginFetch(apiErr(400, 'bad request'));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('LINE API error 400');
+    expect(calls.some(call => call.url.includes('createPinCode'))).toBe(false);
+  });
+
+  it('omits remote error text from login diagnostics', async () => {
+    const remoteErrorText = 'access-token-secret refresh-token-secret certificate-secret identity-secret';
+    const { fetchFn } = makeLoginFetch(httpErr(500, remoteErrorText));
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await client.waitForPin();
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
+    expect(logs).not.toContain(remoteErrorText);
+    expect(logs).toContain('[LINE] HTTP 500');
+  });
+
+  it('keeps a newer QR bootstrap unauthenticated when a superseded login completes', async () => {
+    let resolveFirstPoll: (() => void) | undefined;
+    let resolveSecondSession: (() => void) | undefined;
+    const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
+    let sessionCount = 0;
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      const body = JSON.parse(String(init?.body ?? '[]')) as unknown[];
+      calls.push({ url, body, headers });
+      if (url.includes('createSession')) {
+        sessionCount += 1;
+        if (sessionCount === 2) {
+          return new Promise<Response>(resolve => {
+            resolveSecondSession = () => resolve(apiOk({ authSessionId: 'session-2' }));
+          });
+        }
+        return Promise.resolve(apiOk({ authSessionId: 'session-1' }));
+      }
+      if (url.includes('createQrCode')) {
+        const authSessionId = (body[0] as { authSessionId: string }).authSessionId;
+        return Promise.resolve(apiOk({
+          callbackUrl: `https://line.me/R/nv/QRLogin?sid=${authSessionId}`,
+          longPollingMaxCount: 1,
+          longPollingIntervalSec: 1,
+        }));
+      }
+      if (url.includes('checkQrCodeVerified')) {
+        return new Promise<Response>(resolve => {
+          resolveFirstPoll = () => resolve(apiOk({}));
+        });
+      }
+      if (url.includes('verifyCertificate')) return Promise.resolve(apiOk({}));
+      if (url.includes('qrCodeLoginV2')) {
+        return Promise.resolve(apiOk({
+          certificate: 'replacement-cert',
+          tokenV3IssueResult: { accessToken: makeFakeJwt(), refreshToken: 'new-refresh' },
+          mid: 'u123',
+        }));
+      }
+      if (url.includes('getEncryptedIdentityV3')) return Promise.resolve(apiOk({
+        wrappedNonce: 'new-nonce',
+        kdfParameter1: 'new-kdf1',
+        kdfParameter2: 'new-kdf2',
+      }));
+      return Promise.resolve(apiOk({}));
+    });
+    const client = new LineClient(null, fetchFn);
+    vi.mocked(getHmac).mockClear();
+
+    await client.login('certificate-a');
+    const secondLogin = client.login('certificate-b');
+    await vi.waitFor(() => expect(resolveSecondSession).toBeTypeOf('function'));
+    resolveFirstPoll!();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(client.getCompletedAuth()).toBeNull();
+    resolveSecondSession!();
+    await secondLogin;
+
+    const secondBootstrap = calls.filter(call =>
+      call.url.includes('createSession') || call.url.includes('createQrCode'),
+    ).slice(-2);
+    expect(secondBootstrap).toHaveLength(2);
+    expect(secondBootstrap.every(call => call.headers['x-line-access'] === undefined)).toBe(true);
+    const secondBootstrapHmacs = vi.mocked(getHmac).mock.calls
+      .filter(([input]) => input.path.includes('createSession') || input.path.includes('createQrCode'))
+      .slice(-2);
+    expect(secondBootstrapHmacs.every(([input]) => input.accessToken === '')).toBe(true);
+  });
+});
+
+describe('LineClient profile', () => {
+  it('returns the authenticated account display name', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(apiOk({
+      mid: baseAuth.mid,
+      displayName: 'Personal LINE',
+    }));
+    const client = new LineClient(baseAuth, fetchFn);
+    await expect(client.getProfileDisplayName()).resolves.toBe('Personal LINE');
+    expect(JSON.parse(fetchFn.mock.calls[0][1].body)).toEqual([2]);
+  });
+
+  it.each([
+    [{ mid: baseAuth.mid, displayName: '' }, 'missing display name'],
+    [{ mid: 'u-other', displayName: 'Wrong Account' }, 'profile MID mismatch'],
+  ])('rejects an invalid authenticated profile', async (profile, message) => {
+    const client = new LineClient(baseAuth, vi.fn().mockResolvedValue(apiOk(profile)));
+    await expect(client.getProfileDisplayName()).rejects.toThrow(message);
+  });
+});

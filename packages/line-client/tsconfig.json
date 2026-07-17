@@ -1,0 +1,19 @@
+{
+  // module/moduleResolution overridden to "nodenext"/"node16" instead of
+  // tsconfig.base.json's "Node16"/"Node16": under strict Node16, `import type
+  // { Window } from 'happy-dom'` in src/signer.ts fails with TS1541 (happy-dom
+  // has no dual CJS/ESM "exports" typings, and Node16 is stricter than NodeNext
+  // about type-only imports of such packages). This carries forward a note
+  // from the pre-modularization flat tsconfig, which had the same override
+  // for the same reason before ltsm.ts moved into this package (issue #75).
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "node16",
+    "rootDir": "src",
+    "outDir": "dist",
+    "types": ["node"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["src/**/*.test.ts", "dist"]
+}
