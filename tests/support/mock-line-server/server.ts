@@ -29,6 +29,7 @@ import {
 } from './contracts';
 
 export interface MockLineServerOptions {
+  host?: string;
   port?: number;
   controlToken: string;
   pinPollDelayMs?: number;
@@ -40,8 +41,8 @@ export interface MockLineServerStopOptions {
 
 export interface MockLineServer {
   state: MockLineState;
-  start(): Promise<{ origin: string; port: number }>;
-  stop(options?: MockLineServerStopOptions): Promise<void>;
+  start(): Promise<{ origin: string; host: string; port: number }>;
+  stop(options?: MockLineServerStopOptions): Promise<MockReport>;
 }
 
 const IMAGE_ROUTES: ReadonlySet<string> = new Set<string>([
@@ -60,6 +61,7 @@ const CONTROL_ROUTES = new Set<string>([
 export function createMockLineServer(options: MockLineServerOptions): MockLineServer {
   const controlToken = options.controlToken;
   const pinPollDelayMs = options.pinPollDelayMs ?? 50;
+  const desiredHost = options.host ?? '127.0.0.1';
   const desiredPort = options.port ?? 0;
   const state = new MockLineState({ origin: '' });
 
@@ -123,7 +125,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       return;
     }
     if (pathname === '/__mock/health') {
-      json(res, 200, { status: 'ok' });
+      json(res, 200, { status: 'ok', protocol: 'mock-line-v1' });
       return;
     }
     if (pathname === '/__mock/reset') {
@@ -160,7 +162,8 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       return;
     }
     if (pathname === '/__mock/shutdown') {
-      json(res, 200, { status: 'ok' });
+      const report: MockReport = state.report();
+      json(res, 200, report);
       shutdown();
       return;
     }
@@ -725,7 +728,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     }
   }
 
-  async function start(): Promise<{ origin: string; port: number }> {
+  async function start(): Promise<{ origin: string; host: string; port: number }> {
     return new Promise((resolve, reject) => {
       const srv = http.createServer((req, res) => {
         Promise.resolve(requestHandler(req, res)).catch((err) => {
@@ -737,25 +740,24 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
         });
       });
       srv.on('error', reject);
-      srv.listen(desiredPort, '127.0.0.1', () => {
+      srv.listen(desiredPort, desiredHost, () => {
         const addr = srv.address();
         if (!addr || typeof addr === 'string') {
           reject(new Error('failed to bind'));
           return;
         }
         server = srv;
-        origin = `http://127.0.0.1:${addr.port}`;
+        origin = `http://${addr.address}:${addr.port}`;
         state.setOrigin(origin);
-        resolve({ origin, port: addr.port });
+        resolve({ origin, host: addr.address, port: addr.port });
       });
     });
   }
 
-  async function stop(stopOptions?: MockLineServerStopOptions): Promise<void> {
-    if (stopOptions?.verify) {
-      state.verifyFinal();
-    }
+  async function stop(stopOptions?: MockLineServerStopOptions): Promise<MockReport> {
+    const report = stopOptions?.verify ? state.verifyFinal() : state.report();
     shutdown();
+    return report;
   }
 
   return { state, start, stop };
