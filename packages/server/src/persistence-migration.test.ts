@@ -9,7 +9,7 @@ import {
   resolveGenerationPaths,
   validateMigrationCounts,
   recoverQuarantinedMessages,
-  __setTestEventHook,
+  __setFsOps,
   type ActivePersistence,
   type FailPoint,
   type MigrationReport,
@@ -129,6 +129,84 @@ function rawQuarantineRow(quarantineDbPath: string, sourceKey: string): Record<s
 
 function readReport(reportPath: string): MigrationReport {
   return JSON.parse(fs.readFileSync(reportPath, 'utf8')) as MigrationReport;
+}
+
+// ─── Injectable fs-ops recording seam ─────────────────────────────────────────
+
+// A recording wrapper around the production fsOps seam. Each call is recorded
+// as an ordered event with full path context (fd→path resolved for fsync).
+// The wrapper delegates to the real fs via the module's default realFsOps,
+// so durability is actually performed — the recorded events prove the real
+// fsync ran in the required order. An optional `inject` partial lets tests
+// override individual ops (e.g. throw EIO on fsync for a specific path).
+interface RecordedEvent {
+  op: string;
+  path?: string;
+  oldPath?: string;
+  newPath?: string;
+  fd?: number;
+}
+
+function eioError(msg = 'EIO'): Error & { code: string } {
+  return Object.assign(new Error(msg), { code: 'EIO' });
+}
+
+function recordingFsOps(inject?: {
+  fsyncSync?: (fd: number, path: string) => void;
+  openSync?: (path: string, flags: string, mode?: number) => number;
+}): { events: RecordedEvent[] } {
+  const events: RecordedEvent[] = [];
+  const fdToPath = new Map<number, string>();
+  // Delegate to the real fs directly (not via the module's fsOps, which may
+  // be the recording wrapper itself during the test).
+  const realOpen = (p: string, f: string, m?: number) =>
+    m !== undefined ? fs.openSync(p, f, m) : fs.openSync(p, f);
+  const realFsync = (fd: number) => fs.fsyncSync(fd);
+  const realClose = (fd: number) => fs.closeSync(fd);
+  const realWrite = (fd: number, d: string) => fs.writeSync(fd, d);
+  const realRename = (o: string, n: string) => fs.renameSync(o, n);
+  const wrapper: Record<string, unknown> = {
+    openSync: (p: string, f: string, m?: number) => {
+      let fd: number;
+      if (inject?.openSync) {
+        fd = inject.openSync(p, f, m);
+      } else {
+        fd = realOpen(p, f, m);
+      }
+      fdToPath.set(fd, p);
+      events.push({ op: 'openSync', path: p, fd });
+      return fd;
+    },
+    writeSync: (fd: number, d: string) => {
+      events.push({ op: 'writeSync', path: fdToPath.get(fd), fd });
+      realWrite(fd, d);
+    },
+    fsyncSync: (fd: number) => {
+      const p = fdToPath.get(fd);
+      events.push({ op: 'fsyncSync', path: p, fd });
+      if (inject?.fsyncSync) {
+        inject.fsyncSync(fd, p ?? '');
+      } else {
+        realFsync(fd);
+      }
+    },
+    closeSync: (fd: number) => {
+      events.push({ op: 'closeSync', path: fdToPath.get(fd), fd });
+      realClose(fd);
+      fdToPath.delete(fd);
+    },
+    renameSync: (o: string, n: string) => {
+      events.push({ op: 'renameSync', oldPath: o, newPath: n });
+      realRename(o, n);
+    },
+  };
+  __setFsOps(wrapper);
+  return { events };
+}
+
+// Find the index of the first event matching a predicate.
+function indexOfEvent(events: RecordedEvent[], pred: (e: RecordedEvent) => boolean): number {
+  return events.findIndex(pred);
 }
 
 // ─── Ownership decision matrix (Step 1) ──────────────────────────────────────
@@ -403,6 +481,11 @@ describe('persistence-migration: interruption and pointer authority', () => {
 
   beforeEach(() => { dataRoot = mkdtemp(); });
   afterEach(() => {
+    // Reset the injectable fs-ops seam to real fs so no wrapper leaks between
+    // tests. Tests that install a recording/injecting wrapper do so via
+    // __setFsOps; this restore happens before the permission walk below so
+    // the wrapper (which delegates to real fs anyway) does not interfere.
+    __setFsOps(null);
     // Restore permissions before rmSync — tests in this block may chmod
     // files/dirs to 0000 to simulate EACCES, and rmSync(force) can fail to
     // traverse a 0000 directory. Walk the tree and restore 0755 on any
@@ -698,19 +781,20 @@ describe('persistence-migration: interruption and pointer authority', () => {
     // pointer file alongside it — both violating the invariant.
     //
     // In addition to the behavioral proxy, we record the ordered durability
-    // events via the test-only __setTestEventHook seam and assert the
-    // fsync ordering explicitly: the pointer tmp fsync precedes the marker
-    // open, and both the marker fsync and the generation-directory fsync
-    // precede the pointer rename. Removing any load-bearing fsync would
-    // drop the corresponding event from the recording, regressing the
+    // events via the injectable fs-ops seam and assert the fsync ordering
+    // explicitly through the ACTUAL fs calls: the pointer tmp fsync precedes
+    // the marker open, the marker fsync precedes the generation-directory
+    // fsync, and both precede the pointer rename. Because the recording
+    // wrapper delegates to the real fs (real fsync actually runs), removing
+    // or reordering any load-bearing fsync would either drop the
+    // corresponding event or invert the recorded order, regressing the
     // assertions below.
-    const events: string[] = [];
-    __setTestEventHook((e) => events.push(e));
+    const { events } = recordingFsOps();
     try {
       buildFixture('single-valid-auth', dataRoot);
       expect(() => bootstrapPersistence({ dataRoot, failAt: 'before-pointer-rename' })).toThrow();
     } finally {
-      __setTestEventHook(undefined);
+      __setFsOps(null);
     }
 
     const gensRoot = path.join(dataRoot, 'persistence-generations');
@@ -735,19 +819,36 @@ describe('persistence-migration: interruption and pointer authority', () => {
     // marker entry visible post-crash).
     expect(fs.existsSync(path.join(gensRoot, gen))).toBe(true);
 
-    // Ordered durability assertions. The crash fires at 'before-pointer-rename',
-    // so 'pointer-rename' must NOT be present; every preceding fsync must have
-    // been recorded in the required order.
-    expect(events).toContain('pointer-tmp-fsync');
-    expect(events).toContain('marker-open');
-    expect(events).toContain('marker-fsync');
-    expect(events).toContain('generation-dir-fsync');
-    expect(events).not.toContain('pointer-rename');
+    // Ordered durability assertions via the recording seam. The crash fires
+    // at 'before-pointer-rename', so no renameSync event must be present;
+    // every preceding fsync must have been recorded against its real path
+    // in the required order. Because the wrapper records the actual fs
+    // operations (not synthetic labels), commenting out a real fsOps.fsyncSync
+    // call in publishPointer would drop the corresponding fsyncSync event
+    // and regress these assertions.
+    const pointerTmpFsync = indexOfEvent(events, e =>
+      e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.includes('.persistence-current.') && e.path.endsWith('.tmp'));
+    const markerOpen = indexOfEvent(events, e =>
+      e.op === 'openSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const markerFsync = indexOfEvent(events, e =>
+      e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const dirFsync = indexOfEvent(events, e =>
+      e.op === 'fsyncSync' && typeof e.path === 'string' && e.path === path.join(gensRoot, gen));
+    const renameIdx = indexOfEvent(events, e =>
+      e.op === 'renameSync' && typeof e.newPath === 'string' && e.newPath.endsWith('persistence-current.json'));
+
+    expect(pointerTmpFsync).toBeGreaterThanOrEqual(0);
+    expect(markerOpen).toBeGreaterThanOrEqual(0);
+    expect(markerFsync).toBeGreaterThanOrEqual(0);
+    expect(dirFsync).toBeGreaterThanOrEqual(0);
+    expect(renameIdx).toBe(-1); // crash fired before the rename
+
     // Strict ordering: pointer tmp fsync before marker open, marker fsync
     // before generation-dir fsync, both before any pointer rename.
-    expect(events.indexOf('pointer-tmp-fsync')).toBeLessThan(events.indexOf('marker-open'));
-    expect(events.indexOf('marker-fsync')).toBeLessThan(events.indexOf('generation-dir-fsync'));
-    expect(events.indexOf('generation-dir-fsync')).toBeLessThan(events.length);
+    expect(pointerTmpFsync).toBeLessThan(markerOpen);
+    expect(markerFsync).toBeLessThan(dirFsync);
+    // No rename event exists, so all fsyncs precede the (absent) rename.
+    expect(dirFsync).toBeLessThan(events.length);
   });
 
   it('repairs a missing marker for an authoritative pointer without changing generations', () => {
@@ -768,19 +869,19 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(fs.existsSync(markerPath)).toBe(false);
 
     // Record the durability events fired by the repair path so we can
-    // assert the repair's fsync ordering explicitly (marker fsync before
-    // generation-dir fsync). Removing the load-bearing fsyncs in
-    // ensureDurablePublicationMarker would drop these events and regress
-    // the assertions.
-    const repairEvents: string[] = [];
-    __setTestEventHook((e) => repairEvents.push(e));
+    // assert the repair's fsync ordering explicitly through the ACTUAL fs
+    // calls (marker fsync before generation-dir fsync). Because the
+    // recording wrapper delegates to the real fs, removing the load-bearing
+    // fsyncs in ensureDurablePublicationMarker would drop these events and
+    // regress the assertions.
+    const { events: repairEvents } = recordingFsOps();
     let second: ActivePersistence;
     try {
       // Bootstrap with a valid pointer and all artifacts intact must RETURN
       // THE SAME generation (no divergence) AND durably repair the marker.
       second = bootstrapPersistence({ dataRoot });
     } finally {
-      __setTestEventHook(undefined);
+      __setFsOps(null);
     }
     expect(second).toEqual(first);
     expect(fs.existsSync(markerPath)).toBe(true);
@@ -788,12 +889,15 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(repairedContent.length).toBeGreaterThan(0);
 
     // The repair path durably fsynced the marker file and then the
-    // generation directory before re-authorizing the generation.
-    expect(repairEvents).toContain('repair-marker-open');
-    expect(repairEvents).toContain('repair-marker-fsync');
-    expect(repairEvents).toContain('repair-generation-dir-fsync');
-    expect(repairEvents.indexOf('repair-marker-fsync'))
-      .toBeLessThan(repairEvents.indexOf('repair-generation-dir-fsync'));
+    // generation directory before re-authorizing the generation. Assert via
+    // the real fs call recording — not synthetic labels.
+    const repairMarkerFsync = indexOfEvent(repairEvents, e =>
+      e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const repairDirFsync = indexOfEvent(repairEvents, e =>
+      e.op === 'fsyncSync' && typeof e.path === 'string' && e.path === generationDir);
+    expect(repairMarkerFsync).toBeGreaterThanOrEqual(0);
+    expect(repairDirFsync).toBeGreaterThanOrEqual(0);
+    expect(repairMarkerFsync).toBeLessThan(repairDirFsync);
 
     // Now verify the repair is load-bearing: remove the pointer and assert
     // bootstrap fails closed on the REPAIRED marker rather than discarding
@@ -1010,6 +1114,181 @@ describe('persistence-migration: interruption and pointer authority', () => {
     const rebuilt = bootstrapPersistence({ dataRoot });
     expect(rebuilt.generation).not.toBe(onDisk[0]);
     expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations'))).toEqual([rebuilt.generation]);
+  });
+
+  // ─── Deterministic EIO injection via the fs-ops seam ──────────────────────
+  //
+  // The crash failpoints (after-marker-fsync etc.) model a throw AFTER a
+  // successful fsync — they do not exercise an fsync that itself throws EIO.
+  // These tests inject EIO directly into the fsOps.fsyncSync used by
+  // production code, asserting the durability invariant: an fsync failure
+  // during the marker or generation-directory step aborts BEFORE the pointer
+  // rename, so no pointer is committed and the generation is left as
+  // unmarked staging. The repair path (readPointer) similarly throws rather
+  // than re-authorizing the generation.
+
+  it('EIO on marker fsync during publish aborts before pointer commit, preserving the legacy source', () => {
+    buildFixture('single-valid-auth', dataRoot);
+    const dbPath = path.join(dataRoot, 'cache', 'messages.db');
+    const sourceHashBefore = hashFile(dbPath);
+
+    // Track which fd corresponds to the marker file (opened with 'wx' and a
+    // path ending in '.published') and throw EIO the first time fsyncSync is
+    // called on it. Every other fsync (pointer tmp, generation dir) is left
+    // intact so the failure is pinpointed to the marker fsync.
+    let markerFired = false;
+    recordingFsOps({
+      fsyncSync: (fd, p) => {
+        if (p.endsWith('.published') && !markerFired) {
+          markerFired = true;
+          throw eioError();
+        }
+        fs.fsyncSync(fd);
+      },
+    });
+    try {
+      expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/EIO/);
+    } finally {
+      __setFsOps(null);
+    }
+
+    // No pointer committed — the marker fsync threw before the rename.
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+    // The staging generation is on disk (the line/bank/quarantine DBs were
+    // staged before publishPointer was reached). The marker file's
+    // directory entry was created by open('wx') before the fsync threw, so
+    // it is visible on disk — but its CONTENT was not fsynced and the
+    // generation-directory fsync never ran, so the marker is not durable.
+    // From bootstrap's perspective this is a marked-but-uncommitted
+    // orphan: the next bootstrap must FAIL CLOSED rather than discard or
+    // diverge, exactly the invariant the marker-before-rename ordering
+    // protects even when the marker fsync itself fails.
+    const gensRoot = path.join(dataRoot, 'persistence-generations');
+    const onDisk = fs.readdirSync(gensRoot);
+    expect(onDisk).toHaveLength(1);
+    expect(fs.existsSync(path.join(gensRoot, onDisk[0], '.published'))).toBe(true);
+    // The legacy source is untouched.
+    expect(hashFile(dbPath)).toBe(sourceHashBefore);
+
+    // The marked-but-uncommitted generation makes the next bootstrap FAIL
+    // CLOSED (refuses to discard or diverge).
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+    // Evacuate the orphan and restart fresh to clean up.
+    fs.rmSync(path.join(gensRoot, onDisk[0]), { recursive: true, force: true });
+    const active = bootstrapPersistence({ dataRoot });
+    expect(active.generation).not.toBe(onDisk[0]);
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(true);
+  });
+
+  it('EIO on generation-directory fsync during publish aborts before pointer commit', () => {
+    buildFixture('single-valid-auth', dataRoot);
+    const dbPath = path.join(dataRoot, 'cache', 'messages.db');
+    const sourceHashBefore = hashFile(dbPath);
+
+    // The generation-directory fsync opens the generation directory with 'r'
+    // (no mode) — distinguished from the marker file (opened 'wx', 0o600)
+    // and the pointer tmp (opened 'wx', 0o600 with a .tmp suffix). Throw EIO
+    // the first time fsyncSync is called on a path that is the generation
+    // directory (i.e. opened with 'r' and not ending in .published or .tmp).
+    let dirFired = false;
+    recordingFsOps({
+      fsyncSync: (fd, p) => {
+        // The generation-directory fsync path is the generation directory
+        // itself (no file extension, ends with the generation id segment).
+        // The marker path ends in '.published'; the pointer tmp ends in
+        // '.tmp'. Only the directory fsync has neither.
+        if (
+          !p.endsWith('.published') &&
+          !p.endsWith('.tmp') &&
+          !p.endsWith('persistence-current.json') &&
+          !dirFired
+        ) {
+          dirFired = true;
+          throw eioError();
+        }
+        fs.fsyncSync(fd);
+      },
+    });
+    try {
+      expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/EIO/);
+    } finally {
+      __setFsOps(null);
+    }
+
+    // No pointer committed — the directory fsync threw before the rename.
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+    const gensRoot = path.join(dataRoot, 'persistence-generations');
+    const onDisk = fs.readdirSync(gensRoot);
+    expect(onDisk).toHaveLength(1);
+    // The marker file WAS written and fsynced before the directory fsync
+    // threw, so it is present on disk — but no pointer means the generation
+    // is treated as a marked-but-uncommitted orphan on the next bootstrap.
+    expect(fs.existsSync(path.join(gensRoot, onDisk[0], '.published'))).toBe(true);
+    expect(hashFile(dbPath)).toBe(sourceHashBefore);
+
+    // The marked-but-uncommitted generation makes the next bootstrap FAIL
+    // CLOSED (refuses to discard or diverge) — exactly the invariant the
+    // marker-before-rename ordering protects.
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+    // Evacuate the orphan and restart fresh to clean up.
+    fs.rmSync(path.join(gensRoot, onDisk[0]), { recursive: true, force: true });
+    const active = bootstrapPersistence({ dataRoot });
+    expect(active.generation).not.toBe(onDisk[0]);
+  });
+
+  it('EIO on marker fsync during readPointer repair does NOT re-authorize the generation', () => {
+    // Set up a fully-committed, intact generation with a valid pointer.
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+    const generationDir = path.dirname(first.reportPath);
+    const markerPath = path.join(generationDir, '.published');
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    // Remove the marker so readPointer's repair path will try to recreate
+    // (and fsync) it.
+    fs.rmSync(markerPath);
+    expect(fs.existsSync(markerPath)).toBe(false);
+
+    // Inject EIO on the marker fsync inside ensureDurablePublicationMarker.
+    // The repair path opens the marker with 'wx' (creating it) and fsyncs it;
+    // that fsync must throw, and readPointer must propagate the throw rather
+    // than return `active` (which would re-authorize the generation without
+    // a durable marker).
+    let markerFired = false;
+    recordingFsOps({
+      fsyncSync: (fd, p) => {
+        if (p.endsWith('.published') && !markerFired) {
+          markerFired = true;
+          throw eioError();
+        }
+        fs.fsyncSync(fd);
+      },
+    });
+    try {
+      expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/EIO/);
+    } finally {
+      __setFsOps(null);
+    }
+
+    // The pointer file is unchanged — the repair throw did NOT mutate it.
+    const pointerFile = path.join(dataRoot, 'persistence-current.json');
+    expect(fs.existsSync(pointerFile)).toBe(true);
+    const ptr = JSON.parse(fs.readFileSync(pointerFile, 'utf8'));
+    expect(ptr.generation).toBe(first.generation);
+
+    // The generation is preserved on disk (the throw protected it from
+    // being re-authorized without a durable marker). All artifacts are intact.
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.existsSync(first.bankDbPath)).toBe(true);
+    expect(fs.existsSync(first.quarantineDbPath)).toBe(true);
+    expect(fs.existsSync(first.reportPath)).toBe(true);
+
+    // A subsequent bootstrap WITHOUT the injection succeeds and re-creates
+    // the marker durably, re-authorizing the same generation.
+    const restored = bootstrapPersistence({ dataRoot });
+    expect(restored).toEqual(first);
+    expect(fs.existsSync(markerPath)).toBe(true);
+    expect(fs.readFileSync(markerPath, 'utf8').length).toBeGreaterThan(0);
   });
 });
 
