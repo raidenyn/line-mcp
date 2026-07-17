@@ -830,8 +830,12 @@ describe('persistence-migration: interruption and pointer authority', () => {
       e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.includes('.persistence-current.') && e.path.endsWith('.tmp'));
     const markerOpen = indexOfEvent(events, e =>
       e.op === 'openSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const markerWrite = indexOfEvent(events, e =>
+      e.op === 'writeSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
     const markerFsync = indexOfEvent(events, e =>
       e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const markerClose = indexOfEvent(events, e =>
+      e.op === 'closeSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
     const dirFsync = indexOfEvent(events, e =>
       e.op === 'fsyncSync' && typeof e.path === 'string' && e.path === path.join(gensRoot, gen));
     const renameIdx = indexOfEvent(events, e =>
@@ -839,14 +843,22 @@ describe('persistence-migration: interruption and pointer authority', () => {
 
     expect(pointerTmpFsync).toBeGreaterThanOrEqual(0);
     expect(markerOpen).toBeGreaterThanOrEqual(0);
+    expect(markerWrite).toBeGreaterThanOrEqual(0);
     expect(markerFsync).toBeGreaterThanOrEqual(0);
+    expect(markerClose).toBeGreaterThanOrEqual(0);
     expect(dirFsync).toBeGreaterThanOrEqual(0);
     expect(renameIdx).toBe(-1); // crash fired before the rename
 
-    // Strict ordering: pointer tmp fsync before marker open, marker fsync
-    // before generation-dir fsync, both before any pointer rename.
+    // Strict ordering: pointer tmp fsync → marker open → marker write →
+    // marker fsync → marker close → generation-dir fsync → (no rename).
+    // Each step must be observed through the real fs-ops seam, so
+    // removing or reordering any load-bearing operation (including
+    // write-before-fsync) regresses these assertions.
     expect(pointerTmpFsync).toBeLessThan(markerOpen);
-    expect(markerFsync).toBeLessThan(dirFsync);
+    expect(markerOpen).toBeLessThan(markerWrite);
+    expect(markerWrite).toBeLessThan(markerFsync);
+    expect(markerFsync).toBeLessThan(markerClose);
+    expect(markerClose).toBeLessThan(dirFsync);
     // No rename event exists, so all fsyncs precede the (absent) rename.
     expect(dirFsync).toBeLessThan(events.length);
   });
@@ -890,14 +902,29 @@ describe('persistence-migration: interruption and pointer authority', () => {
 
     // The repair path durably fsynced the marker file and then the
     // generation directory before re-authorizing the generation. Assert via
-    // the real fs call recording — not synthetic labels.
+    // the real fs call recording — not synthetic labels. The full chain
+    // must be ordered: marker open → marker write → marker fsync → marker
+    // close → generation-dir fsync. Swapping write and fsync (the
+    // reviewer's mutation) would fail `markerWrite < markerFsync`.
+    const repairMarkerOpen = indexOfEvent(repairEvents, e =>
+      e.op === 'openSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const repairMarkerWrite = indexOfEvent(repairEvents, e =>
+      e.op === 'writeSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
     const repairMarkerFsync = indexOfEvent(repairEvents, e =>
       e.op === 'fsyncSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
+    const repairMarkerClose = indexOfEvent(repairEvents, e =>
+      e.op === 'closeSync' && typeof e.path === 'string' && e.path.endsWith('.published'));
     const repairDirFsync = indexOfEvent(repairEvents, e =>
       e.op === 'fsyncSync' && typeof e.path === 'string' && e.path === generationDir);
+    expect(repairMarkerOpen).toBeGreaterThanOrEqual(0);
+    expect(repairMarkerWrite).toBeGreaterThanOrEqual(0);
     expect(repairMarkerFsync).toBeGreaterThanOrEqual(0);
+    expect(repairMarkerClose).toBeGreaterThanOrEqual(0);
     expect(repairDirFsync).toBeGreaterThanOrEqual(0);
-    expect(repairMarkerFsync).toBeLessThan(repairDirFsync);
+    expect(repairMarkerOpen).toBeLessThan(repairMarkerWrite);
+    expect(repairMarkerWrite).toBeLessThan(repairMarkerFsync);
+    expect(repairMarkerFsync).toBeLessThan(repairMarkerClose);
+    expect(repairMarkerClose).toBeLessThan(repairDirFsync);
 
     // Now verify the repair is load-bearing: remove the pointer and assert
     // bootstrap fails closed on the REPAIRED marker rather than discarding
