@@ -31,6 +31,10 @@ export type FailPoint =
   | 'after-bank'
   | 'after-quarantine'
   | 'after-validation'
+  | 'before-marker-write'
+  | 'after-marker-write'
+  | 'after-marker-fsync'
+  | 'after-generation-dir-fsync'
   | 'before-pointer-rename'
   | 'after-pointer-rename';
 
@@ -216,6 +220,84 @@ interface PointerManifest {
   publishedAt: string;
 }
 
+// ─── Durable publication marker helpers ──────────────────────────────────────
+
+// Sentinel file written inside a generation directory at publication time
+// (BEFORE the pointer rename — see publishPointer for the ordering
+// rationale). Its presence is the durable signal that this generation was
+// once authoritative — see discardUnpublishedGenerations for the two ways
+// this assumption is enforced (no silent discard, no divergent
+// re-bootstrap via the preserved list it returns).
+const PUBLICATION_MARKER = '.published';
+
+// fsyncs a directory so directory-entry updates (marker creation, rename)
+// are durable before the pointer commit.
+function fsyncDirectory(directory: string): void {
+  const fd = fs.openSync(directory, 'r');
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// Ensures the `.published` marker inside a generation directory exists and
+// is durably persisted (file fsync + directory fsync). Used in TWO places:
+//
+// 1. publishPointer: BEFORE the pointer rename, so a committed pointer never
+//    exists without a durably-persisted marker. A marker write/fsync failure
+//    here aborts before the rename, leaving genuinely uncommitted staging
+//    (no pointer → safe to discard on next run).
+// 2. readPointer: AFTER validating all required artifacts, before returning
+//    `active`. This is the self-repair path — a valid pointer with complete
+//    artifacts but a missing marker (e.g. partial power loss that preserved
+//    the pointer but not the marker's directory entry) durably recreates the
+//    marker rather than accepting an unmarked committed generation (which
+//    later pointer loss would let discard silently delete).
+//
+// When the marker already exists, it is opened and fsynced in place (no
+// content rewrite) — this covers the "marker exists but wasn't fsynced"
+// case from an older code path. When the marker is absent, it is created
+// with mode 0600, the current timestamp is written, and both the marker
+// file and its parent directory are fsynced.
+function ensureDurablePublicationMarker(generationDir: string): void {
+  const markerPath = path.join(generationDir, PUBLICATION_MARKER);
+  const markerExists = safeMarkerExists(markerPath);
+  const fd = fs.openSync(markerPath, markerExists ? 'r' : 'wx', 0o600);
+  try {
+    if (!markerExists) {
+      fs.writeSync(fd, new Date().toISOString());
+    }
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  // fsync the generation directory so the marker's directory entry is
+  // durable before the pointer is committed (publishPointer path) or
+  // before the generation is returned as authoritative (readPointer path).
+  fsyncDirectory(generationDir);
+}
+
+// Checks whether the marker file exists as a regular file. Returns false
+// only for ENOENT; any other stat error is propagated (fail closed — see
+// Task 2 for the strict error-classification rationale).
+function safeMarkerExists(markerPath: string): boolean {
+  try {
+    const stat = fs.statSync(markerPath);
+    return stat.isFile();
+  } catch (err) {
+    if (isErrnoCode(err, 'ENOENT')) return false;
+    throw err;
+  }
+}
+
+// Type-narrowing helper for NodeJS.ErrnoException codes.
+function isErrnoCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code: string }).code === code;
+}
+
+// ─── Pointer (the one cutover commit point) ──────────────────────────────────
+
 // A pointer is only authoritative when it parses, names a syntactically safe
 // generation, AND every required artifact of that committed generation still
 // exists on disk: the migration report plus the line, bank, and quarantine
@@ -273,16 +355,13 @@ function readPointer(dataRoot: string): ActivePersistence | null {
         'generation also guards against accidental discard — see publishPointer().',
     );
   }
+  // Self-repair: a valid pointer with complete artifacts but a missing (or
+  // non-durable) marker durably recreates it before returning. This closes
+  // the "committed pointer survived power loss but marker didn't" gap: the
+  // generation is re-authorized AND re-protected in one atomic step.
+  ensureDurablePublicationMarker(path.dirname(active.reportPath));
   return active;
 }
-
-// Sentinel file written inside a generation directory at publication time
-// (BEFORE the pointer rename — see publishPointer for the ordering
-// rationale). Its presence is the durable signal that this generation was
-// once authoritative — see discardUnpublishedGenerations for the two ways
-// this assumption is enforced (no silent discard, no divergent
-// re-bootstrap via the preserved list it returns).
-const PUBLICATION_MARKER = '.published';
 
 // Called only when readPointer() found nothing authoritative, so every
 // directory here is by definition unreferenced by any committed pointer.
@@ -309,7 +388,7 @@ function discardUnpublishedGenerations(dataRoot: string): string[] {
   const preserved: string[] = [];
   for (const name of entries) {
     const generationDir = path.join(root, name);
-    if (fs.existsSync(path.join(generationDir, PUBLICATION_MARKER))) {
+    if (safeMarkerExists(path.join(generationDir, PUBLICATION_MARKER))) {
       // This generation was published once; even without a live pointer we
       // refuse to discard it. See PUBLICATION_MARKER above for the
       // rationale and the bootstrap-fail-closed invariant that depends on
@@ -343,31 +422,57 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
 
   // Write the publication marker BEFORE the pointer rename. The marker is
   // the generation's durable "this was once committed, never silently
-  // discard it" flag (see discardUnpublishedGenerations). Writing it before
-  // the rename is what makes that guarantee airtight:
+  // discard it" flag (see discardUnpublishedGenerations). Writing it
+  // before the rename — with both the marker file AND the generation
+  // directory fsynced — is what makes that guarantee airtight:
   //
-  //   - crash at 'before-pointer-rename': the generation is marked but
-  //     NO pointer exists. discard will refuse it (marker present) AND
-  //     fail-closed later in this function (see the stand-alone published-
-  //     generation scan below) will refuse to bootstrap fresh alongside it.
-  //     The orphaned marked generation stays on disk for forensic salvage.
-  //     This is fine: the marker write is itself idempotent and harmless
-  //     (it writes a timestamp file), and the alternative (write-after-
-  //     rename) had a real gap — an injected marker write failure post-
-  //     rename would leave a committed, unmarked generation, and later
-  //     pointer loss would let discard silently delete it.
+  //   - crash at 'before-pointer-rename': the generation is durably marked
+  //     but NO pointer exists. discard will refuse it (marker present) AND
+  //     the fail-closed check in bootstrapPersistence will refuse to
+  //     bootstrap fresh alongside it. The orphaned marked generation stays
+  //     on disk for forensic salvage.
   //   - crash at 'after-pointer-rename': the pointer is already committed
-  //     AND the marker is already written; readPointer succeeds and the
-  //     generation is authoritative, exactly as intended.
+  //     AND the marker is already durably written; readPointer succeeds and
+  //     the generation is authoritative, exactly as intended.
   //
-  // The marker write is intentionally NOT fail-tolerant here: if it throws,
-  // we abort before publishing the pointer, leaving the generation as
-  // unmarked staging (no marker, no pointer → genuinely unreferenced →
-  // discard correctly removes it on the next run). That is the safe state
-  // — the alternative (swallowing marker failures to "commit anyway")
-  // reintroduces the gap.
+  // The marker write is intentionally NOT fail-tolerant here: if it throws
+  // (open, write, fsync, or directory fsync), we abort before publishing
+  // the pointer, leaving the generation as unmarked staging (no marker, no
+  // pointer → genuinely unreferenced → discard correctly removes it on the
+  // next run). That is the safe state — the alternative (swallowing marker
+  // failures to "commit anyway") reintroduces the gap.
+  //
+  // Fail points for testing the durability ordering:
+  //   'before-marker-write'  — after the pointer tmp fsync, before marker open
+  //   'after-marker-write'   — after marker write, before marker fsync
+  //   'after-marker-fsync'   — after marker fsync, before generation-dir fsync
+  //   'after-generation-dir-fsync' — after dir fsync, before pointer rename
   const generationDir = safeJoin(dataRoot, 'persistence-generations', generation);
-  fs.writeFileSync(path.join(generationDir, PUBLICATION_MARKER), new Date().toISOString());
+
+  if (failAt === 'before-marker-write') {
+    throw new Error('Simulated crash: before-marker-write');
+  }
+  const markerPath = path.join(generationDir, PUBLICATION_MARKER);
+  const markerExisted = safeMarkerExists(markerPath);
+  const markerFd = fs.openSync(markerPath, markerExisted ? 'r' : 'wx', 0o600);
+  try {
+    if (!markerExisted) {
+      fs.writeSync(markerFd, new Date().toISOString());
+    }
+    if (failAt === 'after-marker-write') {
+      throw new Error('Simulated crash: after-marker-write');
+    }
+    fs.fsyncSync(markerFd);
+  } finally {
+    fs.closeSync(markerFd);
+  }
+  if (failAt === 'after-marker-fsync') {
+    throw new Error('Simulated crash: after-marker-fsync');
+  }
+  fsyncDirectory(generationDir);
+  if (failAt === 'after-generation-dir-fsync') {
+    throw new Error('Simulated crash: after-generation-dir-fsync');
+  }
 
   if (failAt === 'before-pointer-rename') {
     throw new Error('Simulated crash: before-pointer-rename');

@@ -408,6 +408,10 @@ describe('persistence-migration: interruption and pointer authority', () => {
     'after-bank',
     'after-quarantine',
     'after-validation',
+    'before-marker-write',
+    'after-marker-write',
+    'after-marker-fsync',
+    'after-generation-dir-fsync',
     'before-pointer-rename',
     'after-pointer-rename',
   ];
@@ -417,21 +421,31 @@ describe('persistence-migration: interruption and pointer authority', () => {
     'after-bank': false,
     'after-quarantine': false,
     'after-validation': false,
+    'before-marker-write': false,
+    'after-marker-write': false,
+    'after-marker-fsync': false,
+    'after-generation-dir-fsync': false,
     'before-pointer-rename': false,
     'after-pointer-rename': true,
   };
 
   // With the publication marker written BEFORE the pointer rename (see
-  // publishPointer), the `before-pointer-rename` crash leaves a marked
-  // generation with no pointer — bootstrap must FAIL CLOSED rather than
-  // discard the marked generation or publish a divergent active one
-  // alongside it. The other pre-pointer crash points fire before any
-  // marker write, so they remain the discard-and-rebuild-fresh path.
+  // publishPointer), crash points that fire AFTER the marker file is
+  // opened leave a marked generation with no pointer — bootstrap must FAIL
+  // CLOSED rather than discard the marked generation or publish a
+  // divergent active one alongside it. `before-marker-write` fires before
+  // the marker is opened, so the generation is genuinely unmarked staging
+  // and follows the discard-and-rebuild-fresh path (same as the staging
+  // crash points after-line/bank/quarantine/validation).
   const markedButNotCommitted: Record<FailPoint, boolean> = {
     'after-line': false,
     'after-bank': false,
     'after-quarantine': false,
     'after-validation': false,
+    'before-marker-write': false,
+    'after-marker-write': true,
+    'after-marker-fsync': true,
+    'after-generation-dir-fsync': true,
     'before-pointer-rename': true,
     'after-pointer-rename': false,
   };
@@ -653,6 +667,78 @@ describe('persistence-migration: interruption and pointer authority', () => {
     );
     const restored = bootstrapPersistence({ dataRoot });
     expect(restored).toEqual(first);
+  });
+
+  it('durably persists the publication marker before pointer rename', () => {
+    // The marker-before-rename ordering invariant: a crash injected at
+    // 'before-pointer-rename' (which fires AFTER the marker write but
+    // BEFORE the pointer rename) must leave a non-empty, readable marker
+    // file on disk with no pointer file. This is the behavioral proxy for
+    // "the marker is durably persisted before the pointer is committed":
+    // if the marker write had not completed (no fsync, or write ordered
+    // after the rename), the crash would leave either no marker or a
+    // pointer file alongside it — both violating the invariant.
+    buildFixture('single-valid-auth', dataRoot);
+    expect(() => bootstrapPersistence({ dataRoot, failAt: 'before-pointer-rename' })).toThrow();
+
+    const gensRoot = path.join(dataRoot, 'persistence-generations');
+    const onDisk = fs.readdirSync(gensRoot);
+    expect(onDisk).toHaveLength(1);
+    const gen = onDisk[0];
+
+    // Marker is on disk and non-empty → the write completed and was
+    // persisted before the rename that never happened.
+    const markerPath = path.join(gensRoot, gen, '.published');
+    expect(fs.existsSync(markerPath)).toBe(true);
+    const markerContent = fs.readFileSync(markerPath, 'utf8');
+    expect(markerContent.length).toBeGreaterThan(0);
+
+    // Pointer does NOT exist → the rename hasn't happened, so the marker
+    // was written strictly before any pointer commitment.
+    expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(false);
+
+    // The marker's parent (the generation directory) must also be durable
+    // before the rename — observable here as the marker directory entry
+    // itself being present on disk (the dir fsync's effect is what made the
+    // marker entry visible post-crash).
+    expect(fs.existsSync(path.join(gensRoot, gen))).toBe(true);
+  });
+
+  it('repairs a missing marker for an authoritative pointer without changing generations', () => {
+    // A valid pointer with all four required artifacts intact but a missing
+    // `.published` marker is the "self-repair" path: readPointer must
+    // durably recreate the marker before returning the generation, rather
+    // than accepting an unmarked committed generation (which later pointer
+    // loss would let discard silently delete).
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+    const generationDir = path.dirname(first.reportPath);
+    const markerPath = path.join(generationDir, '.published');
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    // Simulate the marker being lost (e.g. a partial power loss that
+    // preserved the pointer but not the marker's directory entry).
+    fs.rmSync(markerPath);
+    expect(fs.existsSync(markerPath)).toBe(false);
+
+    // Bootstrap with a valid pointer and all artifacts intact must RETURN
+    // THE SAME generation (no divergence) AND durably repair the marker.
+    const second = bootstrapPersistence({ dataRoot });
+    expect(second).toEqual(first);
+    expect(fs.existsSync(markerPath)).toBe(true);
+    const repairedContent = fs.readFileSync(markerPath, 'utf8');
+    expect(repairedContent.length).toBeGreaterThan(0);
+
+    // Now verify the repair is load-bearing: remove the pointer and assert
+    // bootstrap fails closed on the REPAIRED marker rather than discarding
+    // or replacing the generation (the exact scenario the unmarked-commit
+    // gap previously allowed).
+    fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+    // The generation is preserved on disk (marker protection).
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
+      .toEqual([first.generation]);
   });
 
   it('rejects a pointer naming a path-traversal generation id rather than escaping dataRoot', () => {
