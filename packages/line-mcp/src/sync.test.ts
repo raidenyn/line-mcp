@@ -261,4 +261,54 @@ describe('startSyncLoop', () => {
     // Second stop() must be a no-op (already stopped) and never throw.
     await expect(handle.stop()).resolves.not.toThrow();
   });
+
+  it('concurrent stop() calls share one promise — no caller resolves before the in-flight run settles', async () => {
+    const cache = fakeCache({ u123: ['chat1'] });
+    const credentialStore = fakeCredentialStore([RECORD_A]);
+    let resolveRun!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveRun = resolve; });
+    let syncReached = false;
+    let syncSettled = false;
+    const createRequestClient = vi.fn(async (): Promise<RequestLineClient> => {
+      syncReached = true;
+      await gate;
+      syncSettled = true;
+      return {
+        api: {} as RequestLineClient['api'],
+        messages: { getMessages: vi.fn(), getMessagesInRange: vi.fn().mockResolvedValue([]) },
+      };
+    });
+
+    const handle = startSyncLoop({ credentialStore, cache, createRequestClient }, 100_000);
+    await vi.waitFor(() => { expect(syncReached).toBe(true); });
+
+    // Two CONCURRENT stop() calls: the first must not resolve early via an
+    // `if (stopped) return` guard while the second awaits. Both callers
+    // must observe the SAME pending promise, which resolves only after the
+    // in-flight run settles. A regression where the second stop() resolves
+    // immediately would let that caller's server cleanup close SQLite while
+    // the first caller's stop() is still `await inFlight`-blocked.
+    const stopA = handle.stop().then(() => 'A');
+    const stopB = handle.stop().then(() => 'B');
+
+    await new Promise((r) => setTimeout(r, 30));
+    let aResolved = false;
+    let bResolved = false;
+    stopA.then(() => { aResolved = true; });
+    stopB.then(() => { bResolved = true; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(aResolved).toBe(false);
+    expect(bResolved).toBe(false);
+    expect(syncSettled).toBe(false);
+
+    // Releasing the in-flight run lets BOTH stop() promises resolve, in
+    // either order — but never before the run settles.
+    const results = await Promise.all([
+      stopA,
+      stopB,
+      Promise.resolve().then(() => { resolveRun(); }),
+    ]).then((rs) => rs.slice(0, 2));
+    expect(syncSettled).toBe(true);
+    expect(results.sort()).toEqual(['A', 'B']);
+  });
 });

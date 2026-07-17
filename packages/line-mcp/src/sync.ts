@@ -85,6 +85,13 @@ export function startSyncLoop(
   let inFlight: Promise<void> | null = null;
   let stopped = false;
   let timer: ReturnType<typeof setInterval> | null = null;
+  // Shared promise for stop(): every concurrent caller MUST observe the same
+  // resolution. If `stop()` returned a fresh promise per call (or worse,
+  // resolved immediately on the second call via an `if (stopped) return`
+  // guard), a second caller's server-cleanup could close SQLite while the
+  // first caller's `await inFlight` was still pending — exactly the
+  // close-under-a-running-sync invariant stop() exists to prevent.
+  let stopPromise: Promise<void> | null = null;
 
   const run = (): Promise<void> => {
     if (stopped) return Promise.resolve(); // do not start new runs once stopped
@@ -104,24 +111,29 @@ export function startSyncLoop(
   }, intervalMs);
 
   return {
-    async stop(): Promise<void> {
-      if (stopped) return;
+    stop(): Promise<void> {
+      // Race-safe idempotency: the FIRST call sets `stopped`, clears the
+      // timer, and constructs the shared `stopPromise` that awaits the
+      // in-flight run. All subsequent (or concurrent) callers return that
+      // SAME promise — no caller resolves until the in-flight run has
+      // actually settled, so no concurrent stop() can let server cleanup
+      // close persistence while a sync is still active.
+      if (stopPromise) return stopPromise;
       stopped = true;
       if (timer) {
         clearInterval(timer);
         timer = null;
       }
-      // Await the in-flight run (if any) so persistence owners can close
-      // their DBs only after the sync has stopped touching them. run() never
-      // rejects (syncAll's rejections are caught and logged above), so this
-      // await resolves cleanly; the defensive catch is belt-and-suspenders.
-      if (inFlight) {
-        try {
-          await inFlight;
-        } catch {
-          /* already caught inside run() */
+      stopPromise = (async () => {
+        if (inFlight) {
+          try {
+            await inFlight;
+          } catch {
+            /* already caught inside run() */
+          }
         }
-      }
+      })();
+      return stopPromise;
     },
   };
 }

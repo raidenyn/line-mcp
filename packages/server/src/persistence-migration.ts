@@ -265,7 +265,12 @@ function readPointer(dataRoot: string): ActivePersistence | null {
         missing.map((p) => `  - ${p}`).join('\n') +
         '\nThe data root appears to have been damaged after migration publication. ' +
         'Refusing to fabricate empty DBs inside the committed generation — restore the ' +
-        'missing file(s) from backup or remove the pointer file to re-bootstrap fresh.',
+        'missing file(s) from backup. Do NOT delete the pointer file as a "recovery": ' +
+        'that routes the next bootstrap through discardUnpublishedGenerations, which ' +
+        'would recursively delete the surviving committed generation (including any ' +
+        'persisted messages in the line DB that is still intact), destroying the very ' +
+        'data this throw is protecting. The publication marker inside the committed ' +
+        'generation also guards against accidental discard — see publishPointer().',
     );
   }
   return active;
@@ -274,6 +279,16 @@ function readPointer(dataRoot: string): ActivePersistence | null {
 // Called only when readPointer() found nothing authoritative, so every
 // directory here is by definition unreferenced by any committed pointer —
 // safe to discard and rebuild fresh, per the plan's restart-authority rule.
+//
+// ONE exception: a generation carrying the publication marker (see
+// publishPointer) was committed by a past bootstrap — its pointer may have
+// been removed/readPointer may now return null, but the generation itself
+// is NOT disposable staging. Discarding it would recursively delete the
+// surviving line/bank DBs (which readPointer's missing-artifact throw is
+// actively trying to protect). A marked generation is left on disk for
+// forensic recovery; bootstrap builds a fresh generation elsewhere and
+// publishes a new pointer to it. The orphaned marked generation can be
+// removed manually once the operator has salvaged what they need.
 function discardUnpublishedGenerations(dataRoot: string): void {
   const root = generationsRoot(dataRoot);
   let entries: string[];
@@ -283,9 +298,27 @@ function discardUnpublishedGenerations(dataRoot: string): void {
     return;
   }
   for (const name of entries) {
-    fs.rmSync(path.join(root, name), { recursive: true, force: true });
+    const generationDir = path.join(root, name);
+    if (fs.existsSync(path.join(generationDir, PUBLICATION_MARKER))) {
+      // This generation was published once; even without a live pointer we
+      // refuse to discard it. See the comment above and readPointer()'s
+      // missing-artifact throw for the rationale.
+      process.stderr.write(
+        `[persistence] Skipping published generation ${name} during discard ` +
+          '(no live pointer, but publication marker present — preserving for forensic recovery).\n',
+      );
+      continue;
+    }
+    fs.rmSync(generationDir, { recursive: true, force: true });
   }
 }
+
+// Sentinel file written inside a generation directory at publication time
+// (after the pointer rename succeeds). Its presence is the durable signal
+// that this generation was once authoritative — see discardUnpublishedGenerations
+// for why a published generation is never silently discarded even if its
+// pointer is later removed or damaged.
+const PUBLICATION_MARKER = '.published';
 
 function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint): void {
   const file = pointerPath(dataRoot);
@@ -314,6 +347,20 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
   } finally {
     fs.closeSync(dirFd);
   }
+
+  // Write the publication marker AFTER the pointer rename has succeeded, so
+  // a crash at 'before-pointer-rename' leaves no marker (the generation is
+  // genuinely unreferenced staging and discard will correctly remove it),
+  // but a crash at 'after-pointer-rename' (the pointer IS now committed)
+  // also leaves no marker — the pointer itself is the commit signal in
+  // that case, so the marker is only the durable defense for the case
+  // where the pointer is later removed/damaged after publication. The
+  // marker is best-effort: a crash between the rename and this write leaves
+  // a committed generation without marker protection, but readPointer()
+  // still finds it via the pointer; the marker only matters once the
+  // pointer is gone.
+  const generationDir = safeJoin(dataRoot, 'persistence-generations', generation);
+  fs.writeFileSync(path.join(generationDir, PUBLICATION_MARKER), new Date().toISOString());
 
   if (failAt === 'after-pointer-rename') {
     throw new Error('Simulated crash: after-pointer-rename');

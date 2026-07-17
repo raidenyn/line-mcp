@@ -519,9 +519,15 @@ describe('persistence-migration: interruption and pointer authority', () => {
 
     // Re-bootstrap must NOT silently adopt the damaged generation. It throws
     // with a diagnostic naming the missing artifact, rather than fabricating
-    // an empty DB over the missing slot.
-    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/missing/);
-    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(first.lineDbPath);
+    // an empty DB over the missing slot. The throw must NOT recommend
+    // deleting the pointer as recovery — that would route the next bootstrap
+    // through discardUnpublishedGenerations and recursively delete the
+    // surviving committed generation (see the marker-protection test below).
+    const err = (() => { try { bootstrapPersistence({ dataRoot }); throw null; } catch (e) { return e as Error; } })();
+    expect(String(err.message)).toMatch(/missing/);
+    expect(String(err.message)).toContain(first.lineDbPath);
+    expect(String(err.message)).not.toMatch(/remove the pointer file to re-bootstrap fresh/);
+    expect(String(err.message)).toMatch(/Do NOT delete the pointer file/);
 
     // The missing DB must NOT have been silently recreated by a re-bootstrap
     // attempt (no fabrication side effect), and the other artifacts are
@@ -529,15 +535,59 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(fs.existsSync(first.lineDbPath)).toBe(false);
     expect(fs.existsSync(first.bankDbPath)).toBe(true);
     expect(fs.existsSync(first.quarantineDbPath)).toBe(true);
+  });
 
-    // An operator who removes the (now-dangling) pointer can re-bootstrap
-    // fresh — recovering service at the cost of the persisted messages
-    // (which were already lost with the deleted line DB), as documented by
-    // the throw's "remove the pointer file to re-bootstrap fresh" hint.
+  it('a committed generation whose pointer is later removed is NOT discardable — the publication marker survives pointer deletion', () => {
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+    // Sanity: first boot wrote the publication marker inside its generation.
+    // reportPath = <root>/persistence-generations/<gen>/migration-report.json,
+    // so the generation directory is its parent.
+    const generationDir = path.dirname(first.reportPath);
+    const markerPath = path.join(generationDir, '.published');
+    expect(fs.existsSync(markerPath)).toBe(true);
+
+    // Add a post-migration message to the surviving line DB, the canonical
+    // "data the throw is protecting" scenario from the follow-up review.
+    const cache = new SqliteMessageCache({ dbPath: first.lineDbPath });
+    try {
+      cache.upsertMessages(OWNER, 'cPostMigration', [{ id: 'mPost', createdTime: 9999 } as never]);
+    } finally {
+      cache.close();
+    }
+
+    // Now simulate the operator following the OLD (destructive) "remove the
+    // pointer to re-bootstrap" hint: delete the quarantine DB (the damaged
+    // artifact) AND delete the pointer file. readPointer returns null →
+    // discardUnpublishedGenerations runs. WITHOUT the marker protection this
+    // would recursively delete the surviving line DB's generation and the
+    // post-migration message along with it. WITH the marker, discard
+    // refuses the committed generation and bootstrap builds a fresh one
+    // elsewhere, leaving the damaged-but-marked generation on disk for
+    // forensic salvage.
+    fs.rmSync(first.quarantineDbPath);
     fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+
     const rebuilt = bootstrapPersistence({ dataRoot });
     expect(rebuilt.generation).not.toBe(first.generation);
     expect(fs.existsSync(rebuilt.lineDbPath)).toBe(true);
+
+    // The damaged committed generation SURVIVES on disk (marker protection):
+    // its line DB is intact and the post-migration message is still readable
+    // there, exactly the data the missing-artifact throw exists to protect.
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    const forensic = new SqliteMessageCache({ dbPath: first.lineDbPath });
+    try {
+      expect(forensic.getMessages(OWNER, 'c1').map((m) => m.id)).toEqual(['m1']);
+      expect(forensic.getMessages(OWNER, 'cPostMigration').map((m) => m.id)).toEqual(['mPost']);
+    } finally {
+      forensic.close();
+    }
+
+    // The orphaned marked generation remains on disk (NOT silently discarded)
+    // so the operator can salvage it manually once repairs are done.
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
+      .toContain(path.basename(generationDir));
   });
 
   it('rejects a pointer naming a path-traversal generation id rather than escaping dataRoot', () => {
