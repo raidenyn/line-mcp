@@ -48,7 +48,9 @@ export interface MockFixtures {
     recentMessagesText: string;
     importResult: Record<string, unknown>;
     transactions: readonly Record<string, unknown>[];
-    summaries: Readonly<Record<string, unknown>>;
+    filteredDebit: readonly Record<string, unknown>[];
+    summaryByMonth: Readonly<Record<string, unknown>>;
+    summaryByCategory: Readonly<Record<string, unknown>>;
   };
 }
 
@@ -161,64 +163,79 @@ export function buildMockFixtures(input: { origin: string; epochSeconds: number 
   const listChatsText = [
     '[GROUP] Mock Bank Group (2 members)',
     `  mid: ${MOCK_GROUP_MID}`,
-    `  pictureUrl: ${origin}/fixtures/group-picture.png`,
+    `  pictureUrl: https://profile.line-scdn.net/mock-group-picture.png/preview`,
     '[USER] Alice Mock',
     `  mid: ${MOCK_DIRECT_MID}`,
   ].join('\n');
 
-  const recentMessagesText = groupMessages.slice(-3).map((m) => {
+  const recentMessagesText = groupMessages.slice(-5).map((m) => {
+    const createdMs = parseInt(m.createdTime, 10);
+    const time = Number.isFinite(createdMs) ? new Date(createdMs).toISOString() : 'unknown';
+    const sender = m.from === MOCK_BANK_SENDER_MID ? 'Mock Bank'
+      : m.from === MOCK_DIRECT_MID ? 'Alice Mock'
+      : m.from;
     if (m.contentType === 1) {
-      return `[image] ${m.id}\n  previewUrl: ${m.contentMetadata?.['PREVIEW_URL']}\n  downloadUrl: ${m.contentMetadata?.['DOWNLOAD_URL']}`;
+      const preview = m.contentMetadata?.['PREVIEW_URL'] ?? '';
+      return `[${time}] ${sender}: [image] (preview: ${preview})`;
     }
-    return `[text] ${m.id} from ${m.from}\n  ${m.text}`;
+    return `[${time}] ${sender}: ${m.text}`;
   }).join('\n');
 
   const importResult = {
-    status: 'ok',
-    chatMid: MOCK_GROUP_MID,
-    importedCount: 1,
+    status: 'success',
+    imported: 1,
+    chat_mid: MOCK_GROUP_MID,
+    chat_name: 'Mock Bank Group',
+    date_range: { from: '2026-07-17T09:00:00.000Z', to: '2026-07-17T09:00:00.000Z' },
   };
 
   const transactions = [
     {
-      messageId: 'group-debit',
+      id: 'group-debit',
+      date: '2026-07-17T02:00:00.000Z',
+      original_amount: -125.5,
+      original_currency: 'THB',
+      rawText: 'MOCK TX -125.50 THB at Mock Cafe | 2026-07-17T02:00:00.000Z | acct 1234 | bal 1000.00',
+      merchant: 'Mock Cafe',
+      account: '1234',
+      balance: 1000,
       amount: -125.5,
       currency: 'THB',
-      merchant: 'Mock Cafe',
-      time: '2026-07-17T02:00:00.000Z',
-      account: '1234',
-      balance: 1000.0,
-      category: 'Food',
+      category: 'Smoke Banking',
     },
     {
-      messageId: 'group-credit',
-      amount: 500.0,
-      currency: 'THB',
+      id: 'group-credit',
+      date: '2026-07-17T03:00:00.000Z',
+      original_amount: 500,
+      original_currency: 'THB',
+      rawText: 'MOCK TX +500.00 THB at Mock Employer | 2026-07-17T03:00:00.000Z | acct 1234 | bal 1500.00',
       merchant: 'Mock Employer',
-      time: '2026-07-17T03:00:00.000Z',
       account: '1234',
-      balance: 1500.0,
-      category: 'Income',
+      balance: 1500,
+      amount: 500,
+      currency: 'THB',
+      category: 'Smoke Banking',
     },
   ];
 
-  const summaries = {
-    byMonth: {
-      '2026-07': {
-        totalSpent: 125.5,
-        totalReceived: 500.0,
-        net: 374.5,
-        transactionCount: 2,
-      },
-    },
-    byMerchant: {
-      'Mock Cafe': { total: -125.5, count: 1 },
-      'Mock Employer': { total: 500.0, count: 1 },
-    },
-    byCategory: {
-      Food: { total: -125.5, count: 1 },
-      Income: { total: 500.0, count: 1 },
-    },
+  const filteredDebit = [transactions[0]];
+
+  const summaryByMonth = {
+    total_debit: 125.5,
+    total_credit: 500,
+    net: 374.5,
+    by_group: { '2026-07': { debit: 125.5, credit: 500, count: 2 } },
+    currency: 'THB',
+    transactions_count: 2,
+  };
+
+  const summaryByCategory = {
+    total_debit: 125.5,
+    total_credit: 500,
+    net: 374.5,
+    by_group: { 'Smoke Banking': { debit: 125.5, credit: 500, count: 2 } },
+    currency: 'THB',
+    transactions_count: 2,
   };
 
   return {
@@ -231,7 +248,9 @@ export function buildMockFixtures(input: { origin: string; epochSeconds: number 
       recentMessagesText,
       importResult,
       transactions,
-      summaries,
+      filteredDebit,
+      summaryByMonth,
+      summaryByCategory,
     },
   };
 }
