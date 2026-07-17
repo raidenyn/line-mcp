@@ -127,7 +127,9 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
   const port = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
 
   let cache: SqliteMessageCache | undefined;
-  let syncHandle: ReturnType<typeof setInterval> | undefined;
+  // SyncLoopHandle.stop() awaits the in-flight run before resolving, so the
+  // line cache is never closed underneath a still-running sync.
+  let syncHandle: ReturnType<typeof startSyncLoop> | undefined;
   let httpServer: ReturnType<express.Express['listen']> | undefined;
 
   return {
@@ -197,7 +199,9 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
     },
 
     async stop(): Promise<void> {
-      if (syncHandle) clearInterval(syncHandle);
+      // Stop the sync loop FIRST and await its in-flight run, so the cache
+      // is never closed while a sync is still reading/writing it.
+      await syncHandle?.stop();
       if (httpServer) {
         await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
       }

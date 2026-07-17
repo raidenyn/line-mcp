@@ -35,4 +35,8 @@ export class CategoryStore {
   list(): Category[] {
     return this.db.prepare('SELECT name, pattern FROM categories ORDER BY id ASC').all() as Category[];
   }
+
+  close(): void {
+    this.db.close();
+  }
 }

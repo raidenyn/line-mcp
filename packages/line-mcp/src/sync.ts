@@ -57,18 +57,37 @@ export async function syncAll(options: SyncOptions): Promise<void> {
 }
 
 /**
+ * Disposable handle to a started sync loop. `stop()` clears future ticks AND
+ * resolves only after any in-flight run has settled, so callers that own
+ * persistence (the composed and standalone servers) can safely close their
+ * SQLite caches after `stop()` resolves without a still-running sync
+ * continuing to read/write a closed handle. Idempotent.
+ */
+export interface SyncLoopHandle {
+  stop(): Promise<void>;
+}
+
+/**
  * Starts a periodic sync loop. A process-local single-flight guard ensures
  * that if a run is still in flight when the next interval fires, the overlap
  * shares the SAME in-flight promise rather than starting a second concurrent
  * pass over the same accounts.
+ *
+ * Returns a disposable controller rather than a raw `setInterval` handle so
+ * the in-flight run is observable: `await stop()` prevents new runs and
+ * awaits the current one before persistence is closed.
  */
 export function startSyncLoop(
   options: SyncOptions,
   intervalMs = 24 * 60 * 60 * 1000,
-): ReturnType<typeof setInterval> {
+): SyncLoopHandle {
   process.stderr.write(`[sync] Starting daily sync loop (interval: ${Math.round(intervalMs / 3_600_000)}h)\n`);
   let inFlight: Promise<void> | null = null;
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | null = null;
+
   const run = (): Promise<void> => {
+    if (stopped) return Promise.resolve(); // do not start new runs once stopped
     if (inFlight) return inFlight; // single-flight: share the run already in progress
     const started: Promise<void> = syncAll(options).catch(() => {
       process.stderr.write('[sync] Unexpected sync error\n');
@@ -78,6 +97,31 @@ export function startSyncLoop(
     });
     return inFlight;
   };
-  void run();
-  return setInterval(() => void run(), intervalMs);
+
+  void run(); // immediate first run — same as the historical behavior
+  timer = setInterval(() => {
+    if (!stopped) void run();
+  }, intervalMs);
+
+  return {
+    async stop(): Promise<void> {
+      if (stopped) return;
+      stopped = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      // Await the in-flight run (if any) so persistence owners can close
+      // their DBs only after the sync has stopped touching them. run() never
+      // rejects (syncAll's rejections are caught and logged above), so this
+      // await resolves cleanly; the defensive catch is belt-and-suspenders.
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          /* already caught inside run() */
+        }
+      }
+    },
+  };
 }

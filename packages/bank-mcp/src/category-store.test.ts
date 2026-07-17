@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { CategoryStore } from './category-store';
 
 describe('CategoryStore.list', () => {
@@ -52,5 +55,29 @@ describe('CategoryStore.delete', () => {
     store.upsert({ name: 'Transport', pattern: 'grab' });
     store.delete('Groceries');
     expect(store.list()).toEqual([{ name: 'Transport', pattern: 'grab' }]);
+  });
+});
+
+describe('CategoryStore.close', () => {
+  it('closes the underlying database and is idempotent-safe for callers', () => {
+    const store = new CategoryStore(':memory:');
+    store.upsert({ name: 'Groceries', pattern: 'tesco' });
+    expect(() => store.close()).not.toThrow();
+  });
+
+  it('releases the file handle (a new store can reopen the same file path)', () => {
+    const tmp = path.join(os.tmpdir(), `line-mcp-catstore-${process.pid}-${Date.now()}.db`);
+    try {
+      const first = new CategoryStore(tmp);
+      first.upsert({ name: 'Groceries', pattern: 'tesco' });
+      first.close();
+      // better-sqlite3 locks the file while open; after close a second store
+      // must be able to open the same path without error (handle released).
+      const second = new CategoryStore(tmp);
+      expect(second.list().map((c) => c.name)).toEqual(['Groceries']);
+      second.close();
+    } finally {
+      try { fs.unlinkSync(tmp); } catch { /* tmp cleanup best-effort */ }
+    }
   });
 });

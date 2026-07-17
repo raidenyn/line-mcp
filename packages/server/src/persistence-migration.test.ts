@@ -503,6 +503,43 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(second).toEqual(first);
   });
 
+  it('rejects a committed generation with a missing required DB rather than fabricating an empty one', () => {
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.existsSync(first.bankDbPath)).toBe(true);
+    expect(fs.existsSync(first.quarantineDbPath)).toBe(true);
+    expect(fs.existsSync(first.reportPath)).toBe(true);
+
+    // Damage the committed generation: delete the line DB. The pointer still
+    // names this generation, so without the artifact check the composed
+    // server's SqliteMessageCache would fabricate a brand-new empty line DB
+    // inside the generation, silently hiding the two attributed messages.
+    fs.rmSync(first.lineDbPath);
+
+    // Re-bootstrap must NOT silently adopt the damaged generation. It throws
+    // with a diagnostic naming the missing artifact, rather than fabricating
+    // an empty DB over the missing slot.
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/missing/);
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(first.lineDbPath);
+
+    // The missing DB must NOT have been silently recreated by a re-bootstrap
+    // attempt (no fabrication side effect), and the other artifacts are
+    // untouched — the operator can still repair by restoring the file.
+    expect(fs.existsSync(first.lineDbPath)).toBe(false);
+    expect(fs.existsSync(first.bankDbPath)).toBe(true);
+    expect(fs.existsSync(first.quarantineDbPath)).toBe(true);
+
+    // An operator who removes the (now-dangling) pointer can re-bootstrap
+    // fresh — recovering service at the cost of the persisted messages
+    // (which were already lost with the deleted line DB), as documented by
+    // the throw's "remove the pointer file to re-bootstrap fresh" hint.
+    fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+    const rebuilt = bootstrapPersistence({ dataRoot });
+    expect(rebuilt.generation).not.toBe(first.generation);
+    expect(fs.existsSync(rebuilt.lineDbPath)).toBe(true);
+  });
+
   it('rejects a pointer naming a path-traversal generation id rather than escaping dataRoot', () => {
     fs.mkdirSync(dataRoot, { recursive: true });
     fs.writeFileSync(

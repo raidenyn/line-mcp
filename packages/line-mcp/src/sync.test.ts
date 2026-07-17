@@ -156,7 +156,7 @@ describe('startSyncLoop', () => {
 
     const handle = startSyncLoop({ credentialStore, cache, createRequestClient }, 100_000);
     await new Promise((r) => setTimeout(r, 50));
-    clearInterval(handle);
+    await handle.stop();
 
     expect(getMessagesInRange).toHaveBeenCalled();
   });
@@ -175,7 +175,7 @@ describe('startSyncLoop', () => {
 
     const handle = startSyncLoop({ credentialStore, cache, createRequestClient }, 100_000);
     await new Promise((r) => setTimeout(r, 50));
-    clearInterval(handle);
+    await handle.stop();
 
     const logs = stderr.mock.calls.map(([m]) => String(m)).join('');
     expect(logs).not.toContain(errorText);
@@ -203,9 +203,62 @@ describe('startSyncLoop', () => {
 
     resolveFirst();
     await new Promise((r) => setTimeout(r, 50));
-    clearInterval(handle);
+    await handle.stop();
 
     // After the first run completes, a subsequent tick is free to start a new run.
     expect(calls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('stop() awaits an in-flight run before resolving — persistence is never closed mid-sync', async () => {
+    const cache = fakeCache({ u123: ['chat1'] });
+    const credentialStore = fakeCredentialStore([RECORD_A]);
+    let resolveRun!: () => void;
+    const gate = new Promise<void>((resolve) => { resolveRun = resolve; });
+    let syncReached = false;
+    let syncSettled = false;
+    const createRequestClient = vi.fn(async (): Promise<RequestLineClient> => {
+      syncReached = true;
+      await gate;
+      syncSettled = true;
+      return {
+        api: {} as RequestLineClient['api'],
+        messages: { getMessages: vi.fn(), getMessagesInRange: vi.fn().mockResolvedValue([]) },
+      };
+    });
+
+    const handle = startSyncLoop({ credentialStore, cache, createRequestClient }, 100_000);
+    // Wait until the in-flight run has actually started and is blocked on `gate`.
+    await vi.waitFor(() => { expect(syncReached).toBe(true); });
+
+    // stop() must NOT resolve while the in-flight run is still blocked.
+    let stopResolved = false;
+    const stopPromise = handle.stop().then(() => { stopResolved = true; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(stopResolved).toBe(false);
+
+    // Releasing the in-flight run lets stop() resolve. A persistence owner
+    // closing its DB after `await stop()` would now be safe to do.
+    resolveRun();
+    await stopPromise;
+    expect(syncSettled).toBe(true);
+    expect(stopResolved).toBe(true);
+
+    // A subsequent interval tick must NOT start a new run — stop() prevents
+    // new runs as well as awaiting the current one.
+    const callsAfterStop = (createRequestClient.mock.calls.length);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(createRequestClient.mock.calls.length).toBe(callsAfterStop);
+  });
+
+  it('stop() is idempotent and safe to call when no run is in flight', async () => {
+    const cache = fakeCache({});
+    const credentialStore = fakeCredentialStore([]); // no accounts → run is a no-op
+    const createRequestClient = vi.fn();
+
+    const handle = startSyncLoop({ credentialStore, cache, createRequestClient }, 100_000);
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(handle.stop()).resolves.not.toThrow();
+    // Second stop() must be a no-op (already stopped) and never throw.
+    await expect(handle.stop()).resolves.not.toThrow();
   });
 });

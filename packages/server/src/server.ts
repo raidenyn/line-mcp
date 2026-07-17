@@ -79,7 +79,13 @@ export function createServer(options: ServerOptions): ComposedServer {
   const port = options.port ?? parseInt(process.env.PORT ?? '3000', 10);
 
   let cache: SqliteMessageCache | undefined;
-  let syncHandle: ReturnType<typeof setInterval> | undefined;
+  // CategoryStore owns its own better-sqlite3 connection (separate from the
+  // line cache); retained here so stop() can close it before resolving, the
+  // same way cache.close() releases the messages DB.
+  let categoryStore: CategoryStore | undefined;
+  // SyncLoopHandle.stop() awaits the in-flight run before resolving, so the
+  // line cache is never closed underneath a still-running sync.
+  let syncHandle: ReturnType<typeof startSyncLoop> | undefined;
   let httpServer: ReturnType<express.Express['listen']> | undefined;
 
   return {
@@ -97,6 +103,7 @@ export function createServer(options: ServerOptions): ComposedServer {
       // unlike the owner-scoped line-message cache.
       cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
       const categories = new CategoryStore(active.bankDbPath);
+      categoryStore = categories;
       const templates = new TemplateStore(layout.templatesDir);
       // Built-in bank presets ship inside @raidenyn/bank-mcp and resolve
       // relative to that package, not the data root — constructing this
@@ -189,10 +196,18 @@ export function createServer(options: ServerOptions): ComposedServer {
     },
 
     async stop(): Promise<void> {
-      if (syncHandle) clearInterval(syncHandle);
+      // Stop the sync loop FIRST and await its in-flight run, so the cache
+      // and category store are never closed while a sync is still using them.
+      await syncHandle?.stop();
       if (httpServer) {
         await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
       }
+      // Close both DB-backed stores the composed server owns: the line-message
+      // cache and the bank/category store. CategoryStore opens its own
+      // better-sqlite3 connection (separate from the cache's), so without an
+      // explicit close() the bank DB handle would outlive stop() and leak
+      // across repeated start/stop cycles (e.g. tests).
+      categoryStore?.close();
       cache?.close();
     },
   };

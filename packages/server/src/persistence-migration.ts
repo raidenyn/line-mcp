@@ -217,9 +217,21 @@ interface PointerManifest {
 }
 
 // A pointer is only authoritative when it parses, names a syntactically safe
-// generation, and that generation's report actually exists on disk. Anything
-// else (missing file, corrupt JSON, unsafe/incomplete generation) is treated
-// exactly like "no pointer yet" — never partially trusted.
+// generation, AND every required artifact of that committed generation still
+// exists on disk: the migration report plus the line, bank, and quarantine
+// databases. A pointer to a generation that has been partially deleted or
+// damaged after publication is NOT silently adopted — the constructors the
+// composed server passes these paths to (`SqliteMessageCache`,
+// `CategoryStore`) would otherwise fabricate brand-new empty DBs inside the
+// missing slots and silently hide persisted messages/categories. Surfacing the
+// damage by throwing is preferable to fabricating: a truly fresh data root has
+// no pointer at all (handled by the `readFileSync` catch below), so a pointer
+// that points at an incomplete generation is by definition a damaged root.
+//
+// Syntactically invalid or unsafe generation ids are still treated as "no
+// pointer yet" (return null) so `bootstrapPersistence` can safely discard any
+// orphaned staging and rebuild — those never reached publication in the first
+// place and so carry no real data of their own.
 function readPointer(dataRoot: string): ActivePersistence | null {
   let raw: string;
   try {
@@ -235,13 +247,28 @@ function readPointer(dataRoot: string): ActivePersistence | null {
   }
   const generation = (manifest as Partial<PointerManifest> | null)?.generation;
   if (typeof generation !== 'string') return null;
+  let active: ActivePersistence;
   try {
-    const active = resolveGenerationPaths(dataRoot, generation);
-    if (!fs.existsSync(active.reportPath)) return null;
-    return active;
+    active = resolveGenerationPaths(dataRoot, generation);
   } catch {
     return null;
   }
+  const missing = [
+    active.reportPath,
+    active.lineDbPath,
+    active.bankDbPath,
+    active.quarantineDbPath,
+  ].filter((p) => !fs.existsSync(p));
+  if (missing.length > 0) {
+    throw new Error(
+      `Persistence pointer names generation ${generation} but required artifact(s) are missing:\n` +
+        missing.map((p) => `  - ${p}`).join('\n') +
+        '\nThe data root appears to have been damaged after migration publication. ' +
+        'Refusing to fabricate empty DBs inside the committed generation — restore the ' +
+        'missing file(s) from backup or remove the pointer file to re-bootstrap fresh.',
+    );
+  }
+  return active;
 }
 
 // Called only when readPointer() found nothing authoritative, so every
