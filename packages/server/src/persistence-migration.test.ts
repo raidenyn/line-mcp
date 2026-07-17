@@ -401,7 +401,24 @@ describe('persistence-migration: interruption and pointer authority', () => {
   let dataRoot: string;
 
   beforeEach(() => { dataRoot = mkdtemp(); });
-  afterEach(() => { fs.rmSync(dataRoot, { recursive: true, force: true }); });
+  afterEach(() => {
+    // Restore permissions before rmSync — tests in this block may chmod
+    // files/dirs to 0000 to simulate EACCES, and rmSync(force) can fail to
+    // traverse a 0000 directory. Walk the tree and restore 0755 on any
+    // directory that might have been locked down.
+    try { fs.chmodSync(dataRoot, 0o755); } catch { /* may already be gone */ }
+    function restoreWalk(dir: string) {
+      let entries: string[];
+      try { entries = fs.readdirSync(dir); } catch { return; }
+      for (const name of entries) {
+        const p = path.join(dir, name);
+        try { fs.chmodSync(p, 0o755); } catch { /* best-effort */ }
+        try { if (fs.statSync(p).isDirectory()) restoreWalk(p); } catch { /* best-effort */ }
+      }
+    }
+    restoreWalk(dataRoot);
+    fs.rmSync(dataRoot, { recursive: true, force: true });
+  });
 
   const failPoints: FailPoint[] = [
     'after-line',
@@ -755,6 +772,117 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(active.lineDbPath.startsWith(path.resolve(dataRoot) + path.sep)).toBe(true);
     expect(active.bankDbPath.startsWith(path.resolve(dataRoot) + path.sep)).toBe(true);
     expect(active.quarantineDbPath.startsWith(path.resolve(dataRoot) + path.sep)).toBe(true);
+  });
+
+  // ─── Filesystem-error fail-closed (Task 2) ────────────────────────────────
+
+  // Helper: set up a fully committed generation with a valid pointer, then
+  // return the paths the caller will damage.
+  function committedGeneration(dataRoot: string): ActivePersistence {
+    buildFixture('single-valid-auth', dataRoot);
+    return bootstrapPersistence({ dataRoot });
+  }
+
+  // Restores permissions on paths modified by the tests below. Runs in
+  // afterEach AND inline before assertions that need to read the tree.
+  function restorePerms(paths: string[]): void {
+    for (const p of paths) {
+      try { fs.chmodSync(p, 0o755); } catch { /* may not exist */ }
+    }
+  }
+
+  it('fails closed on persistence filesystem errors: pointer read EACCES throws and publishes nothing', () => {
+    const first = committedGeneration(dataRoot);
+    const pointerFile = path.join(dataRoot, 'persistence-current.json');
+    const gensBefore = fs.readdirSync(path.join(dataRoot, 'persistence-generations'));
+
+    // Make the pointer file unreadable (EACCES on readFileSync).
+    fs.chmodSync(pointerFile, 0o000);
+
+    // Bootstrap must throw the EACCES error, NOT silently treat it as "no
+    // pointer" (which would publish a divergent active generation).
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+
+    // No new generation was published; the pointer is unchanged.
+    restorePerms([pointerFile]);
+    const gensAfter = fs.readdirSync(path.join(dataRoot, 'persistence-generations'));
+    expect(gensAfter).toEqual(gensBefore);
+    // The pointer still names the same generation.
+    const ptr = JSON.parse(fs.readFileSync(pointerFile, 'utf8'));
+    expect(ptr.generation).toBe(first.generation);
+  });
+
+  it('fails closed on persistence filesystem errors: generations-root readdir EACCES throws and preserves data', () => {
+    const first = committedGeneration(dataRoot);
+    const gensRoot = path.join(dataRoot, 'persistence-generations');
+    const pointerFile = path.join(dataRoot, 'persistence-current.json');
+
+    // Remove the pointer so bootstrap reaches discardUnpublishedGenerations.
+    fs.rmSync(pointerFile);
+    // Make the generations root non-listable (EACCES on readdirSync).
+    fs.chmodSync(gensRoot, 0o000);
+
+    // Bootstrap must throw the EACCES error, NOT silently return [] from
+    // readdirSync (which would bypass the fail-closed check and publish a
+    // divergent active generation alongside the preserved one).
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+
+    // The marked generation is preserved on disk (nothing was deleted or
+    // published). Restore perms to verify.
+    restorePerms([gensRoot]);
+    const gensAfter = fs.readdirSync(gensRoot);
+    expect(gensAfter).toEqual([first.generation]);
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    // No new pointer was published.
+    expect(fs.existsSync(pointerFile)).toBe(false);
+  });
+
+  it('fails closed on persistence filesystem errors: marker stat EACCES throws and leaves every generation untouched', () => {
+    const first = committedGeneration(dataRoot);
+    const gensRoot = path.join(dataRoot, 'persistence-generations');
+    const genDir = path.join(gensRoot, first.generation);
+    const pointerFile = path.join(dataRoot, 'persistence-current.json');
+
+    // Remove the pointer so bootstrap reaches discardUnpublishedGenerations.
+    fs.rmSync(pointerFile);
+    // Make the marker's parent directory (the generation dir) inaccessible
+    // so statSync on the marker throws EACCES.
+    fs.chmodSync(genDir, 0o000);
+
+    // Bootstrap must throw the EACCES error from safeMarkerExists's statSync,
+    // NOT silently treat the marker as absent (which would let rmSync delete
+    // the committed generation).
+    expect(() => bootstrapPersistence({ dataRoot })).toThrow();
+
+    // Nothing was deleted; the generation is intact.
+    restorePerms([genDir]);
+    expect(fs.existsSync(genDir)).toBe(true);
+    expect(fs.existsSync(first.lineDbPath)).toBe(true);
+    expect(fs.readdirSync(gensRoot)).toEqual([first.generation]);
+  });
+
+  it('ENOENT controls: a fresh root still bootstraps, and genuine unmarked staging is still discarded', () => {
+    // Fresh root: no pointer, no generations tree at all → ENOENT from
+    // readPointer's readFileSync AND from discardUnpublishedGenerations's
+    // readdirSync. Both must treat ENOENT as "absent" and proceed normally.
+    buildFixture('fresh-root', dataRoot);
+    const active = bootstrapPersistence({ dataRoot });
+    expect(active.generation).toMatch(/^gen-/);
+    expect(fs.existsSync(active.lineDbPath)).toBe(true);
+
+    // Genuine unmarked staging: bootstrap once with a crash before the
+    // marker write (no pointer, no marker), then restart — the unmarked
+    // staging is discarded and rebuilt fresh.
+    fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+    fs.rmSync(path.join(dataRoot, 'persistence-generations'), { recursive: true, force: true });
+    buildFixture('single-valid-auth', dataRoot);
+    expect(() => bootstrapPersistence({ dataRoot, failAt: 'before-marker-write' })).toThrow();
+    const onDisk = fs.readdirSync(path.join(dataRoot, 'persistence-generations'));
+    expect(onDisk).toHaveLength(1);
+    expect(fs.existsSync(path.join(path.join(dataRoot, 'persistence-generations'), onDisk[0], '.published'))).toBe(false);
+    const rebuilt = bootstrapPersistence({ dataRoot });
+    expect(rebuilt.generation).not.toBe(onDisk[0]);
+    expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations'))).toEqual([rebuilt.generation]);
   });
 });
 

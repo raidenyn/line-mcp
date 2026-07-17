@@ -318,8 +318,13 @@ function readPointer(dataRoot: string): ActivePersistence | null {
   let raw: string;
   try {
     raw = fs.readFileSync(pointerPath(dataRoot), 'utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    // Only ENOENT means "no pointer yet" — every other read error (EACCES,
+    // EIO, ENOTDIR, etc.) is a filesystem-level problem that must fail
+    // closed rather than be silently treated as "no pointer" (which would
+    // publish a divergent active generation alongside any committed data).
+    if (isErrnoCode(err, 'ENOENT')) return null;
+    throw err;
   }
   let manifest: unknown;
   try {
@@ -382,8 +387,13 @@ function discardUnpublishedGenerations(dataRoot: string): string[] {
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
-  } catch {
-    return [];
+  } catch (err) {
+    // Only ENOENT means "no generations tree yet" (fresh root) — every other
+    // readdir error (EACCES, EIO, etc.) must fail closed rather than be
+    // silently treated as "empty" (which would bypass the fail-closed
+    // check and publish a divergent active generation).
+    if (isErrnoCode(err, 'ENOENT')) return [];
+    throw err;
   }
   const preserved: string[] = [];
   for (const name of entries) {
