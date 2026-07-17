@@ -43,6 +43,7 @@ export interface ServerOptions {
   basePath?: string;
   /** Overrides the auto-derived public base URL used in import upload links. */
   publicUrl?: string;
+  lineApiBaseUrl?: string;
   /**
    * e2e-test-only bearer bypass. Never set in production; cli.ts is the only
    * caller that reads the TEST_TOKEN / LINE_AUTH_DATA environment variables
@@ -123,6 +124,7 @@ export function createServer(options: ServerOptions): ComposedServer {
         endpoints: publicEndpointConfig(port, basePath),
         credentialStore,
         authStoreDir: layout.authDir,
+        lineApiBaseUrl: options.lineApiBaseUrl,
       });
       for (const { token, authData } of options.testAuth ?? []) {
         authProvider.seedTestToken(token, authData);
@@ -135,6 +137,7 @@ export function createServer(options: ServerOptions): ComposedServer {
         cache,
         resolveCredentials: (principal) => authProvider.resolveCredentials(principal),
         authStoreDir: layout.authDir,
+        lineApiBaseUrl: options.lineApiBaseUrl,
       });
 
       const importService = new ImportService({

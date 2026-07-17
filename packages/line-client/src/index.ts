@@ -42,6 +42,7 @@ export interface LineApiClient extends MessageReader {
 export interface LineClientOptions {
   fetch?: typeof globalThis.fetch;
   onAuthRefreshed?: (snapshot: Readonly<AuthData>) => void | Promise<void>;
+  lineApiBaseUrl?: string;
 }
 
 /**
@@ -51,7 +52,12 @@ export interface LineClientOptions {
  * snapshot rather than by mutating the `auth` the caller passed in.
  */
 export function createLineClient(auth: AuthData | null, options: LineClientOptions = {}): LineApiClient {
-  const inner = new LineClient(auth, options.fetch ?? globalThis.fetch, options.onAuthRefreshed);
+  const inner = new LineClient(
+    auth,
+    options.fetch ?? globalThis.fetch,
+    options.onAuthRefreshed,
+    options.lineApiBaseUrl,
+  );
 
   return {
     isAuthenticated: () => inner.isAuthenticated(),

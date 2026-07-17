@@ -30,6 +30,7 @@ export interface OAuthRouterDeps {
   requiredScopes: readonly string[];
   authStoreDir: string;
   credentialStore: CredentialStore;
+  lineApiBaseUrl?: string;
   issueTokens(authData: AuthData): IssuedTokenPair;
   issueFromRefresh(refreshToken: string): Promise<IssuedTokenPair | null>;
 }
@@ -262,7 +263,7 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
     selected: StoredAuthRecord | null,
     res: Response,
   ): Promise<void> {
-    const lineClient = new LineClient();
+    const lineClient = new LineClient(undefined, globalThis.fetch, undefined, deps.lineApiBaseUrl);
     const { qrUrl } = await lineClient.login(selected?.certificate);
     const qrDataUrl = await QRCode.toDataURL(qrUrl);
     const sid = crypto.randomBytes(16).toString('hex');

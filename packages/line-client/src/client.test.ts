@@ -9,6 +9,7 @@ vi.mock('./signer', () => ({
 }));
 
 import { LineClient, AuthData } from './client';
+import { createLineClient } from './index';
 import { getHmac } from './signer';
 
 // JWT with exp 10 days from now so refreshIfExpired never triggers
@@ -908,5 +909,82 @@ describe('LineClient profile', () => {
   ])('rejects an invalid authenticated profile', async (profile, message) => {
     const client = new LineClient(baseAuth, vi.fn().mockResolvedValue(apiOk(profile)));
     await expect(client.getProfileDisplayName()).rejects.toThrow(message);
+  });
+});
+
+describe('LineClient gateway base URL', () => {
+  it('keeps the production gateway by default', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.endsWith('/getAllChatMids')) return apiOk({ memberChatMids: [], invitedChatMids: [] });
+      if (url.endsWith('/getAllContactIds')) return apiOk([]);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    await new LineClient(baseAuth, fetchFn).listChats();
+    expect(fetchFn.mock.calls.every(([url]) =>
+      url.startsWith('https://line-chrome-gw.line-apps.com/api/'),
+    )).toBe(true);
+  });
+
+  it('uses and normalizes a custom gateway for ordinary requests', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.endsWith('/getAllChatMids')) return apiOk({ memberChatMids: [], invitedChatMids: [] });
+      if (url.endsWith('/getAllContactIds')) return apiOk([]);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = new LineClient(baseAuth, fetchFn, undefined, 'http://127.0.0.1:18181/');
+
+    await client.listChats();
+
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    for (const [url] of fetchFn.mock.calls) {
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:18181\/api\//);
+      expect(url).not.toContain('18181//api');
+    }
+  });
+
+  it('forwards the public createLineClient option', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.endsWith('/getAllChatMids')) return apiOk({ memberChatMids: [], invitedChatMids: [] });
+      if (url.endsWith('/getAllContactIds')) return apiOk([]);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = createLineClient(baseAuth, {
+      fetch: fetchFn,
+      lineApiBaseUrl: 'http://127.0.0.1:18184',
+    });
+
+    await client.listChats();
+
+    expect(fetchFn.mock.calls.every(([url]) =>
+      url.startsWith('http://127.0.0.1:18184/api/'),
+    )).toBe(true);
+  });
+
+  it('uses the same custom gateway for token refresh', async () => {
+    const soonAuth = { ...baseAuth, accessToken: makeFakeJwt(3600) };
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/auth/tokenRefresh')) {
+        return new Response(JSON.stringify({ accessToken: makeFakeJwt(), refreshToken: 'rotated' }));
+      }
+      if (url.endsWith('/getAllChatMids')) return apiOk({ memberChatMids: [], invitedChatMids: [] });
+      if (url.endsWith('/getAllContactIds')) return apiOk([]);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = new LineClient(soonAuth, fetchFn, undefined, 'http://127.0.0.1:18182');
+
+    await client.listChats();
+
+    expect(fetchFn.mock.calls[0][0]).toBe('http://127.0.0.1:18182/api/auth/tokenRefresh');
+  });
+
+  it('does not rewrite an absolute image URL', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(new Response(Buffer.from([1]), {
+      headers: { 'content-type': 'image/jpeg' },
+    }));
+    const client = new LineClient(baseAuth, fetchFn, undefined, 'http://127.0.0.1:18183');
+
+    await client.getImageBuffer('http://127.0.0.1:19191/fixture.jpg');
+
+    expect(fetchFn).toHaveBeenCalledExactlyOnceWith('http://127.0.0.1:19191/fixture.jpg');
   });
 });

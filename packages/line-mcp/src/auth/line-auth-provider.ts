@@ -65,6 +65,7 @@ export interface LineAuthProviderOptions {
    * explicitly so the router's synchronous selector enumeration stays cheap.
    */
   authStoreDir: string;
+  lineApiBaseUrl?: string;
   /** Injectable clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
   /** Access-token lifetime in seconds. Default 24h. */
@@ -129,6 +130,7 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
       requiredScopes: this.scopes,
       authStoreDir: this.options.authStoreDir,
       credentialStore: this.options.credentialStore,
+      lineApiBaseUrl: this.options.lineApiBaseUrl,
       issueTokens: (authData) => this.issueTokens(authData),
       issueFromRefresh: (token) => this.issueFromRefresh(token),
     });

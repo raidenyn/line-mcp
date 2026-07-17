@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   const server = createServer({
     dataRoot: resolveDataRoot(),
     testAuth: resolveTestAuth(),
+    lineApiBaseUrl: process.env.LINE_API_BASE_URL,
   });
   await server.start();
 

@@ -30,6 +30,7 @@ export interface RequestClientFactoryOptions {
   resolveCredentials(principal: LinePrincipal): Promise<Readonly<AuthData> | null>;
   /** Fired synchronously by the underlying LineClient when a token is refreshed mid-request. */
   onAuthRefreshed?: (authData: Readonly<AuthData>) => void;
+  lineApiBaseUrl?: string;
 }
 
 /**
@@ -47,7 +48,10 @@ export function createRequestClientFactory(
     if (!authData) {
       throw new Error(`No LINE credentials available for ${principal.mid}`);
     }
-    const api = createLineClient(authData, { onAuthRefreshed: options.onAuthRefreshed });
+    const api = createLineClient(authData, {
+      onAuthRefreshed: options.onAuthRefreshed,
+      lineApiBaseUrl: options.lineApiBaseUrl,
+    });
     const messages = withMessageCache(api, options.cache, principal.mid);
     return { api, messages };
   };

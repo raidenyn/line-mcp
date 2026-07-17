@@ -44,6 +44,19 @@ describe('createServerRequestClientFactory — plumbing (Step 2)', () => {
     cache.close();
   });
 
+  it('forwards lineApiBaseUrl straight through to @raidenyn/line-mcp\'s createRequestClientFactory', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    const resolveCredentials = vi.fn(async () => authDataFor('u-owner'));
+    const factorySpy = vi.spyOn(lineMcpModule, 'createRequestClientFactory');
+    const lineApiBaseUrl = 'http://127.0.0.1:18202';
+
+    createServerRequestClientFactory({ cache, resolveCredentials, authStoreDir: '/tmp/does-not-matter', lineApiBaseUrl });
+
+    expect(factorySpy).toHaveBeenCalledTimes(1);
+    expect(factorySpy.mock.calls[0][0].lineApiBaseUrl).toBe(lineApiBaseUrl);
+    cache.close();
+  });
+
   it('wires onAuthRefreshed to persist the EXACT refreshed snapshot via recordRefreshedAuth(fresh, authStoreDir)', () => {
     const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     const authStoreDir = mkdtemp();
