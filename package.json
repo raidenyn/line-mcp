@@ -10,6 +10,7 @@
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "test:unit": "vitest run packages tests/architecture",
+    "test:smoke": "npm run build && vitest run tests/smoke",
     "test:e2e": "vitest run tests/e2e.test.ts",
     "lint": "eslint .",
     "start": "node packages/server/dist/cli.js"

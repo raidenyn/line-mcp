@@ -188,61 +188,66 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     res: http.ServerResponse,
     pathname: string,
   ): Promise<void> {
-    if (!isLineRoute(pathname)) {
-      rejectLine(res, 'unknown_route', pathname);
-      return;
-    }
-    recordRoute(pathname);
-
-    let rawBody: Buffer;
+    state.beginLineRequest();
     try {
-      rawBody = await readRawBody(req);
-    } catch {
-      rejectLine(res, 'invalid_body', pathname, { reason: 'payload-too-large' });
-      return;
-    }
-
-    if (pathname === LINE_ROUTES.refresh) {
-      const h = lowerHeadersOnce(req.headers);
-      if (h['x-line-access'] != null || h['x-hmac'] != null) {
-        rejectLine(res, 'invalid_body', pathname, { reason: 'auth/hmac headers forbidden on refresh' });
+      if (!isLineRoute(pathname)) {
+        rejectLine(res, 'unknown_route', pathname);
         return;
       }
+      recordRoute(pathname);
+
+      let rawBody: Buffer;
+      try {
+        rawBody = await readRawBody(req);
+      } catch {
+        rejectLine(res, 'invalid_body', pathname, { reason: 'payload-too-large' });
+        return;
+      }
+
+      if (pathname === LINE_ROUTES.refresh) {
+        const h = lowerHeadersOnce(req.headers);
+        if (h['x-line-access'] != null || h['x-hmac'] != null) {
+          rejectLine(res, 'invalid_body', pathname, { reason: 'auth/hmac headers forbidden on refresh' });
+          return;
+        }
+        const parsed = parseJsonBody(rawBody);
+        if (!parsed.ok) {
+          rejectLine(res, parsed.rejection!, pathname);
+          return;
+        }
+        handleRefresh(res, parsed.value);
+        return;
+      }
+
+      const rawReq: MockRawRequest = {
+        pathname,
+        method: req.method ?? 'POST',
+        headers: req.headers,
+        rawBody,
+      };
+
+      const headerResult = validateHeaders(rawReq);
+      if (!headerResult.ok) {
+        rejectLine(res, headerResult.rejection!, pathname, headerResult.diagnostic);
+        return;
+      }
+
+      const hmacResult = await validateHmac(rawReq, headerResult.accessToken);
+      if (!hmacResult.ok) {
+        rejectLine(res, hmacResult.rejection!, pathname);
+        return;
+      }
+
       const parsed = parseJsonBody(rawBody);
       if (!parsed.ok) {
         rejectLine(res, parsed.rejection!, pathname);
         return;
       }
-      handleRefresh(res, parsed.value);
-      return;
+
+      await dispatchLine(res, pathname, headerResult.accessToken, parsed.value, headerResult);
+    } finally {
+      state.endLineRequest();
     }
-
-    const rawReq: MockRawRequest = {
-      pathname,
-      method: req.method ?? 'POST',
-      headers: req.headers,
-      rawBody,
-    };
-
-    const headerResult = validateHeaders(rawReq);
-    if (!headerResult.ok) {
-      rejectLine(res, headerResult.rejection!, pathname, headerResult.diagnostic);
-      return;
-    }
-
-    const hmacResult = await validateHmac(rawReq, headerResult.accessToken);
-    if (!hmacResult.ok) {
-      rejectLine(res, hmacResult.rejection!, pathname);
-      return;
-    }
-
-    const parsed = parseJsonBody(rawBody);
-    if (!parsed.ok) {
-      rejectLine(res, parsed.rejection!, pathname);
-      return;
-    }
-
-    await dispatchLine(res, pathname, headerResult.accessToken, parsed.value, headerResult);
   }
 
   function lowerHeadersOnce(headers: Record<string, string | string[] | undefined>): Record<string, string | string[] | undefined> {
@@ -716,7 +721,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
         await handleImage(res, pathname);
         return;
       }
-      if (method === 'POST' && (isLineRoute(pathname) || true)) {
+      if (method === 'POST') {
         await handleLine(req, res, pathname);
         return;
       }

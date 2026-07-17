@@ -88,6 +88,28 @@ jobs:
       - name: Smoke both containers (healthz + real MCP tools/list)
         run: npx vitest run tests/docker/docker-smoke.test.ts
 
+  # Mock-backed LINE smoke gate: runs `npm run test:smoke`, which builds the
+  # workspace once and then exercises both compiled CLI targets (the composed
+  # server and the standalone line-mcp server) against a strict, in-process LINE
+  # gateway mock. Covers seeded-credential and full-OAuth (PKCE/PIN/certificate
+  # reuse/token refresh) scenarios for both targets, asserting the composed ten
+  # tool surface and the standalone five. Requires no LINE credentials and no
+  # Docker.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Mock-backed LINE smoke tests
+        run: npm run test:smoke
+
   # NOTE: the live LINE end-to-end suite (`npm run test:e2e`) is deliberately
   # NOT part of this PR-blocking workflow. It requires a real `.line-auth.json`
   # LINE session and is run manually as a pre-release check (see README.md).

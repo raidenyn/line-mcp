@@ -119,6 +119,14 @@ export class MockLineState {
     this.routeCounts[route] = (this.routeCounts[route] ?? 0) + 1;
   }
 
+  beginLineRequest(): void {
+    this.pendingLineRequests += 1;
+  }
+
+  endLineRequest(): void {
+    this.pendingLineRequests = Math.max(0, this.pendingLineRequests - 1);
+  }
+
   private reset(): void {
     this.config = null;
     this.issuedAccessTokens.clear();
