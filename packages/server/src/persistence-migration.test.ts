@@ -421,6 +421,21 @@ describe('persistence-migration: interruption and pointer authority', () => {
     'after-pointer-rename': true,
   };
 
+  // With the publication marker written BEFORE the pointer rename (see
+  // publishPointer), the `before-pointer-rename` crash leaves a marked
+  // generation with no pointer — bootstrap must FAIL CLOSED rather than
+  // discard the marked generation or publish a divergent active one
+  // alongside it. The other pre-pointer crash points fire before any
+  // marker write, so they remain the discard-and-rebuild-fresh path.
+  const markedButNotCommitted: Record<FailPoint, boolean> = {
+    'after-line': false,
+    'after-bank': false,
+    'after-quarantine': false,
+    'after-validation': false,
+    'before-pointer-rename': true,
+    'after-pointer-rename': false,
+  };
+
   function generationsOnDisk(root: string): string[] {
     const dir = path.join(root, 'persistence-generations');
     return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
@@ -442,6 +457,7 @@ describe('persistence-migration: interruption and pointer authority', () => {
       expect(() => bootstrapPersistence({ dataRoot, failAt })).toThrow();
 
       const pointerWasPublished = pointerCommittedAt[failAt];
+      const markedWithoutPointer = markedButNotCommitted[failAt];
       expect(fs.existsSync(path.join(dataRoot, 'persistence-current.json'))).toBe(pointerWasPublished);
 
       // "No normal store can open a staging generation": the only public way
@@ -457,6 +473,28 @@ describe('persistence-migration: interruption and pointer authority', () => {
           })();
 
       expect(hashFile(dbPath)).toBe(sourceHashBefore); // never mutated by staging or the crash
+
+      if (markedWithoutPointer) {
+        // Crash at 'before-pointer-rename' after the marker was written but
+        // before the pointer rename: bootstrap must FAIL CLOSED rather than
+        // discard the marked generation or publish a divergent active one
+        // alongside it. The orphaned marked generation stays on disk for
+        // forensic recovery; the operator must either restore a valid
+        // pointer naming it (now impossible — the pointer file was never
+        // written) or manually evacuate the marked generation before
+        // re-bootstrap. There is no automatic recovery path.
+        expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+        // The orphaned marked generation and the legacy source are intact.
+        expect(generationsOnDisk(dataRoot)).toEqual([interruptedGeneration]);
+        expect(fs.existsSync(path.join(
+          dataRoot, 'persistence-generations', interruptedGeneration, '.published',
+        ))).toBe(true);
+        expect(hashFile(dbPath)).toBe(sourceHashBefore);
+        // Manually evacuate the orphaned marked generation (operator action
+        // the throw's recovery hint documents) so a subsequent bootstrap can
+        // proceed from the still-present legacy source.
+        fs.rmSync(path.join(dataRoot, 'persistence-generations', interruptedGeneration), { recursive: true, force: true });
+      }
 
       // 2. Restart: call bootstrapPersistence again with no failAt.
       const restart: { active: ActivePersistence } = { active: bootstrapPersistence({ dataRoot }) };
@@ -537,7 +575,7 @@ describe('persistence-migration: interruption and pointer authority', () => {
     expect(fs.existsSync(first.quarantineDbPath)).toBe(true);
   });
 
-  it('a committed generation whose pointer is later removed is NOT discardable — the publication marker survives pointer deletion', () => {
+  it('a committed generation whose pointer is later removed is NOT discardable — bootstrap fails closed, no divergent active generation', () => {
     buildFixture('single-valid-auth', dataRoot);
     const first = bootstrapPersistence({ dataRoot });
     // Sanity: first boot wrote the publication marker inside its generation.
@@ -556,25 +594,26 @@ describe('persistence-migration: interruption and pointer authority', () => {
       cache.close();
     }
 
-    // Now simulate the operator following the OLD (destructive) "remove the
-    // pointer to re-bootstrap" hint: delete the quarantine DB (the damaged
-    // artifact) AND delete the pointer file. readPointer returns null →
-    // discardUnpublishedGenerations runs. WITHOUT the marker protection this
-    // would recursively delete the surviving line DB's generation and the
-    // post-migration message along with it. WITH the marker, discard
-    // refuses the committed generation and bootstrap builds a fresh one
-    // elsewhere, leaving the damaged-but-marked generation on disk for
-    // forensic salvage.
+    // Simulate the destructive scenario from the reviewer's pushback: damage
+    // one artifact (the quarantine DB) AND remove the pointer. readPointer
+    // can no longer establish authority (the pointer is gone), so bootstrap
+    // reaches the fail-closed branch and refuses — neither discarding the
+    // marked committed generation nor publishing a divergent active
+    // generation alongside it. The throw names the preserved generation and
+    // documents that the operator must restore a valid pointer or manually
+    // evacuate the orphaned marked generation before re-bootstrap.
     fs.rmSync(first.quarantineDbPath);
     fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
 
-    const rebuilt = bootstrapPersistence({ dataRoot });
-    expect(rebuilt.generation).not.toBe(first.generation);
-    expect(fs.existsSync(rebuilt.lineDbPath)).toBe(true);
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(path.basename(generationDir));
 
-    // The damaged committed generation SURVIVES on disk (marker protection):
-    // its line DB is intact and the post-migration message is still readable
-    // there, exactly the data the missing-artifact throw exists to protect.
+    // The damaged committed generation SURVIVES on disk: its line DB is
+    // intact and the post-migration message is still readable, exactly the
+    // data the missing-artifact throw and the fail-closed branch both exist
+    // to protect. No divergent fresh generation was published and made
+    // active; the only generations on disk are the original (preserved)
+    // one — so the operator can repair the pointer (or evacuate) deliberately.
     expect(fs.existsSync(first.lineDbPath)).toBe(true);
     const forensic = new SqliteMessageCache({ dbPath: first.lineDbPath });
     try {
@@ -583,11 +622,37 @@ describe('persistence-migration: interruption and pointer authority', () => {
     } finally {
       forensic.close();
     }
-
-    // The orphaned marked generation remains on disk (NOT silently discarded)
-    // so the operator can salvage it manually once repairs are done.
+    // No fresh generation was published alongside the preserved one.
     expect(fs.readdirSync(path.join(dataRoot, 'persistence-generations')))
-      .toContain(path.basename(generationDir));
+      .toEqual([path.basename(generationDir)]);
+  });
+
+  it('a committed generation whose pointer is missing but is itself intact is re-authorizable by restoring the pointer', () => {
+    // Distinguish the "operator can recover" path from the destructive
+    // scenario above: if the committed generation is fully intact and only
+    // the pointer was lost, the operator can restore the pointer manually
+    // and bootstrap re-authorizes that same generation (no divergence, no
+    // data loss). This is the recovery path the fail-closed throw's hint
+    // documents.
+    buildFixture('single-valid-auth', dataRoot);
+    const first = bootstrapPersistence({ dataRoot });
+
+    // Pointer lost (e.g. an errant `rm` against persistence-current.json).
+    fs.rmSync(path.join(dataRoot, 'persistence-current.json'));
+
+    // bootstrap fails closed: a published generation exists but no pointer
+    // can establish authority for it.
+    expect(() => bootstrapPersistence({ dataRoot })).toThrowError(/Refusing to bootstrap/);
+
+    // Operator restores a valid pointer naming the preserved generation.
+    // All required artifacts of that generation are still on disk, so
+    // readPointer re-authorizes it and bootstrap returns the SAME generation.
+    fs.writeFileSync(
+      path.join(dataRoot, 'persistence-current.json'),
+      JSON.stringify({ generation: first.generation, publishedAt: new Date().toISOString() }),
+    );
+    const restored = bootstrapPersistence({ dataRoot });
+    expect(restored).toEqual(first);
   });
 
   it('rejects a pointer naming a path-traversal generation id rather than escaping dataRoot', () => {

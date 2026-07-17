@@ -276,49 +276,55 @@ function readPointer(dataRoot: string): ActivePersistence | null {
   return active;
 }
 
+// Sentinel file written inside a generation directory at publication time
+// (BEFORE the pointer rename — see publishPointer for the ordering
+// rationale). Its presence is the durable signal that this generation was
+// once authoritative — see discardUnpublishedGenerations for the two ways
+// this assumption is enforced (no silent discard, no divergent
+// re-bootstrap via the preserved list it returns).
+const PUBLICATION_MARKER = '.published';
+
 // Called only when readPointer() found nothing authoritative, so every
-// directory here is by definition unreferenced by any committed pointer —
-// safe to discard and rebuild fresh, per the plan's restart-authority rule.
+// directory here is by definition unreferenced by any committed pointer.
+// Returns the list of any still-published generations (those carrying the
+// publication marker) so bootstrapPersistence can decide to refuse rather
+// than publish a divergent active dataset that would silently hide the
+// persisted messages in the orphaned committed generation(s).
 //
-// ONE exception: a generation carrying the publication marker (see
-// publishPointer) was committed by a past bootstrap — its pointer may have
-// been removed/readPointer may now return null, but the generation itself
-// is NOT disposable staging. Discarding it would recursively delete the
-// surviving line/bank DBs (which readPointer's missing-artifact throw is
-// actively trying to protect). A marked generation is left on disk for
-// forensic recovery; bootstrap builds a fresh generation elsewhere and
-// publishes a new pointer to it. The orphaned marked generation can be
-// removed manually once the operator has salvaged what they need.
-function discardUnpublishedGenerations(dataRoot: string): void {
+// A generation carrying the publication marker was committed by a past
+// bootstrap — its pointer may have been removed/readPointer may now
+// return null, but the generation itself is NOT disposable staging.
+// Discarding it would recursively delete the surviving line/bank DBs
+// (which readPointer's missing-artifact throw is actively trying to
+// protect). A marked generation is skipped here and left on disk for
+// forensic recovery.
+function discardUnpublishedGenerations(dataRoot: string): string[] {
   const root = generationsRoot(dataRoot);
   let entries: string[];
   try {
     entries = fs.readdirSync(root);
   } catch {
-    return;
+    return [];
   }
+  const preserved: string[] = [];
   for (const name of entries) {
     const generationDir = path.join(root, name);
     if (fs.existsSync(path.join(generationDir, PUBLICATION_MARKER))) {
       // This generation was published once; even without a live pointer we
-      // refuse to discard it. See the comment above and readPointer()'s
-      // missing-artifact throw for the rationale.
+      // refuse to discard it. See PUBLICATION_MARKER above for the
+      // rationale and the bootstrap-fail-closed invariant that depends on
+      // this list being returned to the caller.
       process.stderr.write(
         `[persistence] Skipping published generation ${name} during discard ` +
           '(no live pointer, but publication marker present — preserving for forensic recovery).\n',
       );
+      preserved.push(name);
       continue;
     }
     fs.rmSync(generationDir, { recursive: true, force: true });
   }
+  return preserved;
 }
-
-// Sentinel file written inside a generation directory at publication time
-// (after the pointer rename succeeds). Its presence is the durable signal
-// that this generation was once authoritative — see discardUnpublishedGenerations
-// for why a published generation is never silently discarded even if its
-// pointer is later removed or damaged.
-const PUBLICATION_MARKER = '.published';
 
 function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint): void {
   const file = pointerPath(dataRoot);
@@ -335,6 +341,34 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
     fs.closeSync(fd);
   }
 
+  // Write the publication marker BEFORE the pointer rename. The marker is
+  // the generation's durable "this was once committed, never silently
+  // discard it" flag (see discardUnpublishedGenerations). Writing it before
+  // the rename is what makes that guarantee airtight:
+  //
+  //   - crash at 'before-pointer-rename': the generation is marked but
+  //     NO pointer exists. discard will refuse it (marker present) AND
+  //     fail-closed later in this function (see the stand-alone published-
+  //     generation scan below) will refuse to bootstrap fresh alongside it.
+  //     The orphaned marked generation stays on disk for forensic salvage.
+  //     This is fine: the marker write is itself idempotent and harmless
+  //     (it writes a timestamp file), and the alternative (write-after-
+  //     rename) had a real gap — an injected marker write failure post-
+  //     rename would leave a committed, unmarked generation, and later
+  //     pointer loss would let discard silently delete it.
+  //   - crash at 'after-pointer-rename': the pointer is already committed
+  //     AND the marker is already written; readPointer succeeds and the
+  //     generation is authoritative, exactly as intended.
+  //
+  // The marker write is intentionally NOT fail-tolerant here: if it throws,
+  // we abort before publishing the pointer, leaving the generation as
+  // unmarked staging (no marker, no pointer → genuinely unreferenced →
+  // discard correctly removes it on the next run). That is the safe state
+  // — the alternative (swallowing marker failures to "commit anyway")
+  // reintroduces the gap.
+  const generationDir = safeJoin(dataRoot, 'persistence-generations', generation);
+  fs.writeFileSync(path.join(generationDir, PUBLICATION_MARKER), new Date().toISOString());
+
   if (failAt === 'before-pointer-rename') {
     throw new Error('Simulated crash: before-pointer-rename');
   }
@@ -347,20 +381,6 @@ function publishPointer(dataRoot: string, generation: string, failAt?: FailPoint
   } finally {
     fs.closeSync(dirFd);
   }
-
-  // Write the publication marker AFTER the pointer rename has succeeded, so
-  // a crash at 'before-pointer-rename' leaves no marker (the generation is
-  // genuinely unreferenced staging and discard will correctly remove it),
-  // but a crash at 'after-pointer-rename' (the pointer IS now committed)
-  // also leaves no marker — the pointer itself is the commit signal in
-  // that case, so the marker is only the durable defense for the case
-  // where the pointer is later removed/damaged after publication. The
-  // marker is best-effort: a crash between the rename and this write leaves
-  // a committed generation without marker protection, but readPointer()
-  // still finds it via the pointer; the marker only matters once the
-  // pointer is gone.
-  const generationDir = safeJoin(dataRoot, 'persistence-generations', generation);
-  fs.writeFileSync(path.join(generationDir, PUBLICATION_MARKER), new Date().toISOString());
 
   if (failAt === 'after-pointer-rename') {
     throw new Error('Simulated crash: after-pointer-rename');
@@ -468,10 +488,44 @@ export function bootstrapPersistence(options: {
   const existing = readPointer(dataRoot);
   if (existing) return existing;
 
-  // No committed pointer: any staging generation left behind by a prior
-  // interrupted run is unreferenced by definition, so it's safe to discard
-  // and rebuild from scratch.
-  discardUnpublishedGenerations(dataRoot);
+  // No valid pointer. Sweep the generations tree: anything that's a
+  // genuine unreferenced staging generation (no publication marker, no
+  // pointer naming it) is removed; anything carrying the marker was once
+  // committed and stays on disk. The preserved list is returned so this
+  // bootstrap can decide whether proceeding is safe at all.
+  const preserved = discardUnpublishedGenerations(dataRoot);
+  if (preserved.length > 0) {
+    // FAIL CLOSED: at least one published generation exists on this data
+    // root but readPointer() could not establish authority for ANY of
+    // them (pointer missing/malformed, or pointer named a damaged
+    // generation and readPointer threw). Proceeding would publish a fresh
+    // generation from whatever legacy source (or empty) the disk happens
+    // to have and make IT active, silently diverging from the persisted
+    // messages in the orphaned committed generation(s) — the running
+    // server would see an empty cache while real data sits unreachable in
+    // the preserved generation's line DB. Refuse instead; the operator
+    // must either restore a valid pointer (backup of
+    // persistence-current.json naming one of the preserved generations,
+    // or repair its artifacts so readPointer re-authorizes it) or
+    // explicitly evacuate/delete the orphaned generation(s) before
+    // re-bootstrap. There is no automatic recovery path because the
+    // right recovery depends on operator intent.
+    throw new Error(
+      `Refusing to bootstrap: ${preserved.length} published generation(s) exist ` +
+        `on this data root but no current pointer could establish authority ` +
+        `(pointer missing, malformed, or names a generation with missing ` +
+        `required artifacts).\n` +
+        `Preserved generation(s): ${preserved.join(', ')}\n` +
+        `Each still holds its committed line/bank/quarantine DBs on disk. ` +
+        `To recover, restore a valid persistence-current.json pointing at ` +
+        `one of them (and ensure all its required artifacts exist so ` +
+        `readPointer re-authorizes it), or — if the data is genuinely ` +
+        `disposable — manually remove the preserved generation directory ` +
+        `(s) before restarting. There is no automatic path: a fresh ` +
+        `bootstrap would publish a divergent active generation and ` +
+        `silently hide the persisted messages in the preserved one(s).`,
+    );
+  }
 
   const legacy = readLegacySource(dataRoot);
   const inventory = inventoryStoredAuthRecords(authDir(dataRoot));
