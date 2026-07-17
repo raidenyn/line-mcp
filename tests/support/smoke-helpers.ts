@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { expect } from 'vitest';
 import type { Client } from '@modelcontextprotocol/sdk/client';
 import { createTokenCodec } from '@raidenyn/mcp-runtime';
@@ -8,6 +9,7 @@ import {
   MOCK_ACCOUNT_MID,
   MOCK_GROUP_MID,
   MOCK_DIRECT_MID,
+  MOCK_PIN,
   JPEG_BYTES,
   EXPORT_FILE_TEXT,
   type MockFixtures,
@@ -40,6 +42,8 @@ function extractText(result: { content: Array<{ type: string; text?: string }> }
   const item = result.content.find((c) => c.type === 'text' && typeof c.text === 'string');
   return item?.text ?? '';
 }
+
+export { extractText };
 
 function extractJson<T>(text: string): T {
   const first = text.trimStart();
@@ -190,3 +194,165 @@ export async function runComposedBankAssertions(client: Client, fixtures: MockFi
   const tmplDelete = await client.callTool({ name: 'manage_templates', arguments: { chatMid: MOCK_GROUP_MID, action: 'delete', name: template.name } });
   expect(extractText(tmplDelete)).toBe(`Template '${template.name}' deleted from chat ${MOCK_GROUP_MID}.`);
 }
+
+export interface OAuthTokens {
+  accessToken: string;
+  refreshToken: string;
+}
+
+const LOOPBACK_REDIRECT_URI = 'http://127.0.0.1:8765/callback';
+
+export async function authorizeWithPkce(
+  appOrigin: string,
+  options: { expectPin: boolean },
+): Promise<OAuthTokens> {
+  const verifier = crypto.randomBytes(32).toString('base64url');
+  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const redirectUri = LOOPBACK_REDIRECT_URI;
+  const registration = await fetch(`${appOrigin}/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      redirect_uris: [redirectUri],
+      token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      client_name: 'mock-line-smoke',
+      scope: 'line',
+    }),
+  });
+  expect(registration.status).toBe(201);
+  const regBody = await registration.json() as { client_id: string };
+  const clientId = regBody.client_id;
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state: 'smoke-state',
+  });
+  const page = await (await fetch(`${appOrigin}/authorize?${params}`)).text();
+  const contextMatch = page.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/);
+  if (!contextMatch) throw new Error('OAuth page did not include oauth-context');
+  const contextJson = JSON.parse(contextMatch[1]) as { sid: string };
+  const sid = contextJson.sid;
+
+  let observedPin: string | undefined;
+  let code: string | undefined;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const pollRes = await fetch(`${appOrigin}/authorize/poll?sid=${encodeURIComponent(sid)}`);
+    const poll = await pollRes.json() as {
+      phase: string;
+      pin?: string;
+      code?: string;
+      error?: string;
+    };
+    if (poll.phase === 'pin_needed') observedPin = poll.pin;
+    if (poll.phase === 'failed') throw new Error(`OAuth login failed: ${poll.error}`);
+    if (poll.phase === 'complete') {
+      code = poll.code;
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  expect(observedPin).toBe(options.expectPin ? MOCK_PIN : undefined);
+  if (!code) throw new Error('OAuth login did not complete');
+
+  const tokenRes = await fetch(`${appOrigin}/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: verifier,
+    }),
+  });
+  expect(tokenRes.status).toBe(200);
+  const tokenBody = await tokenRes.json() as { access_token: string; refresh_token: string };
+  return { accessToken: tokenBody.access_token, refreshToken: tokenBody.refresh_token };
+}
+
+export async function refreshMcpToken(
+  appOrigin: string,
+  refreshToken: string,
+): Promise<OAuthTokens> {
+  const res = await fetch(`${appOrigin}/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+    }),
+  });
+  expect(res.status).toBe(200);
+  const body = await res.json() as { access_token: string; refresh_token: string };
+  return { accessToken: body.access_token, refreshToken: body.refresh_token };
+}
+
+function readDataRootSecret(dataRoot: string): string {
+  const secretFile = path.join(dataRoot, 'secret');
+  const secret = fs.readFileSync(secretFile, 'utf8').trim();
+  if (!secret) throw new Error(`data-root secret missing at ${secretFile}`);
+  return secret;
+}
+
+function mintExpiredAccessToken(dataRoot: string, port: number): string {
+  const secret = readDataRootSecret(dataRoot);
+  const issuer = `http://localhost:${port}`;
+  const audience = `http://localhost:${port}/mcp`;
+  const codec = createTokenCodec({
+    secret,
+    issuer,
+    audience,
+    now: () => 0,
+  });
+  // Issued at epoch 0 with TTL of 1 second → expired well before the test's now().
+  return codec.issueAccessToken({
+    subject: MOCK_ACCOUNT_MID,
+    scopes: ['line'],
+    ttlSeconds: 1,
+  });
+}
+
+export async function assertMcpUnauthorized(
+  appOrigin: string,
+  dataRoot: string,
+  port: number,
+): Promise<void> {
+  const mcpUrl = `${appOrigin}/mcp`;
+  const expectedWww = `Bearer error="invalid_token", resource_metadata="http://localhost:${port}/.well-known/oauth-protected-resource/mcp"`;
+  const initBody = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'smoke-unauthorized', version: '0.0.0' },
+    },
+  };
+
+  const cases: Array<{ label: string; headers: Record<string, string> }> = [
+    { label: 'no bearer', headers: {} },
+    { label: 'garbage bearer', headers: { authorization: 'Bearer not-a-real-token' } },
+    {
+      label: 'expired MCP token',
+      headers: { authorization: `Bearer ${mintExpiredAccessToken(dataRoot, port)}` },
+    },
+  ];
+
+  for (const { headers } of cases) {
+    const res = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(initBody),
+    });
+    expect(res.status).toBe(401);
+    const body = await res.json() as { error?: string };
+    expect(body.error).toBe('invalid_token');
+    expect(res.headers.get('www-authenticate')).toBe(expectedWww);
+  }
+}
+

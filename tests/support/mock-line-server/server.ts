@@ -174,6 +174,15 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     return Object.values(LINE_ROUTES).includes(pathname as typeof LINE_ROUTES[keyof typeof LINE_ROUTES]);
   }
 
+  const ROUTE_PATH_TO_KEY: ReadonlyMap<string, string> = new Map<string, string>(
+    Object.entries(LINE_ROUTES).map(([key, path]) => [path, key]),
+  );
+
+  function recordRoute(pathname: string): void {
+    const key = ROUTE_PATH_TO_KEY.get(pathname) ?? pathname;
+    state.recordRoute(key);
+  }
+
   async function handleLine(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -183,7 +192,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       rejectLine(res, 'unknown_route', pathname);
       return;
     }
-    state.recordRoute(pathname);
+    recordRoute(pathname);
 
     let rawBody: Buffer;
     try {
