@@ -1,12 +1,12 @@
 # Default service is the COMPOSED server (ten tools: five messenger + five
-# bank). The standalone messenger-only server is defined under the "standalone"
+# bank). The standalone messenger-only server is defined under the "min"
 # profile and MUST use its own data volume — the two servers never share a data
 # root on the same host (the composed server owns bank/category data the
 # standalone server knows nothing about, and the standalone server refuses to
 # start against a legacy pre-migration combined database). Start the standalone
-# variant explicitly with:  docker compose --profile standalone up line-mcp-standalone
+# variant explicitly with:  docker compose --profile min up line-mcp
 services:
-  line-mcp:
+  line-mcp-full:
     build:
       context: .
       target: server
@@ -16,7 +16,7 @@ services:
       - BASE_PATH=/
       - PORT=3000
     volumes:
-      - line-mcp-data:/data
+      - bank-mcp-data:/data
     healthcheck:
       test: ["CMD-SHELL", "node -e \"let p=process.env.BASE_PATH||'';let bp=p.replace(/\\/+$/,'');if(bp&&!bp.startsWith('/'))bp='/'+bp;require('http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:bp+'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
       interval: 30s
@@ -24,8 +24,8 @@ services:
       retries: 3
       start_period: 10s
 
-  line-mcp-standalone:
-    profiles: ["standalone"]
+  line-mcp:
+    profiles: ["min"]
     build:
       context: .
       target: line-mcp
@@ -34,9 +34,9 @@ services:
     environment:
       - BASE_PATH=/
       - PORT=3000
-    # A SEPARATE volume from the composed server — never reuse line-mcp-data.
+    # A SEPARATE volume from the composed server — never reuse bank-mcp-data.
     volumes:
-      - line-mcp-standalone-data:/data
+      - line-mcp-data:/data
     healthcheck:
       test: ["CMD-SHELL", "node -e \"let p=process.env.BASE_PATH||'';let bp=p.replace(/\\/+$/,'');if(bp&&!bp.startsWith('/'))bp='/'+bp;require('http').get({host:'127.0.0.1',port:process.env.PORT||3000,path:bp+'/healthz'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
@@ -45,5 +45,5 @@ services:
       start_period: 10s
 
 volumes:
+  bank-mcp-data:
   line-mcp-data:
-  line-mcp-standalone-data:
