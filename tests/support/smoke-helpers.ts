@@ -215,6 +215,64 @@ export interface OAuthTokens {
 
 const LOOPBACK_REDIRECT_URI = 'http://127.0.0.1:8765/callback';
 
+/**
+ * Validate that every advertised OAuth endpoint shares the expected local
+ * app origin (or the loopback alias with the same port), then rebind it to
+ * {@link appOrigin} while preserving the advertised path. A metadata
+ * regression advertising a foreign origin (e.g.
+ * https://attacker.example/register) would otherwise make the supposedly
+ * local deterministic smoke suite perform external network I/O.
+ */
+export function validateAndRebindEndpoints(
+  metadata: { authorization_endpoint: string; token_endpoint: string; registration_endpoint: string },
+  appOrigin: string,
+): { authorizationEndpoint: string; tokenEndpoint: string; registrationEndpoint: string } {
+  const expectedOrigin = appOrigin.replace(/\/$/, '');
+  const portMatch = expectedOrigin.match(/^https?:\/\/(?:localhost|127\.0\.0\.1):(\d+)$/);
+  if (!portMatch) {
+    throw new Error(
+      `validateAndRebindEndpoints expects a loopback appOrigin (http://localhost:<port> or http://127.0.0.1:<port>), got: ${expectedOrigin}`,
+    );
+  }
+  const port = portMatch[1];
+  const allowedOrigin = new RegExp(
+    `^https?://(?:localhost|127\\.0\\.0\\.1):${port}$`,
+  );
+  const fields: Array<keyof typeof metadata> = [
+    'authorization_endpoint',
+    'token_endpoint',
+    'registration_endpoint',
+  ];
+  const result: Record<string, string> = {};
+  for (const field of fields) {
+    const advertised = metadata[field];
+    const match = advertised.match(/^https?:\/\/[^/]+(?=\/|$)/);
+    if (!match) {
+      throw new Error(
+        `OAuth metadata field ${field} has an unparseable origin: ${advertised}`,
+      );
+    }
+    const advertisedOrigin = match[0];
+    if (!allowedOrigin.test(advertisedOrigin)) {
+      throw new Error(
+        `OAuth metadata field ${field} advertised origin ${advertisedOrigin} does not match expected local origin (localhost or 127.0.0.1 on port ${port})`,
+      );
+    }
+    const path = advertised.slice(advertisedOrigin.length);
+    if (!path.startsWith('/')) {
+      throw new Error(
+        `OAuth metadata field ${field} has no path component: ${advertised}`,
+      );
+    }
+    result[field] = `${expectedOrigin}${path}`;
+  }
+  return {
+    authorizationEndpoint: result.authorization_endpoint!,
+    tokenEndpoint: result.token_endpoint!,
+    registrationEndpoint: result.registration_endpoint!,
+  };
+}
+
 export async function authorizeWithPkce(
   appOrigin: string,
   options: { expectPin: boolean },
@@ -228,11 +286,13 @@ export async function authorizeWithPkce(
     registration_endpoint: string;
   };
   // The server advertises its canonical issuer (e.g. http://localhost:PORT); the
-  // harness drives 127.0.0.1, so assert the advertised endpoints end with the
-  // expected path suffixes and share the same port as the running app.
+  // harness drives 127.0.0.1, so assert the advertised endpoints share the
+  // expected local origin (rejecting any foreign origin) and rebind each URL
+  // to appOrigin while preserving the advertised path suffixes.
   expect(asMeta.authorization_endpoint.endsWith('/authorize')).toBe(true);
   expect(asMeta.token_endpoint.endsWith('/token')).toBe(true);
   expect(asMeta.registration_endpoint.endsWith('/register')).toBe(true);
+  const rebinding = validateAndRebindEndpoints(asMeta, appOrigin);
 
   const prMetaRes = await fetch(`${appOrigin}/.well-known/oauth-protected-resource/mcp`);
   expect(prMetaRes.status).toBe(200);
@@ -243,7 +303,7 @@ export async function authorizeWithPkce(
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
   const redirectUri = LOOPBACK_REDIRECT_URI;
-  const registration = await fetch(asMeta.registration_endpoint, {
+  const registration = await fetch(rebinding.registrationEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -267,14 +327,9 @@ export async function authorizeWithPkce(
     code_challenge_method: 'S256',
     state: 'smoke-state',
   });
-  // The advertised endpoints are bound to the server's canonical issuer host
-  // (localhost), but the harness connects via 127.0.0.1. Swap the host so the
-  // request still reaches the in-process app while honoring the advertised path.
-  const authorizationEndpoint = asMeta.authorization_endpoint.replace(
-    /^https?:\/\/[^/]+/,
-    () => appOrigin,
-  );
-  const page = await (await fetch(`${authorizationEndpoint}?${params}`)).text();
+  // validateAndRebindEndpoints already rebound the authorization endpoint to
+  // appOrigin while honoring the advertised path; fetch it directly.
+  const page = await (await fetch(`${rebinding.authorizationEndpoint}?${params}`)).text();
   const contextMatch = page.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/);
   if (!contextMatch) throw new Error('OAuth page did not include oauth-context');
   const contextJson = JSON.parse(contextMatch[1]) as { sid: string };
@@ -301,7 +356,7 @@ export async function authorizeWithPkce(
   expect(observedPin).toBe(options.expectPin ? MOCK_PIN : undefined);
   if (!code) throw new Error('OAuth login did not complete');
 
-  const tokenRes = await fetch(asMeta.token_endpoint.replace(/^https?:\/\/[^/]+/, () => appOrigin), {
+  const tokenRes = await fetch(rebinding.tokenEndpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
