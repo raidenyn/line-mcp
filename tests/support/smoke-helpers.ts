@@ -206,10 +206,31 @@ export async function authorizeWithPkce(
   appOrigin: string,
   options: { expectPin: boolean },
 ): Promise<OAuthTokens> {
+  // Step 1: Fetch the OAuth authorization-server and protected-resource metadata.
+  const asMetaRes = await fetch(`${appOrigin}/.well-known/oauth-authorization-server`);
+  expect(asMetaRes.status).toBe(200);
+  const asMeta = await asMetaRes.json() as {
+    authorization_endpoint: string;
+    token_endpoint: string;
+    registration_endpoint: string;
+  };
+  // The server advertises its canonical issuer (e.g. http://localhost:PORT); the
+  // harness drives 127.0.0.1, so assert the advertised endpoints end with the
+  // expected path suffixes and share the same port as the running app.
+  expect(asMeta.authorization_endpoint.endsWith('/authorize')).toBe(true);
+  expect(asMeta.token_endpoint.endsWith('/token')).toBe(true);
+  expect(asMeta.registration_endpoint.endsWith('/register')).toBe(true);
+
+  const prMetaRes = await fetch(`${appOrigin}/.well-known/oauth-protected-resource/mcp`);
+  expect(prMetaRes.status).toBe(200);
+  const prMeta = await prMetaRes.json() as { resource: string; authorization_servers: string[] };
+  expect(prMeta.resource.endsWith('/mcp')).toBe(true);
+  expect(prMeta.authorization_servers.length).toBeGreaterThan(0);
+
   const verifier = crypto.randomBytes(32).toString('base64url');
   const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
   const redirectUri = LOOPBACK_REDIRECT_URI;
-  const registration = await fetch(`${appOrigin}/register`, {
+  const registration = await fetch(asMeta.registration_endpoint, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -233,7 +254,14 @@ export async function authorizeWithPkce(
     code_challenge_method: 'S256',
     state: 'smoke-state',
   });
-  const page = await (await fetch(`${appOrigin}/authorize?${params}`)).text();
+  // The advertised endpoints are bound to the server's canonical issuer host
+  // (localhost), but the harness connects via 127.0.0.1. Swap the host so the
+  // request still reaches the in-process app while honoring the advertised path.
+  const authorizationEndpoint = asMeta.authorization_endpoint.replace(
+    /^https?:\/\/[^/]+/,
+    () => appOrigin,
+  );
+  const page = await (await fetch(`${authorizationEndpoint}?${params}`)).text();
   const contextMatch = page.match(/<script type="application\/json" id="oauth-context">([\s\S]*?)<\/script>/);
   if (!contextMatch) throw new Error('OAuth page did not include oauth-context');
   const contextJson = JSON.parse(contextMatch[1]) as { sid: string };
@@ -260,7 +288,7 @@ export async function authorizeWithPkce(
   expect(observedPin).toBe(options.expectPin ? MOCK_PIN : undefined);
   if (!code) throw new Error('OAuth login did not complete');
 
-  const tokenRes = await fetch(`${appOrigin}/token`, {
+  const tokenRes = await fetch(asMeta.token_endpoint.replace(/^https?:\/\/[^/]+/, () => appOrigin), {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({

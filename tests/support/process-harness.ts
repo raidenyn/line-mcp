@@ -7,7 +7,11 @@ import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { MockScenarioConfig, MockReport } from './mock-line-server/state';
 
-const REDACT_KEYS = /token|secret|password|nonce|hmac|authorization|control/i;
+const SAFE_ENV_KEYS = new Set([
+  'PORT', 'DATA_DIR', 'BASE_PATH', 'PUBLIC_URL', 'LINE_API_BASE_URL',
+  'NODE_ENV', 'MOCK_LINE_CONTROL_TOKEN', 'TS_NODE_PROJECT', 'TS_NODE_IGNORE_DIAGNOSTICS',
+  'PATH',
+]);
 const MID_PATTERN = /u_[a-z0-9_]+/gi;
 
 function redact(value: string): string {
@@ -18,15 +22,11 @@ function redact(value: string): string {
     .replace(/(MOCK_LINE_CONTROL_TOKEN=)([^\r\n]*)/gi, '$1<redacted>');
 }
 
-function redactObjectKeys(obj: Record<string, unknown>): Record<string, unknown> {
+function filterSafeEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (REDACT_KEYS.test(k)) {
-      out[k] = '<redacted>';
-    } else if (v && typeof v === 'object' && !Array.isArray(v)) {
-      out[k] = redactObjectKeys(v as Record<string, unknown>);
-    } else {
-      out[k] = v;
+  for (const key of Object.keys(env)) {
+    if (SAFE_ENV_KEYS.has(key)) {
+      out[key] = env[key];
     }
   }
   return out;
@@ -61,14 +61,14 @@ interface BuiltProcess extends ManagedProcess {
 }
 
 function buildReadyError(label: string, reason: string, stdout: string, stderr: string, env?: NodeJS.ProcessEnv): Error {
-  const envSummary = env ? JSON.stringify(redactObjectKeys(env as Record<string, unknown>)) : '';
+  const envSummary = env ? JSON.stringify(filterSafeEnv(env)) : '';
   const msg = [
     `[${label}] ${reason}`,
     `--- stdout ---`,
     redact(stdout.slice(-Math.min(stdout.length, DEFAULT_STDIO_CAP))),
     `--- stderr ---`,
     redact(stderr.slice(-Math.min(stderr.length, DEFAULT_STDIO_CAP))),
-    envSummary ? `--- env (redacted) ---\n${envSummary}` : '',
+    envSummary ? `--- env (safe allowlist) ---\n${envSummary}` : '',
   ].filter(Boolean).join('\n');
   return new Error(msg);
 }
@@ -93,6 +93,15 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
 
     const cleanupEarly = () => {
       if (timer) { clearTimeout(timer); timer = null; }
+    };
+
+    const failSpawn = async (reason: string) => {
+      if (settled) return;
+      settled = true;
+      cleanupEarly();
+      // The child was already spawned; a readiness failure must not leak it.
+      await terminateChildNow(child);
+      reject(buildReadyError(options.label, reason, stdoutBuf, stderrBuf, options.env));
     };
 
     if (child.stdout) {
@@ -139,25 +148,43 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
       }
     });
     child.on('error', (err) => {
-      if (!settled) {
-        settled = true;
-        cleanupEarly();
-        reject(buildReadyError(options.label, `spawn error: ${err.message}`, stdoutBuf, stderrBuf, options.env));
-      }
+      failSpawn(`spawn error: ${err.message}`);
     });
 
     if (options.readyLine) {
       timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          reject(buildReadyError(options.label, `readiness timeout after ${readyTimeoutMs}ms`, stdoutBuf, stderrBuf, options.env));
-        }
+        failSpawn(`readiness timeout after ${readyTimeoutMs}ms`);
       }, readyTimeoutMs);
     } else {
       settled = true;
       resolve(makeManaged(child, () => stdoutBuf, () => stderrBuf));
     }
   });
+}
+
+async function terminateChildNow(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  if (pid == null || pid <= 0) return;
+  if (child.exitCode != null || child.signalCode != null) return;
+  try { process.kill(-pid, 'SIGTERM'); } catch { /* already dead */ }
+  const exited = await new Promise<number | null>((resolve) => {
+    if (child.exitCode != null || child.signalCode != null) {
+      resolve(child.exitCode ?? (child.signalCode ? -1 : 0));
+      return;
+    }
+    const onExit = (code: number | null) => {
+      clearTimeout(fallback);
+      resolve(code != null ? code : -1);
+    };
+    const fallback = setTimeout(() => {
+      child.removeListener('exit', onExit);
+      resolve(null);
+    }, 2_000);
+    child.once('exit', onExit);
+  });
+  if (exited == null) {
+    try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead */ }
+  }
 }
 
 function makeManaged(child: ChildProcess, getStdout: () => string, getStderr: () => string): BuiltProcess {
@@ -273,10 +300,6 @@ export async function runRegisteredCleanups(): Promise<void> {
   for (const fn of fns.reverse()) {
     try { await fn(); } catch { /* swallow; original failure already surfaced */ }
   }
-}
-
-if (typeof afterAll !== 'undefined') {
-  afterAll(runRegisteredCleanups, 30_000);
 }
 
 function parseReadyMessage(line: string): { host: string; port: number; protocol: string } | null {
@@ -455,7 +478,7 @@ export async function startApplication(options: StartApplicationOptions): Promis
     while (Date.now() < deadline) {
       if (earlyExitRejection) throw earlyExitRejection;
       try {
-        const res = await fetch(healthz);
+        const res = await fetch(healthz, { signal: AbortSignal.timeout(2_000) });
         if (res.ok) {
           const body = await res.json().catch(() => null);
           if (body != null && typeof body === 'object' && (body as { status?: string }).status === 'ok') {

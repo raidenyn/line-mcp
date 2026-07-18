@@ -25,6 +25,8 @@ import {
   parseJsonBody,
   redact,
   timingSafeEqualString,
+  extractAuthSessionId,
+  exactObjectKeys,
   type MockRawRequest,
 } from './contracts';
 
@@ -244,6 +246,19 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
         return;
       }
 
+      if (headerResult.longPoll) {
+        const bodySessionId = extractAuthSessionId(parsed.value);
+        if (bodySessionId == null) {
+          rejectLine(res, 'invalid_body', pathname, { missing: 'authSessionId in body for long-poll' });
+          return;
+        }
+        if (headerResult.sessionId !== bodySessionId) {
+          state.abandonSession(bodySessionId);
+          rejectLine(res, 'invalid_session', pathname, { headerSessionId: headerResult.sessionId, bodySessionId });
+          return;
+        }
+      }
+
       await dispatchLine(res, pathname, headerResult.accessToken, parsed.value, headerResult);
     } finally {
       state.endLineRequest();
@@ -292,7 +307,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       return;
     }
     if (pathname === LINE_ROUTES.identity) {
-      handleIdentity(res, body);
+      handleIdentity(res, body, accessToken);
       return;
     }
     if (pathname === LINE_ROUTES.profile) {
@@ -333,7 +348,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleCreateSession(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1 || typeof arr[0] !== 'object' || arr[0] === null || Array.isArray(arr[0])) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], [])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.createSession, { expected: '[ {} ]' });
       return;
     }
@@ -345,12 +360,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleCreateQrCode(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['authSessionId'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.createQrCode, { expected: '[{ authSessionId }]' });
       return;
     }
-    const arg = arr[0] as { authSessionId?: string } | null;
-    const authSessionId = arg?.authSessionId;
+    const arg = arr[0] as { authSessionId: string };
+    const authSessionId = arg.authSessionId;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.createQrCode, { missing: 'authSessionId' });
       return;
@@ -373,12 +388,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleCheckQr(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['authSessionId'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.checkQr, { expected: '[{ authSessionId }]' });
       return;
     }
-    const arg = arr[0] as { authSessionId?: string } | null;
-    const authSessionId = arg?.authSessionId;
+    const arg = arr[0] as { authSessionId: string };
+    const authSessionId = arg.authSessionId;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.checkQr, { missing: 'authSessionId' });
       return;
@@ -396,19 +411,23 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleVerifyCertificate(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['authSessionId', 'certificate'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.verifyCertificate, { expected: '[{ authSessionId, certificate }]' });
       return;
     }
-    const arg = arr[0] as { authSessionId?: string; certificate?: string } | null;
-    const authSessionId = arg?.authSessionId;
-    const certificate = arg?.certificate ?? '';
+    const arg = arr[0] as { authSessionId: string; certificate: string };
+    const authSessionId = arg.authSessionId;
+    const certificate = arg.certificate;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.verifyCertificate, { missing: 'authSessionId' });
       return;
     }
+    if (typeof certificate !== 'string') {
+      rejectLine(res, 'invalid_body', LINE_ROUTES.verifyCertificate, { missing: 'certificate' });
+      return;
+    }
     try {
-      const result = state.verifyCertificate(authSessionId, String(certificate));
+      const result = state.verifyCertificate(authSessionId, certificate);
       if (result.accepted) {
         json(res, 200, lineOk({}));
         return;
@@ -424,12 +443,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleCreatePin(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['authSessionId'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.createPin, { expected: '[{ authSessionId }]' });
       return;
     }
-    const arg = arr[0] as { authSessionId?: string } | null;
-    const authSessionId = arg?.authSessionId;
+    const arg = arr[0] as { authSessionId: string };
+    const authSessionId = arg.authSessionId;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.createPin, { missing: 'authSessionId' });
       return;
@@ -446,12 +465,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   async function handleCheckPin(res: http.ServerResponse, body: unknown): Promise<void> {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['authSessionId'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.checkPin, { expected: '[{ authSessionId }]' });
       return;
     }
-    const arg = arr[0] as { authSessionId?: string } | null;
-    const authSessionId = arg?.authSessionId;
+    const arg = arr[0] as { authSessionId: string };
+    const authSessionId = arg.authSessionId;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.checkPin, { missing: 'authSessionId' });
       return;
@@ -470,20 +489,21 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleLogin(res: http.ServerResponse, body: unknown): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    const expectedKeys = ['systemName', 'modelName', 'autoLoginIsRequired', 'authSessionId'];
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], expectedKeys)) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.login, { expected: '[{ systemName, modelName, autoLoginIsRequired, authSessionId }]' });
       return;
     }
     const arg = arr[0] as {
-      systemName?: string; modelName?: string; autoLoginIsRequired?: boolean; authSessionId?: string;
-    } | null;
-    const authSessionId = arg?.authSessionId;
+      systemName: string; modelName: string; autoLoginIsRequired: boolean; authSessionId: string;
+    };
+    const authSessionId = arg.authSessionId;
     if (typeof authSessionId !== 'string' || !authSessionId) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.login, { missing: 'authSessionId' });
       return;
     }
-    if (arg?.systemName !== 'CHROMEOS' || arg?.modelName !== 'CHROME' || arg?.autoLoginIsRequired !== false) {
-      rejectLine(res, 'invalid_body', LINE_ROUTES.login, { unexpected: { systemName: arg?.systemName, modelName: arg?.modelName, autoLoginIsRequired: arg?.autoLoginIsRequired } });
+    if (arg.systemName !== 'CHROMEOS' || arg.modelName !== 'CHROME' || arg.autoLoginIsRequired !== false) {
+      rejectLine(res, 'invalid_body', LINE_ROUTES.login, { unexpected: { systemName: arg.systemName, modelName: arg.modelName, autoLoginIsRequired: arg.autoLoginIsRequired } });
       return;
     }
     try {
@@ -501,12 +521,13 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     }
   }
 
-  function handleIdentity(res: http.ServerResponse, body: unknown): void {
+  function handleIdentity(res: http.ServerResponse, body: unknown, accessToken: string): void {
     const arr = asArray(body);
     if (!arr || arr.length !== 0) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.identity, { expected: '[]' });
       return;
     }
+    if (!requireCurrentAccess(res, LINE_ROUTES.identity, accessToken)) return;
     json(res, 200, lineOk({
       wrappedNonce: state.fixtures.seededAuth.wrappedNonce,
       kdfParameter1: state.fixtures.seededAuth.kdfParameter1,
@@ -537,12 +558,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleAllChatMids(res: http.ServerResponse, body: unknown, accessToken: string): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 2) {
+    if (!arr || arr.length !== 2 || !exactObjectKeys(arr[0], ['withMemberChats', 'withInvitedChats']) || arr[1] !== 2) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.allChatMids, { expected: '[{ withMemberChats, withInvitedChats }, 2]' });
       return;
     }
-    const arg = arr[0] as { withMemberChats?: boolean; withInvitedChats?: boolean } | null;
-    if (arg?.withMemberChats !== true || arg?.withInvitedChats !== true || arr[1] !== 2) {
+    const arg = arr[0] as { withMemberChats: boolean; withInvitedChats: boolean };
+    if (arg.withMemberChats !== true || arg.withInvitedChats !== true) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.allChatMids, { unexpected: arr });
       return;
     }
@@ -565,13 +586,13 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleChats(res: http.ServerResponse, body: unknown, accessToken: string): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 2) {
+    if (!arr || arr.length !== 2 || !exactObjectKeys(arr[0], ['chatMids']) || arr[1] !== 2) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { expected: '[{ chatMids }, 2]' });
       return;
     }
-    const arg = arr[0] as { chatMids?: string[] } | null;
-    const chatMids = arg?.chatMids;
-    if (!Array.isArray(chatMids) || arr[1] !== 2) {
+    const arg = arr[0] as { chatMids: string[] };
+    const chatMids = arg.chatMids;
+    if (!Array.isArray(chatMids)) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { unexpected: arr });
       return;
     }
@@ -590,12 +611,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handleContacts(res: http.ServerResponse, body: unknown, accessToken: string): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 1) {
+    if (!arr || arr.length !== 1 || !exactObjectKeys(arr[0], ['targetUserMids'])) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { expected: '[{ targetUserMids }]' });
       return;
     }
-    const arg = arr[0] as { targetUserMids?: string[] } | null;
-    const mids = arg?.targetUserMids;
+    const arg = arr[0] as { targetUserMids: string[] };
+    const mids = arg.targetUserMids;
     if (!Array.isArray(mids) || mids.length === 0 || mids.length > 50) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { unexpected: arr });
       return;
@@ -639,20 +660,20 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
 
   function handlePrevious(res: http.ServerResponse, body: unknown, accessToken: string): void {
     const arr = asArray(body);
-    if (!arr || arr.length !== 2) {
+    if (!arr || arr.length !== 2 || !exactObjectKeys(arr[0], ['messageBoxId', 'endMessageId', 'messagesCount']) || arr[1] !== 1) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.previous, { expected: '[{ messageBoxId, endMessageId, messagesCount }, 1]' });
       return;
     }
     const arg = arr[0] as {
-      messageBoxId?: string;
-      endMessageId?: { messageId: string; deliveredTime: string };
-      messagesCount?: number;
-    } | null;
-    const chatMid = arg?.messageBoxId;
-    const endMessageId = arg?.endMessageId;
-    const messagesCount = arg?.messagesCount;
+      messageBoxId: string;
+      endMessageId: { messageId: string; deliveredTime: string };
+      messagesCount: number;
+    };
+    const chatMid = arg.messageBoxId;
+    const endMessageId = arg.endMessageId;
+    const messagesCount = arg.messagesCount;
     if (typeof chatMid !== 'string' || !endMessageId || typeof endMessageId.messageId !== 'string' ||
-        typeof endMessageId.deliveredTime !== 'string' || typeof messagesCount !== 'number' || arr[1] !== 1) {
+        typeof endMessageId.deliveredTime !== 'string' || typeof messagesCount !== 'number') {
       rejectLine(res, 'invalid_body', LINE_ROUTES.previous, { unexpected: arr });
       return;
     }
@@ -677,8 +698,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
   }
 
   function handleRefresh(res: http.ServerResponse, body: unknown): void {
-    const obj = body as { refreshToken?: string } | null;
-    if (!obj || typeof obj !== 'object' || typeof obj.refreshToken !== 'string') {
+    if (!exactObjectKeys(body, ['refreshToken'])) {
+      rejectLine(res, 'invalid_body', LINE_ROUTES.refresh, { expected: '{ refreshToken }' });
+      return;
+    }
+    const obj = body as { refreshToken: string };
+    if (typeof obj.refreshToken !== 'string') {
       rejectLine(res, 'invalid_body', LINE_ROUTES.refresh, { expected: '{ refreshToken }' });
       return;
     }

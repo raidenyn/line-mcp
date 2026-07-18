@@ -8,6 +8,8 @@ import {
   startApplication,
   connectMcp,
   type RunningMock,
+  type RunningApp,
+  type McpConnection,
 } from '../support/process-harness';
 import {
   buildMockFixtures,
@@ -49,9 +51,11 @@ describe.sequential('mock-backed LINE smoke', () => {
       expectedRefreshCount: 1, expectedLoginBranches: [], expectedRejections: {},
     });
     const bearer = prepareSeededDataRoot({ dataRoot, appPort: port, fixtures });
-    const app = await startApplication({ target, projectRoot: PROJECT_ROOT, dataRoot, port, lineApiBaseUrl: mock.origin });
-    const connection = await connectMcp(app.mcpUrl, bearer);
+    let app: RunningApp | undefined;
+    let connection: McpConnection | undefined;
     try {
+      app = await startApplication({ target, projectRoot: PROJECT_ROOT, dataRoot, port, lineApiBaseUrl: mock.origin });
+      connection = await connectMcp(app.mcpUrl, bearer);
       await assertTargetSurface(connection.client, target);
       await runMessengerAssertions(connection.client, fixtures, app.origin);
       if (target === 'composed') await runComposedBankAssertions(connection.client, fixtures);
@@ -61,8 +65,8 @@ describe.sequential('mock-backed LINE smoke', () => {
       expect(stored.displayName).toBe('Mock LINE Account');
       expect((await mock.report()).ok).toBe(true);
     } finally {
-      await connection.close();
-      await app.stop();
+      await connection?.close().catch(() => {});
+      await app?.stop().catch(() => {});
       fs.rmSync(dataRoot, { recursive: true, force: true });
     }
   }, 120_000);
@@ -75,20 +79,25 @@ describe.sequential('mock-backed LINE smoke', () => {
       scenarioId: `${target}-full-auth`, mode: 'full-auth', epochSeconds,
       expectedRefreshCount: 0, expectedLoginBranches: ['pin', 'certificate'], expectedRejections: {},
     });
-    const app = await startApplication({ target, projectRoot: PROJECT_ROOT, dataRoot, port, lineApiBaseUrl: mock.origin });
+    let app: RunningApp | undefined;
+    let firstConnection: McpConnection | undefined;
+    let refreshedConnection: McpConnection | undefined;
     try {
+      app = await startApplication({ target, projectRoot: PROJECT_ROOT, dataRoot, port, lineApiBaseUrl: mock.origin });
       await assertMcpUnauthorized(app.origin, dataRoot, port);
       const first = await authorizeWithPkce(app.origin, { expectPin: true });
-      const firstConnection = await connectMcp(app.mcpUrl, first.accessToken);
+      firstConnection = await connectMcp(app.mcpUrl, first.accessToken);
       await assertTargetSurface(firstConnection.client, target);
       expect(extractText(await firstConnection.client.callTool({ name: 'list_chats', arguments: {} })))
         .toBe(buildMockFixtures({ origin: mock.origin, epochSeconds }).expected.listChatsText);
       await firstConnection.close();
+      firstConnection = undefined;
 
       const refreshed = await refreshMcpToken(app.origin, first.refreshToken);
-      const refreshedConnection = await connectMcp(app.mcpUrl, refreshed.accessToken);
+      refreshedConnection = await connectMcp(app.mcpUrl, refreshed.accessToken);
       await refreshedConnection.client.listTools();
       await refreshedConnection.close();
+      refreshedConnection = undefined;
 
       await authorizeWithPkce(app.origin, { expectPin: false });
       const report = await mock.report();
@@ -97,7 +106,9 @@ describe.sequential('mock-backed LINE smoke', () => {
       expect(report.routeCounts.checkPin).toBe(1);
       expect(report.ok).toBe(true);
     } finally {
-      await app.stop();
+      await refreshedConnection?.close().catch(() => {});
+      await firstConnection?.close().catch(() => {});
+      await app?.stop().catch(() => {});
       fs.rmSync(dataRoot, { recursive: true, force: true });
     }
   }, 120_000);

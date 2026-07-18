@@ -44,7 +44,6 @@ export const PRE_AUTH_ROUTES: ReadonlySet<string> = new Set<string>([
   LINE_ROUTES.createPin,
   LINE_ROUTES.checkPin,
   LINE_ROUTES.login,
-  LINE_ROUTES.identity,
   LINE_ROUTES.refresh,
 ]);
 
@@ -152,8 +151,12 @@ export interface HeaderValidationResult {
 export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
   const h = lowerHeaders(req.headers);
   for (const key of REQUIRED_LINE_HEADER_KEYS) {
-    if (h[key] == null) {
+    const value = singleString(h[key]);
+    if (value == null) {
       return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { missingHeader: key } };
+    }
+    if (value !== REQUIRED_LINE_HEADERS[key as keyof typeof REQUIRED_LINE_HEADERS]) {
+      return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { header: key, expected: REQUIRED_LINE_HEADERS[key as keyof typeof REQUIRED_LINE_HEADERS], actual: value } };
     }
   }
   const hmacHeader = singleString(h['x-hmac']);
@@ -173,6 +176,9 @@ export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
     if (lst == null) {
       return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: true, diagnostic: { missingHeader: 'x-lst' } };
     }
+    if (lst !== '150000') {
+      return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: true, diagnostic: { header: 'x-lst', expected: '150000', actual: lst } };
+    }
     const sessionId = singleString(h['x-line-session-id']);
     if (sessionId == null) {
       return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: true, diagnostic: { missingHeader: 'x-line-session-id' } };
@@ -180,6 +186,14 @@ export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
     return { ok: true, accessToken: access, longPoll: true, sessionId };
   }
   return { ok: true, accessToken: access, longPoll: false };
+}
+
+export function extractAuthSessionId(body: unknown): string | undefined {
+  if (!Array.isArray(body) || body.length < 1) return undefined;
+  const first = body[0];
+  if (first == null || typeof first !== 'object' || Array.isArray(first)) return undefined;
+  const candidate = (first as { authSessionId?: unknown }).authSessionId;
+  return typeof candidate === 'string' ? candidate : undefined;
 }
 
 function singleString(v: string | string[] | undefined): string | undefined {
@@ -232,6 +246,13 @@ export function parseJsonBody(raw: Buffer): JsonBodyResult {
   } catch {
     return { ok: false, rejection: 'invalid_body' };
   }
+}
+
+export function exactObjectKeys(value: unknown, keys: readonly string[]): boolean {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const actual = Object.keys(value as Record<string, unknown>);
+  if (actual.length !== keys.length) return false;
+  return keys.every((k) => k in (value as Record<string, unknown>));
 }
 
 export function redact(value: unknown): unknown {

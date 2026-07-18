@@ -39,4 +39,29 @@ describe('process harness', () => {
       readyLine: line => line === 'ready',
     })).rejects.toThrow(/fixture failed/);
   });
+
+  it('terminates the child and rejects when readiness never arrives', async () => {
+    let capturedPid: number | undefined;
+    const start = Date.now();
+    await expect((async () => {
+      const managed = await spawnManagedNode({
+        label: 'never-ready-fixture', cwd: projectRoot,
+        args: ['-e', "setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')"],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 500,
+      });
+      capturedPid = managed.pid;
+    })()).rejects.toThrow(/readiness timeout after 500ms/);
+    expect(Date.now() - start).toBeLessThan(15_000);
+    // The spawned detached process group must have been terminated.
+    if (capturedPid) {
+      let alive = true;
+      try {
+        process.kill(-capturedPid, 0);
+      } catch {
+        alive = false;
+      }
+      expect(alive).toBe(false);
+    }
+  });
 });

@@ -45,6 +45,43 @@ async function signedPostLongPoll(pathname: string, body: string, authSessionId:
   });
 }
 
+async function signedPostWithHeaders(
+  pathname: string,
+  body: string,
+  headerOverrides: Record<string, string>,
+  accessToken = '',
+): Promise<Response> {
+  const hmac = await signForAccount(VALID_STORAGE_KEY, { accessToken, path: pathname, body });
+  return fetch(origin + pathname, {
+    method: 'POST',
+    headers: {
+      ...REQUIRED_LINE_HEADERS,
+      'x-hmac': hmac,
+      ...(accessToken ? { 'x-line-access': accessToken } : {}),
+      ...headerOverrides,
+    },
+    body,
+  });
+}
+
+async function signedPostLongPollWithHeaders(
+  pathname: string,
+  body: string,
+  headerOverrides: Record<string, string>,
+): Promise<Response> {
+  const hmac = await signForAccount(VALID_STORAGE_KEY, { accessToken: '', path: pathname, body });
+  return fetch(origin + pathname, {
+    method: 'POST',
+    headers: {
+      ...REQUIRED_LINE_HEADERS,
+      'x-hmac': hmac,
+      'x-lst': '150000',
+      ...headerOverrides,
+    },
+    body,
+  });
+}
+
 function controlHeaders(): Record<string, string> {
   return { 'x-mock-control-token': 'contract-control-token' };
 }
@@ -675,5 +712,190 @@ describe('mock LINE HTTP contract', () => {
     expect(resetResponse.status).toBe(200);
     const report = await (await fetch(origin + '/__mock/report', { headers: controlHeaders() })).json();
     expect(report.scenarioId).not.toBe('before-reset');
+  });
+});
+
+describe('mock LINE strict header value validation', () => {
+  it('rejects a wrong x-line-chrome-version value', async () => {
+    mock.state.configure({
+      scenarioId: 'wrong-chrome-version', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await signedPostWithHeaders(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      '[ {} ]',
+      { 'x-line-chrome-version': '9.9.9' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects a wrong origin value', async () => {
+    mock.state.configure({
+      scenarioId: 'wrong-origin', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await signedPostWithHeaders(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      '[ {} ]',
+      { origin: 'chrome-extension://evil' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects a wrong x-lst value on long-poll routes', async () => {
+    mock.state.configure({
+      scenarioId: 'wrong-lst', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    // Header validation (including x-lst) runs before any session lookup, so an
+    // unknown authSessionId in the body is fine — the request never reaches the
+    // session phase.
+    const response = await signedPostLongPollWithHeaders(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified',
+      JSON.stringify([{ authSessionId: 'unused-sid' }]),
+      { 'x-line-session-id': 'unused-sid', 'x-lst': '999' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects a mismatched x-line-session-id on long-poll routes', async () => {
+    mock.state.configure({
+      scenarioId: 'wrong-session-id', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_session: 1 },
+    });
+    // The session-id mismatch check runs after headers+hmac+JSON validation and
+    // abandons the body's session before rejecting, so no unresolved session
+    // remains. Use an unknown authSessionId — the mismatch is detected first.
+    const response = await signedPostLongPollWithHeaders(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified',
+      JSON.stringify([{ authSessionId: 'body-sid' }]),
+      { 'x-line-session-id': 'header-sid' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10010, message: 'REQUEST_INVALID_SESSION' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+});
+
+describe('mock LINE strict body key validation', () => {
+  it('rejects extra keys in createSession body', async () => {
+    mock.state.configure({
+      scenarioId: 'create-session-extra', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await signedPost(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      '[ { unexpected: true } ]',
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects extra keys in login body', async () => {
+    mock.state.configure({
+      scenarioId: 'login-extra', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    // The login handler validates exact body keys before consulting the
+    // session, so an unknown authSessionId avoids leaving an unresolved session.
+    const body = JSON.stringify([{
+      systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false,
+      authSessionId: 'never-registered', extra: 'nope',
+    }]);
+    const response = await signedPost(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2',
+      body,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects extra keys in refresh body', async () => {
+    mock.state.configure({
+      scenarioId: 'refresh-extra', mode: 'seeded', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const oldRefresh = mock.state.fixtures.seededAuth.refreshToken;
+    const response = await fetch(origin + '/api/auth/tokenRefresh', {
+      method: 'POST',
+      headers: REQUIRED_LINE_HEADERS,
+      body: JSON.stringify({ refreshToken: oldRefresh, extra: 'nope' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+});
+
+describe('mock LINE identity requires the current access token', () => {
+  it('rejects identity with no access token', async () => {
+    mock.state.configure({
+      scenarioId: 'identity-no-token', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { missing_auth_header: 1 },
+    });
+    const response = await signedPost(
+      '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3',
+      '[]',
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10003, message: 'REQUEST_MISSING_AUTH' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects identity with a wrong access token', async () => {
+    mock.state.configure({
+      scenarioId: 'identity-wrong-token', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { unknown_access_token: 1 },
+    });
+    const response = await signedPost(
+      '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3',
+      '[]',
+      'definitely-not-a-known-token',
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ code: 10006, message: 'REQUEST_UNKNOWN_ACCESS_TOKEN' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('accepts identity with the current access token after a PIN login', async () => {
+    mock.state.configure({
+      scenarioId: 'identity-ok', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: ['pin'], expectedRejections: {},
+    });
+    const createResponse = await signedPost(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      '[ {} ]',
+    );
+    const authSessionId = (await createResponse.json() as { data: { authSessionId: string } }).data.authSessionId;
+    await signedPost('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode', JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified', JSON.stringify([{ authSessionId }]), authSessionId);
+    await signedPost('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate', JSON.stringify([{ authSessionId, certificate: '' }]));
+    await signedPost('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode', JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified', JSON.stringify([{ authSessionId }]), authSessionId);
+    const loginResponse = await signedPost('/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2', JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }]));
+    const loginData = await loginResponse.json() as { data: { tokenV3IssueResult: { accessToken: string } } };
+    const accessToken = loginData.data.tokenV3IssueResult.accessToken;
+
+    const identityResponse = await signedPost(
+      '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3',
+      '[]',
+      accessToken,
+    );
+    const identityData = await identityResponse.json() as { code: number; data: { wrappedNonce: string; kdfParameter1: string; kdfParameter2: string } };
+    expect(identityData.code).toBe(0);
+    expect(identityData.data).toMatchObject({
+      wrappedNonce: VALID_STORAGE_KEY.wrappedNonce,
+      kdfParameter1: VALID_STORAGE_KEY.kdfParameter1,
+      kdfParameter2: VALID_STORAGE_KEY.kdfParameter2,
+    });
+    expect(mock.state.report().ok).toBe(true);
   });
 });
