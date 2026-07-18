@@ -31,8 +31,19 @@ function redact(value: string): string {
   return value
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1<redacted>')
     .replace(/(x-mock-control-token:\s*)([^\r\n]*)/gi, '$1<redacted>')
-    .replace(MID_PATTERN, '<mid>')
-    .replace(/(MOCK_LINE_CONTROL_TOKEN=)([^\r\n]*)/gi, '$1<redacted>');
+    .replace(/(x-line-access:\s*)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(MOCK_LINE_CONTROL_TOKEN=)([^\r\n]*)/gi, '$1<redacted>')
+    .replace(/(accessToken=)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(refreshToken=)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(certificate=)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(wrappedNonce=)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(kdfParameter1=)([^\s\r\n]*)/gi, '$1<redacted>')
+    .replace(/(kdfParameter2=)([^\s\r\n]*)/gi, '$1<redacted>')
+    // JWT-like tokens (base64url header starting with eyJ...) — match the
+    // full three-segment JWT form, or any long eyJ... run, and replace.
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-jwt>')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\b/g, '<redacted-jwt>')
+    .replace(MID_PATTERN, '<mid>');
 }
 
 function filterSafeEnv(env: NodeJS.ProcessEnv): Record<string, unknown> {
@@ -66,6 +77,7 @@ export interface SpawnOptions {
   readyLine?: (line: string) => boolean;
   readyTimeoutMs?: number;
   stdioCap?: number;
+  onSpawn?: (child: ChildProcess) => void;
 }
 
 interface BuiltProcess extends ManagedProcess {
@@ -97,6 +109,13 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // Notify the caller of the child as soon as it exists — before any
+    // readiness await — so a timeout/rejection on spawn can still surface
+    // the pid for cleanup-group assertions.
+    try {
+      options.onSpawn?.(child);
+    } catch { /* user hook must not break spawn */ }
 
     let stdoutBuf = '';
     let stderrBuf = '';

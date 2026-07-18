@@ -45,59 +45,82 @@ describe('process harness', () => {
     let capturedPid: number | undefined;
     const start = Date.now();
     await expect((async () => {
-      const managed = await spawnManagedNode({
+      await spawnManagedNode({
         label: 'never-ready-fixture', cwd: projectRoot,
         args: ['-e', "setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')"],
         readyLine: line => line === 'ready',
         readyTimeoutMs: 500,
+        onSpawn: (child) => { capturedPid = child.pid; },
       });
-      capturedPid = managed.pid;
     })()).rejects.toThrow(/readiness timeout after 500ms/);
     expect(Date.now() - start).toBeLessThan(15_000);
-    // The spawned detached process group must have been terminated. The
-    // failSpawn path now ensures the group is reaped even though the spawn
-    // rejected before the caller could capture a pid — so capturedPid may be
-    // undefined here; we still assert the group is gone when we can see it.
-    if (capturedPid) {
-      let alive = true;
-      try {
-        process.kill(-capturedPid, 0);
-      } catch {
-        alive = false;
-      }
-      expect(alive).toBe(false);
-    }
-  });
-
-  it('terminates a process group even when a descendant ignores SIGTERM', async () => {
-    // The spawned child itself spawns a signal-ignoring descendant, then
-    // becomes ready. terminate() must kill the whole group — including the
-    // descendant — not just the leader.
-    const managed = await spawnManagedNode({
-      label: 'signal-ignoring-descendant', cwd: projectRoot,
-      args: ['-e', [
-        "const { spawn } = require('child_process');",
-        "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"], { detached: true, stdio: 'ignore' });",
-        "process.stdout.write('ready\\n');",
-        "setInterval(() => {}, 1000);",
-      ].join(' ')],
-      readyLine: line => line === 'ready',
-    });
-    const pid = managed.pid;
-    expect(pid).toBeGreaterThan(0);
-    // Sanity: the group is alive before termination.
-    expect(() => process.kill(-pid, 0)).not.toThrow();
-    await managed.terminate({ gracefulMs: 1_000 });
-    // The whole process group — including the SIGTERM-ignoring descendant —
-    // must be gone. process.kill(-pid, 0) must throw ESRCH.
+    // The spawned detached process group must have been terminated by the
+    // failSpawn path. We capture the pid via onSpawn (before the await that
+    // rejects), so we can assert against the group here.
+    expect(capturedPid).toBeDefined();
+    expect(capturedPid!).toBeGreaterThan(0);
     let alive = true;
     try {
-      process.kill(-pid, 0);
+      process.kill(-capturedPid!, 0);
     } catch (err: unknown) {
       alive = false;
       expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
     }
     expect(alive).toBe(false);
+  });
+
+  it('terminates a process group even when a descendant ignores SIGTERM', async () => {
+    // The spawned child itself spawns a signal-ignoring descendant WITHOUT
+    // detaching it, so the descendant stays in the parent's process group.
+    // terminate() kills the whole group (-pid), so the descendant must die
+    // alongside the leader even though it ignores SIGTERM.
+    let grandchildPid: number | undefined;
+    const managed = await spawnManagedNode({
+      label: 'signal-ignoring-descendant', cwd: projectRoot,
+      args: ['-e', [
+        "const { spawn } = require('child_process');",
+        "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
+        "process.stdout.write(String(gc.pid) + '\\n');",
+        "setInterval(() => {}, 1000);",
+      ].join(' ')],
+      readyLine: (line) => {
+        const parsed = Number.parseInt(line.trim(), 10);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          grandchildPid = parsed;
+          return true;
+        }
+        return false;
+      },
+    });
+    const pid = managed.pid;
+    expect(pid).toBeGreaterThan(0);
+    expect(grandchildPid).toBeDefined();
+    expect(grandchildPid!).toBeGreaterThan(0);
+    // Sanity: the group is alive before termination, and the grandchild is
+    // a member of that group (so killing -pid will reach it).
+    expect(() => process.kill(-pid, 0)).not.toThrow();
+    expect(() => process.kill(grandchildPid!, 0)).not.toThrow();
+    await managed.terminate({ gracefulMs: 1_000 });
+    // The whole process group — including the SIGTERM-ignoring descendant —
+    // must be gone. process.kill(-pid, 0) must throw ESRCH.
+    let groupAlive = true;
+    try {
+      process.kill(-pid, 0);
+    } catch (err: unknown) {
+      groupAlive = false;
+      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+    }
+    expect(groupAlive).toBe(false);
+    // The grandchild must also be gone — it stayed in the parent's group,
+    // so the group-directed SIGKILL reached it.
+    let gcAlive = true;
+    try {
+      process.kill(grandchildPid!, 0);
+    } catch (err: unknown) {
+      gcAlive = false;
+      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+    }
+    expect(gcAlive).toBe(false);
   });
 
   it('connectMcp rejects and cleans up when the URL is unreachable', async () => {
@@ -131,6 +154,42 @@ describe('process harness', () => {
     // The thrown error must NOT contain the secret token value, even though
     // the env was passed through the (formerly allowlisted) envSummary.
     expect(thrown!.message).not.toContain(secretValue);
+  });
+
+  it('redacts credential-bearing forms (accessToken/refreshToken/certificate/JWT) from child output', async () => {
+    // A child that writes credential-shaped material to stderr and then never
+    // becomes ready must surface a readiness-timeout error whose message does
+    // NOT contain any of the raw secret values.
+    const jwtValue = 'eyJhbGciOi.fake.payload';
+    const refreshSecret = 'refresh_secret_xyz';
+    const certValue = 'abc123nonce';
+    let thrown: Error | null = null;
+    try {
+      await spawnManagedNode({
+        label: 'credential-redaction-fixture', cwd: projectRoot,
+        args: ['-e', `process.stderr.write('accessToken=${jwtValue} refreshToken=${refreshSecret} certificate=${certValue} wrappedNonce=wn123 kdfParameter1=k1 kdfParameter2=k2 x-line-access: abc.def.ghi bare=${jwtValue}'); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 500,
+      });
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
+    // None of the raw secret values may appear in the thrown error.
+    expect(thrown!.message).not.toContain(jwtValue);
+    expect(thrown!.message).not.toContain(refreshSecret);
+    expect(thrown!.message).not.toContain(certValue);
+    expect(thrown!.message).not.toContain('wn123');
+    expect(thrown!.message).not.toContain('k1');
+    // The x-line-access header value must also be redacted (the bare JWT
+    // fragment abc.def.ghi should not survive the JWT redaction).
+    expect(thrown!.message).not.toContain('abc.def.ghi');
+    // And the redaction markers should be present.
+    expect(thrown!.message).toContain('accessToken=<redacted>');
+    expect(thrown!.message).toContain('refreshToken=<redacted>');
+    expect(thrown!.message).toContain('certificate=<redacted>');
+    expect(thrown!.message).toContain('<redacted-jwt>');
   });
 
   it('removes a temporary root even when setup throws after creation', () => {
