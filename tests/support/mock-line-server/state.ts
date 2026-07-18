@@ -22,6 +22,15 @@ export interface MockScenarioConfig {
   expectedRefreshCount: number;
   expectedLoginBranches: readonly LoginBranch[];
   expectedRejections: Partial<Record<ExpectedRejectionKind, number>>;
+  /**
+   * Optional: when set, verifyFinal() asserts that the observed routeCounts
+   * match this map EXACTLY — every named route must match its expected count,
+   * and no extra routes may appear. Mismatches are appended to
+   * verificationErrors (and thus flip report.ok to false). Routes that are
+   * observed but not listed here are flagged as unexpected; routes listed
+   * here but not observed are flagged as missing.
+   */
+  expectedRouteCounts?: Readonly<Record<string, number>>;
 }
 
 export interface MockReport {
@@ -456,6 +465,21 @@ export class MockLineState {
       }
       if (r.unresolvedSessions !== 0) {
         errors.push(`unresolvedSessions: expected 0, got ${r.unresolvedSessions}`);
+      }
+      if (config.expectedRouteCounts) {
+        const expected = config.expectedRouteCounts;
+        const observed = r.routeCounts;
+        for (const [route, wantCount] of Object.entries(expected)) {
+          const got = observed[route] ?? 0;
+          if (got !== (wantCount ?? 0)) {
+            errors.push(`routeCount ${route} mismatch: expected ${wantCount}, got ${got}`);
+          }
+        }
+        for (const route of Object.keys(observed)) {
+          if (expected[route] == null) {
+            errors.push(`unexpected route observed: ${route} (count=${observed[route]})`);
+          }
+        }
       }
     }
     return errors;

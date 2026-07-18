@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import * as fs from 'fs';
 import * as path from 'path';
-import { startMockLineServer, spawnManagedNode, connectMcp, reserveFreePort } from '../support/process-harness';
+import { startMockLineServer, spawnManagedNode, connectMcp, reserveFreePort, createTemporaryDataRoot } from '../support/process-harness';
 
 const projectRoot = path.resolve(__dirname, '..', '..');
 
@@ -130,5 +131,26 @@ describe('process harness', () => {
     // The thrown error must NOT contain the secret token value, even though
     // the env was passed through the (formerly allowlisted) envSummary.
     expect(thrown!.message).not.toContain(secretValue);
+  });
+
+  it('removes a temporary root even when setup throws after creation', () => {
+    // The mock-line-smoke scenarios create the dataRoot FIRST, then run every
+    // setup step (mock.reset, mock.configure, prepareSeededDataRoot,
+    // startApplication, connectMcp, assertions) inside an outer try/finally so
+    // a partial setup failure cannot leak the root. This test pins that
+    // pattern: createTemporaryDataRoot, throw before any app starts, and
+    // assert the root directory is removed afterward. runRegisteredCleanups
+    // is intentionally NOT the authoritative cleanup path here — the
+    // try/finally is.
+    const root = createTemporaryDataRoot('line-smoke-setup-fail-');
+    expect(fs.existsSync(root)).toBe(true);
+    expect(() => {
+      try {
+        throw new Error('setup failed');
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }).toThrow(/setup failed/);
+    expect(fs.existsSync(root)).toBe(false);
   });
 });

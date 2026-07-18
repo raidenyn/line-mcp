@@ -173,6 +173,19 @@ export async function runComposedBankAssertions(client: Client, fixtures: MockFi
   const parsedTransactions = extractJson<unknown[]>(extractText(getTransactions));
   expect(parsedTransactions).toEqual(fixtures.expected.transactions);
 
+  // Drive getMessagesInRange through a real MCP bank tool with a `since`
+  // parameter so the production client path (cache wrapper -> LineClient
+  // .getMessagesInRange -> getPreviousMessagesV2WithRequest) is exercised
+  // end-to-end, not only by hand-crafted contract requests. The `since`
+  // date predates the fixture history so getMessagesInRange is the code
+  // path selected by fetch-transactions.ts.
+  const getTransactionsSince = await client.callTool({
+    name: 'get_transactions',
+    arguments: { chatMid: MOCK_GROUP_MID, since: '2026-01-01' },
+  });
+  const parsedSinceTransactions = extractJson<unknown[]>(extractText(getTransactionsSince));
+  expect(parsedSinceTransactions).toEqual(fixtures.expected.transactions);
+
   const getFiltered = await client.callTool({
     name: 'get_transactions',
     arguments: { chatMid: MOCK_GROUP_MID, merchants: ['Mock Cafe'] },
