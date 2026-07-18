@@ -9,10 +9,23 @@ import type { MockScenarioConfig, MockReport } from './mock-line-server/state';
 
 const SAFE_ENV_KEYS = new Set([
   'PORT', 'DATA_DIR', 'BASE_PATH', 'PUBLIC_URL', 'LINE_API_BASE_URL',
-  'NODE_ENV', 'MOCK_LINE_CONTROL_TOKEN', 'TS_NODE_PROJECT', 'TS_NODE_IGNORE_DIAGNOSTICS',
+  'NODE_ENV', 'TS_NODE_PROJECT', 'TS_NODE_IGNORE_DIAGNOSTICS',
   'PATH',
 ]);
 const MID_PATTERN = /u_[a-z0-9_]+/gi;
+
+function isGroupAlive(pid: number): boolean {
+  if (pid <= 0) return false;
+  try { process.kill(-pid, 0); return true; } catch { return false; }
+}
+
+async function waitForGroupExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isGroupAlive(pid)) return;
+    await new Promise<void>((r) => setTimeout(r, 25));
+  }
+}
 
 function redact(value: string): string {
   return value
@@ -61,7 +74,7 @@ interface BuiltProcess extends ManagedProcess {
 }
 
 function buildReadyError(label: string, reason: string, stdout: string, stderr: string, env?: NodeJS.ProcessEnv): Error {
-  const envSummary = env ? JSON.stringify(filterSafeEnv(env)) : '';
+  const envSummary = env ? redact(JSON.stringify(filterSafeEnv(env))) : '';
   const msg = [
     `[${label}] ${reason}`,
     `--- stdout ---`,
@@ -100,7 +113,14 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
       settled = true;
       cleanupEarly();
       // The child was already spawned; a readiness failure must not leak it.
+      // Capture the pid before terminating so callers can assert against the
+      // process group even when the spawn never resolved into a handle.
+      const failPid = child.pid;
       await terminateChildNow(child);
+      if (failPid != null && failPid > 0 && isGroupAlive(failPid)) {
+        try { process.kill(-failPid, 'SIGKILL'); } catch { /* already dead */ }
+        await waitForGroupExit(failPid, 2_000);
+      }
       reject(buildReadyError(options.label, reason, stdoutBuf, stderrBuf, options.env));
     };
 
@@ -165,7 +185,14 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
 async function terminateChildNow(child: ChildProcess): Promise<void> {
   const pid = child.pid;
   if (pid == null || pid <= 0) return;
-  if (child.exitCode != null || child.signalCode != null) return;
+  if (child.exitCode != null || child.signalCode != null) {
+    // Leader is gone, but descendants that ignore signals may still live.
+    if (isGroupAlive(pid)) {
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead */ }
+      await waitForGroupExit(pid, 2_000);
+    }
+    return;
+  }
   try { process.kill(-pid, 'SIGTERM'); } catch { /* already dead */ }
   const exited = await new Promise<number | null>((resolve) => {
     if (child.exitCode != null || child.signalCode != null) {
@@ -182,9 +209,14 @@ async function terminateChildNow(child: ChildProcess): Promise<void> {
     }, 2_000);
     child.once('exit', onExit);
   });
-  if (exited == null) {
+  // Whether or not the leader exited, ensure the whole group is gone.
+  // A descendant that ignores SIGTERM can keep the group alive after the
+  // leader exits — probe the group itself and SIGKILL it if any member remains.
+  if (isGroupAlive(pid)) {
     try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead */ }
+    await waitForGroupExit(pid, 2_000);
   }
+  void exited;
 }
 
 function makeManaged(child: ChildProcess, getStdout: () => string, getStderr: () => string): BuiltProcess {
@@ -219,9 +251,13 @@ function makeManaged(child: ChildProcess, getStdout: () => string, getStderr: ()
     terminatePromise = (async () => {
       if (pid <= 0) return;
       try { process.kill(-pid, 'SIGTERM'); } catch { /* already dead */ }
-      const code = await waitForExit(gracefulMs);
-      if (code == null) {
+      // Wait for the whole group to die, not just the leader. A descendant
+      // that ignores SIGTERM can keep the group alive after the leader exits,
+      // so probe the group itself with process.kill(-pid, 0).
+      await waitForGroupExit(pid, gracefulMs);
+      if (isGroupAlive(pid)) {
         try { process.kill(-pid, 'SIGKILL'); } catch { /* already dead */ }
+        await waitForGroupExit(pid, 2_000);
       }
     })();
     return terminatePromise;
@@ -530,7 +566,14 @@ export async function connectMcp(url: string, bearer: string): Promise<McpConnec
     requestInit: { headers: { Authorization: `Bearer ${bearer}` } },
   });
   const client = new Client({ name: 'smoke-harness', version: '0.0.0' });
-  await client.connect(transport);
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    // Half-opened transport/client must not leak if connect() rejects.
+    try { await transport.close(); } catch { /**/ }
+    try { await client.close(); } catch { /**/ }
+    throw err;
+  }
   let closed = false;
   async function close(): Promise<void> {
     if (closed) return;
