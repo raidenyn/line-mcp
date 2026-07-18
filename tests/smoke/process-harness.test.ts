@@ -74,101 +74,46 @@ describe('process harness', () => {
     // detaching it, so the descendant stays in the parent's process group.
     // terminate() kills the whole group (-pid), so the descendant must die
     // alongside the leader even though it ignores SIGTERM.
+    let leaderPid: number | undefined;
     let grandchildPid: number | undefined;
-    const managed = await spawnManagedNode({
-      label: 'signal-ignoring-descendant', cwd: projectRoot,
-      args: ['-e', [
-        "const { spawn } = require('child_process');",
-        "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
-        "process.stdout.write(String(gc.pid) + '\\n');",
-        "setInterval(() => {}, 1000);",
-      ].join(' ')],
-      readyLine: (line) => {
-        const parsed = Number.parseInt(line.trim(), 10);
-        if (Number.isFinite(parsed) && parsed > 0) {
-          grandchildPid = parsed;
-          return true;
-        }
-        return false;
-      },
-    });
-    const pid = managed.pid;
-    expect(pid).toBeGreaterThan(0);
-    expect(grandchildPid).toBeDefined();
-    expect(grandchildPid!).toBeGreaterThan(0);
-    // Sanity: the group is alive before termination, and the grandchild is
-    // a member of that group (so killing -pid will reach it).
-    expect(() => process.kill(-pid, 0)).not.toThrow();
-    expect(() => process.kill(grandchildPid!, 0)).not.toThrow();
-    await managed.terminate({ gracefulMs: 1_000 });
-    // The whole process group — including the SIGTERM-ignoring descendant —
-    // must be gone. process.kill(-pid, 0) must throw ESRCH.
-    let groupAlive = true;
     try {
-      process.kill(-pid, 0);
-    } catch (err: unknown) {
-      groupAlive = false;
-      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
-    }
-    expect(groupAlive).toBe(false);
-    // The grandchild must also be gone — it stayed in the parent's group,
-    // so the group-directed SIGKILL reached it.
-    let gcAlive = true;
-    try {
-      process.kill(grandchildPid!, 0);
-    } catch (err: unknown) {
-      gcAlive = false;
-      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
-    }
-    expect(gcAlive).toBe(false);
-  });
-
-  it('cleans up the process group when the child exits before readiness', async () => {
-    // The child spawns a same-group signal-ignoring descendant (NOT detached)
-    // and then exits before writing the ready line. The early-exit path must
-    // still kill the whole process group — the descendant must not survive
-    // the rejection.
-    let capturedPid: number | undefined;
-    let grandchildPid: number | undefined;
-    let thrown: Error | null = null;
-    try {
-      await spawnManagedNode({
-        label: 'early-exit-with-descendant', cwd: projectRoot,
+      const managed = await spawnManagedNode({
+        label: 'signal-ignoring-descendant', cwd: projectRoot,
         args: ['-e', [
           "const { spawn } = require('child_process');",
-          "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); process.on('SIGKILL',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
-          "process.stderr.write('grandchild=' + gc.pid + '\\n');",
-          "setTimeout(() => process.exit(7), 100);",
+          "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
+          "process.stdout.write(String(gc.pid) + '\\n');",
+          "setInterval(() => {}, 1000);",
         ].join(' ')],
-        readyLine: line => line === 'ready',
-        readyTimeoutMs: 5_000,
-        onSpawn: (child) => { capturedPid = child.pid; },
+        readyLine: (line) => {
+          const parsed = Number.parseInt(line.trim(), 10);
+          if (Number.isFinite(parsed) && parsed > 0) {
+            grandchildPid = parsed;
+            return true;
+          }
+          return false;
+        },
+        onSpawn: (child) => { leaderPid = child.pid; },
       });
-    } catch (err) {
-      thrown = err as Error;
-    }
-    expect(thrown).toBeInstanceOf(Error);
-    expect(thrown!.message).toMatch(/child exited before readiness/);
-    expect(capturedPid).toBeDefined();
-    expect(capturedPid!).toBeGreaterThan(0);
-    // The grandchild must have been killed as part of the group cleanup
-    // routed through failSpawn. If the early-exit path rejected
-    // synchronously without cleaning up, the group (and grandchild) would
-    // still be alive here.
-    let groupAlive = true;
-    try {
-      process.kill(-capturedPid!, 0);
-    } catch (err: unknown) {
-      groupAlive = false;
-      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
-    }
-    expect(groupAlive).toBe(false);
-    // Best-effort: if a grandchild pid was discoverable via the (now-gone)
-    // stderr, also assert it is dead. We parse it from the thrown error
-    // message since the stderr buffer is surfaced there.
-    const match = thrown!.message.match(/grandchild=(\d+)/);
-    if (match) {
-      grandchildPid = Number.parseInt(match[1], 10);
+      leaderPid = managed.pid;
+      expect(leaderPid).toBeGreaterThan(0);
+      expect(grandchildPid).toBeDefined();
+      expect(grandchildPid!).toBeGreaterThan(0);
+      // Sanity: the group is alive before termination, and the grandchild is
+      // a member of that group (so killing -pid will reach it).
+      expect(() => process.kill(-leaderPid!, 0)).not.toThrow();
+      expect(() => process.kill(grandchildPid!, 0)).not.toThrow();
+      await managed.terminate({ gracefulMs: 1_000 });
+      // The whole process group, including the SIGTERM-ignoring descendant,
+      // must be gone.
+      let groupAlive = true;
+      try {
+        process.kill(-leaderPid!, 0);
+      } catch (err: unknown) {
+        groupAlive = false;
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+      }
+      expect(groupAlive).toBe(false);
       let gcAlive = true;
       try {
         process.kill(grandchildPid!, 0);
@@ -177,6 +122,71 @@ describe('process harness', () => {
         expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
       }
       expect(gcAlive).toBe(false);
+    } finally {
+      if (leaderPid != null && leaderPid > 0) {
+        try { process.kill(-leaderPid, 'SIGKILL'); } catch { /* already dead */ }
+      }
+      if (grandchildPid != null && grandchildPid > 0) {
+        try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* already dead */ }
+      }
+    }
+  });
+
+  it('cleans up the process group when the child exits before readiness', async () => {
+    // The child spawns a same-group descendant that ignores SIGTERM and then
+    // exits before readiness. The descendant remains alive unless the harness
+    // cleans the detached process group before rejecting.
+    let capturedPid: number | undefined;
+    let grandchildPid: number | undefined;
+    let thrown: Error | null = null;
+    try {
+      try {
+        await spawnManagedNode({
+          label: 'early-exit-with-descendant', cwd: projectRoot,
+          args: ['-e', [
+            "const { spawn } = require('child_process');",
+            "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
+            "process.stderr.write('grandchild=' + gc.pid + '\\n');",
+            "setTimeout(() => process.exit(7), 100);",
+          ].join(' ')],
+          readyLine: line => line === 'ready',
+          readyTimeoutMs: 5_000,
+          onSpawn: (child) => { capturedPid = child.pid; },
+        });
+      } catch (err) {
+        thrown = err as Error;
+        const match = thrown.message.match(/grandchild=(\d+)/);
+        if (match) grandchildPid = Number.parseInt(match[1], 10);
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toMatch(/child exited before readiness/);
+      expect(capturedPid).toBeDefined();
+      expect(capturedPid!).toBeGreaterThan(0);
+      expect(grandchildPid).toBeDefined();
+      expect(grandchildPid!).toBeGreaterThan(0);
+      let groupAlive = true;
+      try {
+        process.kill(-capturedPid!, 0);
+      } catch (err: unknown) {
+        groupAlive = false;
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+      }
+      expect(groupAlive).toBe(false);
+      let gcAlive = true;
+      try {
+        process.kill(grandchildPid!, 0);
+      } catch (err: unknown) {
+        gcAlive = false;
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+      }
+      expect(gcAlive).toBe(false);
+    } finally {
+      if (capturedPid != null && capturedPid > 0) {
+        try { process.kill(-capturedPid, 'SIGKILL'); } catch { /* already dead */ }
+      }
+      if (grandchildPid != null && grandchildPid > 0) {
+        try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* already dead */ }
+      }
     }
   });
 
