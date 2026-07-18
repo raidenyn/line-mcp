@@ -27,6 +27,7 @@ export interface ServerRequestClientOptions {
   resolveCredentials(principal: LinePrincipal): Promise<Readonly<AuthData> | null>;
   /** Directory refreshed LINE credential snapshots are persisted into. */
   authStoreDir: string;
+  lineApiBaseUrl?: string;
 }
 
 /** Builds the `(principal) => Promise<RequestLineClient>` factory the composed server wires everywhere. */
@@ -37,6 +38,7 @@ export function createServerRequestClientFactory(
     cache: options.cache,
     resolveCredentials: options.resolveCredentials,
     onAuthRefreshed: (fresh) => recordRefreshedAuth(fresh, options.authStoreDir),
+    lineApiBaseUrl: options.lineApiBaseUrl,
   });
 }
 

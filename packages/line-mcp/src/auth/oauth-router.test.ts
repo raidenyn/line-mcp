@@ -55,19 +55,20 @@ vi.mock('@raidenyn/line-client', async importOriginal => {
 
 const TEST_SECRET = 'oauth-router-test-secret';
 
-function providerFor(port: number, basePath: string, authStoreDir: string): LineAuthProvider {
+function providerFor(port: number, basePath: string, authStoreDir: string, lineApiBaseUrl?: string): LineAuthProvider {
   return new LineAuthProvider({
     secret: TEST_SECRET,
     endpoints: publicEndpointConfig(port, basePath),
     credentialStore: new FileCredentialStore(authStoreDir),
     authStoreDir,
+    lineApiBaseUrl,
   });
 }
 
 // Adapter mirroring the old setupOAuthRoutes(app, port, basePath, authStoreDir)
 // signature the router tests were written against.
-function setupOAuthRoutes(app: Express, port: number, basePath: string, authStoreDir: string): LineAuthProvider {
-  const provider = providerFor(port, basePath, authStoreDir);
+function setupOAuthRoutes(app: Express, port: number, basePath: string, authStoreDir: string, lineApiBaseUrl?: string): LineAuthProvider {
+  const provider = providerFor(port, basePath, authStoreDir, lineApiBaseUrl);
   provider.mountRoutes(app);
   return provider;
 }
@@ -319,6 +320,34 @@ describe('GET /authorize', () => {
     const response = await req(`${base}/authorize?${validParams}`);
     expect(response.status).toBe(200);
     expect(__createdClients.at(-1)?.login).toHaveBeenCalledWith(undefined);
+  });
+
+  it('forwards lineApiBaseUrl to the LineClient constructed for /authorize', async () => {
+    const { LineClient } = await import('@raidenyn/line-client') as unknown as {
+      LineClient: ReturnType<typeof vi.fn>;
+    };
+    LineClient.mockClear();
+    const app = express();
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: false }));
+    const localServer = http.createServer(app);
+    await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+    const port = (localServer.address() as { port: number }).port;
+    const localStore = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-gateway-'));
+    setupOAuthRoutes(app, port, '', localStore, 'http://127.0.0.1:18201');
+    try {
+      const response = await req(`http://127.0.0.1:${port}/authorize?${validParams}`);
+      expect(response.status).toBe(200);
+      expect(LineClient).toHaveBeenCalledWith(
+        undefined,
+        globalThis.fetch,
+        undefined,
+        'http://127.0.0.1:18201',
+      );
+    } finally {
+      await new Promise<void>(resolve => localServer.close(() => resolve()));
+      fs.rmSync(localStore, { recursive: true, force: true });
+    }
   });
 
   it('keeps script-breakout OAuth values in inert JSON context', async () => {

@@ -114,12 +114,13 @@ node packages/line-mcp/dist/cli.js   # standalone messenger server
 ## Commands
 
 ```bash
-npm run build      # tsc -b — composite build across all six packages
-npm run clean      # tsc -b --clean
-npm start          # run the composed server (packages/server/dist/cli.js)
-npm run lint       # eslint .
-npm run test:unit  # unit / contract / migration + import-boundary tests (no LINE session, no Docker)
-npm run test:e2e   # live LINE e2e (requires .line-auth.json)
+npm run build       # tsc -b — composite build across all six packages
+npm run clean       # tsc -b --clean
+npm start           # run the composed server (packages/server/dist/cli.js)
+npm run lint        # eslint .
+npm run test:unit   # in-process unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+npm run test:smoke  # strict local LINE mock + compiled composed and standalone CLIs, seeded and full OAuth paths (no credentials, no Docker)
+npm run test:e2e    # live LINE e2e (requires .line-auth.json)
 ```
 
 Extra deterministic gates (run explicitly; also wired into CI):
@@ -129,19 +130,27 @@ npx vitest run tests/artifacts/line-client-pack.test.ts   # packed line-client: 
 npx vitest run tests/docker/docker-smoke.test.ts          # both Docker targets: healthz + real MCP tools/list
 ```
 
+### Test suites
+
+The repository ships four distinct test surfaces:
+
+- **`test:unit`** — in-process unit, contract, and migration tests plus the package import-boundary guard. No LINE session, no Docker.
+- **`test:smoke`** — strict local LINE mock plus the **compiled** composed (`packages/server/dist/cli.js`) and standalone (`packages/line-mcp/dist/cli.js`) CLIs, run as real child processes against a deterministic in-process mock gateway. Four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. The composed scenario exercises all ten MCP tools; the standalone scenario exercises all five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker.
+- **`test:e2e`** — manual live LINE account verification. Export a real session to `.line-auth.json`, then run; the suite launches the composed server, seeds a `TEST_TOKEN` bypass, and connects over the MCP HTTP transport. Excluded from the PR-blocking CI gate; run as a pre-release check.
+- **Docker smoke** — runtime-image startup and the exact tool surface per container (composed = ten tools, standalone = five) over a real MCP `tools/list`. Run via `tests/docker/docker-smoke.test.ts`.
+
+`LINE_API_BASE_URL` may be set in tests or local development to point the LINE client at a different gateway (the smoke suite sets it to the local mock). Production deployments leave it unset: the default gateway is LINE, and any configured override still receives real LINE authorization headers, so only point it at a trusted endpoint.
+
 ## CI
 
-`.github/workflows/ci.yml` runs three parallel jobs on pull requests and pushes to `main`:
+`.github/workflows/ci.yml` runs four parallel jobs on pull requests and pushes to `main`:
 
 - **check** — `npm ci` → lint → `tsc -b` → unit/contract/migration tests → import-boundary test → `npm ls --all`.
+- **smoke** — `npm ci` → `npm run test:smoke`: builds the workspace once, then runs both compiled CLI targets against the strict local LINE mock. No credentials, no Docker.
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
 - **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
 
 The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate; it needs real credentials and is a manual pre-release check.
-
-## E2E tests
-
-Export a valid LINE session to `.line-auth.json` in the project root, then `npm run test:e2e`. The suite launches the composed server as a child process, seeds a test token to bypass OAuth, and connects over the MCP HTTP transport with an isolated temporary `DATA_DIR`.
 
 ## Package artifact & provenance policy
 

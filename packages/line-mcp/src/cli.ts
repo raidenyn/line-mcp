@@ -10,7 +10,10 @@ function resolveDataRoot(): string {
 }
 
 async function main(): Promise<void> {
-  const server = createStandaloneServer({ dataRoot: resolveDataRoot() });
+  const server = createStandaloneServer({
+    dataRoot: resolveDataRoot(),
+    lineApiBaseUrl: process.env.LINE_API_BASE_URL,
+  });
   const { port } = await server.start();
   process.stderr.write(`LINE messenger MCP (standalone) listening on port ${port}\n`);
 

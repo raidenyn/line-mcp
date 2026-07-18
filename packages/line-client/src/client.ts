@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import { getHmac, initStorageKey, signForAccount } from './signer';
 
-const BASE_URL = 'https://line-chrome-gw.line-apps.com';
+const DEFAULT_LINE_API_BASE_URL = 'https://line-chrome-gw.line-apps.com';
 
 const BASE_HEADERS: Record<string, string> = {
   accept: 'application/json, text/plain, */*',
@@ -95,6 +95,7 @@ export class LineClient {
   // Aborts all in-flight fetch calls when a new login() cancels the previous session
   private loginAbortController: AbortController | null = null;
   private loginGeneration = 0;
+  private readonly lineApiBaseUrl: string;
 
   // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
   private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
@@ -103,7 +104,9 @@ export class LineClient {
     auth?: AuthData | null,
     private readonly fetchFn: typeof globalThis.fetch = globalThis.fetch,
     private readonly onTokenRefreshed?: (snapshot: Readonly<AuthData>) => void | Promise<void>,
+    lineApiBaseUrl = DEFAULT_LINE_API_BASE_URL,
   ) {
+    this.lineApiBaseUrl = lineApiBaseUrl.replace(/\/$/, '');
     // Clone rather than store the caller's reference: refreshIfExpired() mutates
     // this.auth in place, and doing that on the caller's own object would be a
     // hidden side effect on state the caller still holds a reference to. The
@@ -180,7 +183,7 @@ export class LineClient {
       if (opts.sessionId) headers['x-line-session-id'] = opts.sessionId;
     }
 
-    const response = await this.fetchFn(BASE_URL + path, {
+    const response = await this.fetchFn(this.lineApiBaseUrl + path, {
       method: 'POST',
       headers,
       body,
@@ -230,7 +233,7 @@ export class LineClient {
 
     if (!LineClient.refreshLocks.has(mid)) {
       const p = (async () => {
-        const response = await this.fetchFn(`${BASE_URL}/api/auth/tokenRefresh`, {
+        const response = await this.fetchFn(`${this.lineApiBaseUrl}/api/auth/tokenRefresh`, {
           method: 'POST',
           headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: auth.refreshToken }),

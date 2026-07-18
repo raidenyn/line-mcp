@@ -106,6 +106,7 @@ export interface StandaloneOptions {
   basePath?: string;
   /** Overrides the auto-derived public base URL used in import upload links. */
   publicUrl?: string;
+  lineApiBaseUrl?: string;
 }
 
 export interface StandaloneServer {
@@ -157,12 +158,14 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
         endpoints: publicEndpointConfig(port, basePath),
         credentialStore,
         authStoreDir,
+        lineApiBaseUrl: options.lineApiBaseUrl,
       });
 
       const createRequestClient = createRequestClientFactory({
         cache,
         resolveCredentials: (principal) => authProvider.resolveCredentials(principal),
         onAuthRefreshed: (fresh) => recordRefreshedAuth(fresh, authStoreDir),
+        lineApiBaseUrl: options.lineApiBaseUrl,
       });
 
       const importService = new ImportService({

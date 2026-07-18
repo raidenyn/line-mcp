@@ -12,7 +12,8 @@ npm run lint         # eslint .
 ```
 
 ```bash
-npm run test:unit    # unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+npm run test:unit    # in-process unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+npm run test:smoke   # strict local LINE mock + compiled composed and standalone CLIs (no credentials, no Docker)
 npm run test:e2e     # live LINE e2e (requires .line-auth.json)
 ```
 
@@ -30,6 +31,8 @@ npx vitest run packages/server/src/composition.test.ts
 ```
 
 The standalone messenger-only server runs from `node packages/line-mcp/dist/cli.js`.
+
+`LINE_API_BASE_URL` is a test/development override that repoints the LINE client at a different gateway (the smoke suite sets it to the local strict mock). Production deployments leave it unset: the default gateway is LINE, and any configured override still receives real LINE authorization headers, so only point it at a trusted endpoint.
 
 ## Working Branches
 
@@ -171,4 +174,5 @@ Both run as the non-root `node` user, expose `/data` as a volume, and healthchec
 - `tests/architecture/import-boundaries.test.ts` — enforces the package dependency graph above.
 - `tests/artifacts/line-client-pack.test.ts` — real `npm pack` + offline install of `@raidenyn/line-client` outside the checkout, real WASM HMAC, asserts no better-sqlite3. (CI `pack-line-client` job.)
 - `tests/docker/docker-smoke.test.ts` — builds both Docker targets, runs each container against a throwaway data root, waits for `/healthz`, and asserts the tool surface over a real MCP `tools/list` (composed = ten, standalone = five). (CI `docker` job.)
+- `tests/smoke/*` — strict local LINE mock + compiled composed and standalone CLIs, run as real child processes against a deterministic in-process mock gateway. `npm run test:smoke` builds the workspace once, then runs four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. Composed exercises all ten tools; standalone exercises the five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker — the process-level compiled-CLI boundary is what distinguishes it from `test:unit` (in-process) and Docker smoke (runtime-image startup). (CI `smoke` job.)
 - `tests/e2e.test.ts` — live LINE e2e; launches the composed server, seeds a `TEST_TOKEN` bypass, connects over the MCP HTTP transport. Requires `.line-auth.json`; **excluded from the PR-blocking CI gate**, run manually pre-release.
