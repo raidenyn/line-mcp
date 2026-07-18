@@ -40,18 +40,14 @@ export interface MockReport {
 
 type AccessKind = 'current' | 'superseded' | 'unknown' | 'expired';
 
-interface AccessEntry {
-  status: 'current' | 'superseded';
-  exp: number;
-}
-
 interface RefreshEntry {
   status: 'current' | 'superseded';
 }
 
 type SessionPhase =
   | 'created' | 'qr-created' | 'qr-verified'
-  | 'pin-verified' | 'cert-accepted' | 'completed';
+  | 'cert-accepted' | 'certificate-rejected'
+  | 'pin-created' | 'pin-verified' | 'completed';
 
 interface Session {
   authSessionId: string;
@@ -60,6 +56,12 @@ interface Session {
   pinRequired: boolean;
   branch: LoginBranch | null;
   issuedAuth: AuthData | null;
+}
+
+interface AccessEntry {
+  status: 'current' | 'superseded';
+  exp: number;
+  issuedBySession?: string;
 }
 
 interface BoundaryEnd { kind: 'end'; chatMid: string; }
@@ -181,6 +183,20 @@ export class MockLineState {
     return { kind: 'current', mid: MOCK_ACCOUNT_MID };
   }
 
+  /**
+   * Returns the authSessionId of the completed login session that issued this
+   * access token, or null if the token was not issued by a login (e.g. the
+   * seeded token configured at scenario setup).
+   */
+  resolveLoginSessionForAccess(token: string): string | null {
+    const entry = this.issuedAccessTokens.get(token);
+    if (!entry || !entry.issuedBySession) return null;
+    const session = this.sessions.get(entry.issuedBySession);
+    if (!session) return null;
+    if (session.phase !== 'completed') return null;
+    return session.authSessionId;
+  }
+
   refresh(refreshToken: string): AuthData | null {
     const entry = this.issuedRefreshTokens.get(refreshToken);
     if (!entry || entry.status !== 'current') return null;
@@ -210,7 +226,12 @@ export class MockLineState {
       );
     }
     const newExp = this.extractExp(newAccess);
-    this.issuedAccessTokens.set(newAccess, { status: 'current', exp: newExp });
+    const oldAccessEntry = oldAccess ? this.issuedAccessTokens.get(oldAccess) : undefined;
+    this.issuedAccessTokens.set(newAccess, {
+      status: 'current',
+      exp: newExp,
+      issuedBySession: oldAccessEntry?.issuedBySession,
+    });
     this.issuedRefreshTokens.set(newRefresh, { status: 'current' });
     this.refreshToAccess.set(newRefresh, newAccess);
     this.accessToRefresh.set(newAccess, newRefresh);
@@ -279,15 +300,24 @@ export class MockLineState {
       this.observedLoginBranches.push('certificate');
       return { accepted: true, pinRequired: false };
     }
+    session.phase = 'certificate-rejected';
     session.pinRequired = true;
     session.branch = 'pin';
     this.observedLoginBranches.push('pin');
     return { accepted: false, pinRequired: true };
   }
 
+  markPinCreated(authSessionId: string): void {
+    const session = this.requireSession(authSessionId);
+    if (session.phase !== 'certificate-rejected') {
+      throw new Error(`illegal transition: ${session.phase} -> pin-created`);
+    }
+    session.phase = 'pin-created';
+  }
+
   markPinVerified(authSessionId: string): void {
     const session = this.requireSession(authSessionId);
-    if (session.phase !== 'qr-verified') {
+    if (session.phase !== 'pin-created') {
       throw new Error(`illegal transition: ${session.phase} -> pin-verified`);
     }
     session.phase = 'pin-verified';
@@ -323,13 +353,30 @@ export class MockLineState {
       kdfParameter1: base.kdfParameter1,
       kdfParameter2: base.kdfParameter2,
     };
-    this.issuedAccessTokens.set(accessToken, { status: 'current', exp: this.extractExp(accessToken) });
+    this.issuedAccessTokens.set(accessToken, { status: 'current', exp: this.extractExp(accessToken), issuedBySession: authSessionId });
     this.issuedRefreshTokens.set(refreshToken, { status: 'current' });
     this.refreshToAccess.set(refreshToken, accessToken);
     this.accessToRefresh.set(accessToken, refreshToken);
+    this.supersedePriorLoginTokens(authSessionId);
     session.issuedAuth = issued;
     session.phase = 'completed';
     return issued;
+  }
+
+  /**
+   * Marks every access token issued by a previously completed login session as
+   * superseded. The current session's freshly issued token is preserved. This
+   * prevents an old login's token from being reused for identity after a newer
+   * login completes.
+   */
+  private supersedePriorLoginTokens(currentSessionId: string): void {
+    for (const [, entry] of this.issuedAccessTokens) {
+      if (entry.issuedBySession == null) continue;
+      if (entry.issuedBySession === currentSessionId) continue;
+      const priorSession = this.sessions.get(entry.issuedBySession);
+      if (!priorSession || priorSession.phase !== 'completed') continue;
+      if (entry.status === 'current') entry.status = 'superseded';
+    }
   }
 
   resolveBoundary(chatMid: string, messageId: string, _deliveredTime: string): BoundaryResult {

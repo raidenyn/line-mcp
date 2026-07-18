@@ -131,6 +131,7 @@ describe('mock LINE fixtures and state', () => {
     state.markQrCreated(first.authSessionId);
     state.markQrVerified(first.authSessionId);
     expect(state.verifyCertificate(first.authSessionId, '')).toEqual({ accepted: false, pinRequired: true });
+    state.markPinCreated(first.authSessionId);
     state.markPinVerified(first.authSessionId);
     const issued = state.completeLogin(first.authSessionId);
 
@@ -896,6 +897,161 @@ describe('mock LINE identity requires the current access token', () => {
       kdfParameter1: VALID_STORAGE_KEY.kdfParameter1,
       kdfParameter2: VALID_STORAGE_KEY.kdfParameter2,
     });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects identity with the seeded access token (no login issued it)', async () => {
+    mock.state.configure({
+      scenarioId: 'identity-seeded-token', mode: 'seeded', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { unknown_access_token: 1 },
+    });
+    const seededAccess = mock.state.fixtures.seededAuth.accessToken;
+    const response = await signedPost(
+      '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3',
+      '[]',
+      seededAccess,
+    );
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ code: 10006, message: 'REQUEST_UNKNOWN_ACCESS_TOKEN' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects identity with a prior login token after a second login (superseded)', async () => {
+    mock.state.configure({
+      scenarioId: 'identity-superseded', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: ['pin', 'pin'], expectedRejections: { superseded_access_token: 1 },
+    });
+    const identityPath = '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3';
+    const createSessionPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession';
+    const createQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode';
+    const checkQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified';
+    const verifyCertPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate';
+    const createPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode';
+    const checkPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified';
+    const loginPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2';
+
+    async function runPinLogin(): Promise<string> {
+      const created = await signedPost(createSessionPath, '[ {} ]');
+      const authSessionId = (await created.json() as { data: { authSessionId: string } }).data.authSessionId;
+      await signedPost(createQrPath, JSON.stringify([{ authSessionId }]));
+      await signedPostLongPoll(checkQrPath, JSON.stringify([{ authSessionId }]), authSessionId);
+      await signedPost(verifyCertPath, JSON.stringify([{ authSessionId, certificate: '' }]));
+      await signedPost(createPinPath, JSON.stringify([{ authSessionId }]));
+      await signedPostLongPoll(checkPinPath, JSON.stringify([{ authSessionId }]), authSessionId);
+      const login = await signedPost(loginPath, JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }]));
+      return (await login.json() as { data: { tokenV3IssueResult: { accessToken: string } } }).data.tokenV3IssueResult.accessToken;
+    }
+
+    const firstToken = await runPinLogin();
+    // First login's token must be accepted for identity before the second login.
+    const firstIdentity = await signedPost(identityPath, '[]', firstToken);
+    expect(firstIdentity.status).toBe(200);
+    expect((await firstIdentity.json() as { code: number }).code).toBe(0);
+
+    await runPinLogin();
+
+    // After the second login, the first login's token is superseded.
+    const response = await signedPost(identityPath, '[]', firstToken);
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({ code: 10008, message: 'REQUEST_SUPERSEDED_ACCESS_TOKEN' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+});
+
+describe('mock LINE QR/PIN transition enforcement', () => {
+  const createSessionPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession';
+  const createQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode';
+  const checkQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified';
+  const verifyCertPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate';
+  const createPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode';
+  const checkPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified';
+  const loginPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2';
+
+  async function createSessionAndReachQrVerified(): Promise<string> {
+    const created = await signedPost(createSessionPath, '[ {} ]');
+    const authSessionId = (await created.json() as { data: { authSessionId: string } }).data.authSessionId;
+    await signedPost(createQrPath, JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll(checkQrPath, JSON.stringify([{ authSessionId }]), authSessionId);
+    return authSessionId;
+  }
+
+  it('rejects createPinCode after checkQr (skipping verifyCertificate)', async () => {
+    mock.state.configure({
+      scenarioId: 'pin-skip-cert', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { illegal_transition: 1 },
+    });
+    const authSessionId = await createSessionAndReachQrVerified();
+    const response = await signedPost(createPinPath, JSON.stringify([{ authSessionId }]));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10011, message: 'REQUEST_ILLEGAL_TRANSITION' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects checkPin after checkQr (skipping verifyCertificate + createPinCode)', async () => {
+    mock.state.configure({
+      scenarioId: 'pin-skip-all', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { illegal_transition: 1 },
+    });
+    const authSessionId = await createSessionAndReachQrVerified();
+    const response = await signedPostLongPoll(checkPinPath, JSON.stringify([{ authSessionId }]), authSessionId);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10011, message: 'REQUEST_ILLEGAL_TRANSITION' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects login after checkQr (skipping both verifyCertificate and createPinCode)', async () => {
+    mock.state.configure({
+      scenarioId: 'login-skip-all', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { illegal_transition: 1 },
+    });
+    const authSessionId = await createSessionAndReachQrVerified();
+    const body = JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }]);
+    const response = await signedPost(loginPath, body);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10011, message: 'REQUEST_ILLEGAL_TRANSITION' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('succeeds on the happy PIN path verifyCertificate(reject) -> createPinCode -> checkPin -> login', async () => {
+    mock.state.configure({
+      scenarioId: 'happy-pin', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: ['pin'], expectedRejections: {},
+    });
+    const authSessionId = await createSessionAndReachQrVerified();
+    await signedPost(verifyCertPath, JSON.stringify([{ authSessionId, certificate: '' }]));
+    await signedPost(createPinPath, JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll(checkPinPath, JSON.stringify([{ authSessionId }]), authSessionId);
+    const loginBody = JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }]);
+    const login = await signedPost(loginPath, loginBody);
+    const loginData = await login.json() as { code: number; data: { mid: string } };
+    expect(loginData.code).toBe(0);
+    expect(loginData.data.mid).toBe(MOCK_ACCOUNT_MID);
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('succeeds on the happy certificate path verifyCertificate(accept) -> login', async () => {
+    // Register a known certificate via a first PIN login.
+    mock.state.configure({
+      scenarioId: 'happy-cert', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: ['pin', 'certificate'], expectedRejections: {},
+    });
+    const firstAuthSessionId = await createSessionAndReachQrVerified();
+    await signedPost(verifyCertPath, JSON.stringify([{ authSessionId: firstAuthSessionId, certificate: '' }]));
+    await signedPost(createPinPath, JSON.stringify([{ authSessionId: firstAuthSessionId }]));
+    await signedPostLongPoll(checkPinPath, JSON.stringify([{ authSessionId: firstAuthSessionId }]), firstAuthSessionId);
+    const firstLogin = await signedPost(loginPath, JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId: firstAuthSessionId }]));
+    const cert = (await firstLogin.json() as { data: { certificate: string } }).data.certificate;
+
+    // Second session: certificate is accepted, login proceeds without PIN.
+    const secondAuthSessionId = await createSessionAndReachQrVerified();
+    const certOk = await signedPost(verifyCertPath, JSON.stringify([{ authSessionId: secondAuthSessionId, certificate: cert }]));
+    expect(certOk.status).toBe(200);
+    expect(await certOk.json()).toMatchObject({ code: 0, data: {} });
+
+    const login = await signedPost(loginPath, JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId: secondAuthSessionId }]));
+    const loginData = await login.json() as { code: number; data: { mid: string } };
+    expect(loginData.code).toBe(0);
+    expect(loginData.data.mid).toBe(MOCK_ACCOUNT_MID);
     expect(mock.state.report().ok).toBe(true);
   });
 });

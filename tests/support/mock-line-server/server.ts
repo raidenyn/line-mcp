@@ -455,6 +455,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     }
     try {
       state.requireSession(authSessionId);
+      state.markPinCreated(authSessionId);
     } catch (err) {
       const kind = extractRejectionFromError(err);
       rejectLineWithSession(res, kind, LINE_ROUTES.createPin, authSessionId, { authSessionId, error: (err as Error).message });
@@ -527,7 +528,24 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       rejectLine(res, 'invalid_body', LINE_ROUTES.identity, { expected: '[]' });
       return;
     }
-    if (!requireCurrentAccess(res, LINE_ROUTES.identity, accessToken)) return;
+    const auth = state.authenticateAccess(accessToken);
+    if (auth.kind === 'unknown') {
+      rejectLine(res, 'unknown_access_token', LINE_ROUTES.identity, { mid: auth.mid });
+      return;
+    }
+    if (auth.kind === 'expired') {
+      rejectLine(res, 'expired_access_token', LINE_ROUTES.identity, { mid: auth.mid });
+      return;
+    }
+    if (auth.kind === 'superseded') {
+      rejectLine(res, 'superseded_access_token', LINE_ROUTES.identity, { mid: auth.mid });
+      return;
+    }
+    const sessionId = state.resolveLoginSessionForAccess(accessToken);
+    if (sessionId == null) {
+      rejectLine(res, 'unknown_access_token', LINE_ROUTES.identity, { reason: 'not-issued-by-login' });
+      return;
+    }
     json(res, 200, lineOk({
       wrappedNonce: state.fixtures.seededAuth.wrappedNonce,
       kdfParameter1: state.fixtures.seededAuth.kdfParameter1,
