@@ -209,6 +209,20 @@ export class MockLineState {
   refresh(refreshToken: string): AuthData | null {
     const entry = this.issuedRefreshTokens.get(refreshToken);
     if (!entry || entry.status !== 'current') return null;
+    // A refresh token issued by a prior (superseded) login must not mint a
+    // fresh access token — the new login supersedes both the prior access and
+    // refresh tokens. The rotated access token would otherwise inherit the
+    // prior session's issuedBySession and be classified current.
+    const boundAccess = this.refreshToAccess.get(refreshToken);
+    if (boundAccess) {
+      const boundEntry = this.issuedAccessTokens.get(boundAccess);
+      if (boundEntry && boundEntry.issuedBySession && boundEntry.status === 'superseded') {
+        // Mark the refresh entry superseded as well so subsequent attempts are
+        // cheaply rejected, and refuse to rotate.
+        entry.status = 'superseded';
+        return null;
+      }
+    }
     entry.status = 'superseded';
     const oldAccess = this.refreshToAccess.get(refreshToken);
     if (oldAccess) {
@@ -373,18 +387,26 @@ export class MockLineState {
   }
 
   /**
-   * Marks every access token issued by a previously completed login session as
-   * superseded. The current session's freshly issued token is preserved. This
-   * prevents an old login's token from being reused for identity after a newer
-   * login completes.
+   * Marks every access token AND refresh token issued by a previously
+   * completed login session as superseded. The current session's freshly
+   * issued tokens are preserved. This prevents an old login's access token
+   * from being reused for identity, and its refresh token from minting a
+   * fresh (current-classified) access token, after a newer login completes.
    */
   private supersedePriorLoginTokens(currentSessionId: string): void {
-    for (const [, entry] of this.issuedAccessTokens) {
+    for (const [access, entry] of this.issuedAccessTokens) {
       if (entry.issuedBySession == null) continue;
       if (entry.issuedBySession === currentSessionId) continue;
       const priorSession = this.sessions.get(entry.issuedBySession);
       if (!priorSession || priorSession.phase !== 'completed') continue;
       if (entry.status === 'current') entry.status = 'superseded';
+      const refresh = this.accessToRefresh.get(access);
+      if (refresh) {
+        const refreshEntry = this.issuedRefreshTokens.get(refresh);
+        if (refreshEntry && refreshEntry.status === 'current') {
+          refreshEntry.status = 'superseded';
+        }
+      }
     }
   }
 

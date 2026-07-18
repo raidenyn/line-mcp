@@ -180,9 +180,13 @@ export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
   }
   const h = lowerHeaders(req.headers);
   const preAuth = isPreAuth(req.pathname);
-  const access = singleString(h['x-line-access']) ?? '';
-  // x-line-access (authorization) is forbidden on every pre-auth route.
-  if (preAuth && access) {
+  const accessHeader = singleString(h['x-line-access']);
+  const accessPresent = accessHeader != null;
+  const access = accessHeader ?? '';
+  // x-line-access (authorization) is forbidden on every pre-auth route. Its
+  // mere PRESENCE is a violation — an empty value must not be conflated with
+  // an absent header, since the header was still supplied.
+  if (preAuth && accessPresent) {
     return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { forbiddenHeader: 'x-line-access' } };
   }
   const hmacHeader = singleString(h['x-hmac']);
@@ -190,6 +194,8 @@ export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
     return { ok: false, rejection: 'missing_hmac', accessToken: access, longPoll: false };
   }
   if (!preAuth) {
+    // Authenticated routes require a non-empty access token. A missing header
+    // and an empty-string header are both rejected here.
     if (!access) {
       return { ok: false, rejection: 'missing_auth_header', accessToken: '', longPoll: false };
     }

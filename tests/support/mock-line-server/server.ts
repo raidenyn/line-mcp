@@ -830,11 +830,26 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
         await handleImage(res, pathname);
         return;
       }
-      if (method === 'POST') {
-        await handleLine(req, res, pathname);
+      // A request against a known LINE route with the wrong HTTP method must
+      // be accounted as a violation rather than a generic 404 — otherwise a
+      // wrong-method probe leaves routeCounts/violations untouched and the
+      // required method is never proven. IMAGE_ROUTES is GET-only; LINE_ROUTES
+      // are POST-only.
+      if (method !== 'POST') {
+        if (isLineRoute(pathname)) {
+          state.beginLineRequest();
+          try {
+            recordRoute(pathname);
+            rejectLine(res, 'invalid_body', pathname, { reason: 'wrong-method', method });
+          } finally {
+            state.endLineRequest();
+          }
+          return;
+        }
+        json(res, 404, lineApiError(10004, 'REQUEST_UNKNOWN_ROUTE'));
         return;
       }
-      json(res, 404, lineApiError(10004, 'REQUEST_UNKNOWN_ROUTE'));
+      await handleLine(req, res, pathname);
     } catch (err) {
       try {
         json(res, 500, lineApiError(10099, 'INTERNAL_ERROR', { error: (err as Error).message }));

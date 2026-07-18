@@ -1287,3 +1287,103 @@ describe('mock LINE pagination boundary validation', () => {
     expect(mock.state.report().ok).toBe(true);
   });
 });
+
+describe('mock LINE review-finding regression probes', () => {
+  const createSessionPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession';
+  const createQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createQrCode';
+  const checkQrPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkQrCodeVerified';
+  const verifyCertPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/verifyCertificate';
+  const createPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createPinCode';
+  const checkPinPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginPermitNoticeService/checkPinCodeVerified';
+  const loginPath = '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/qrCodeLoginV2';
+  const identityPath = '/api/talk/thrift/Talk/TalkService/getEncryptedIdentityV3';
+
+  async function runPinLogin(): Promise<{ accessToken: string; refreshToken: string }> {
+    const created = await signedPost(createSessionPath, '[ {} ]');
+    const authSessionId = (await created.json() as { data: { authSessionId: string } }).data.authSessionId;
+    await signedPost(createQrPath, JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll(checkQrPath, JSON.stringify([{ authSessionId }]), authSessionId);
+    await signedPost(verifyCertPath, JSON.stringify([{ authSessionId, certificate: '' }]));
+    await signedPost(createPinPath, JSON.stringify([{ authSessionId }]));
+    await signedPostLongPoll(checkPinPath, JSON.stringify([{ authSessionId }]), authSessionId);
+    const login = await signedPost(loginPath, JSON.stringify([{ systemName: 'CHROMEOS', modelName: 'CHROME', autoLoginIsRequired: false, authSessionId }]));
+    const data = await login.json() as { data: { tokenV3IssueResult: { accessToken: string; refreshToken: string } } };
+    return data.data.tokenV3IssueResult;
+  }
+
+  // Thread A: an empty x-line-access header on a pre-auth route must be
+  // rejected. Header PRESENCE — not the parsed value — is what violates the
+  // forbidden-header rule.
+  it('rejects a signed createSession carrying an empty x-line-access header (Thread A)', async () => {
+    mock.state.configure({
+      scenarioId: 'empty-x-line-access', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await signedPostWithHeaders(
+      createSessionPath,
+      '[ {} ]',
+      { 'x-line-access': '' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  // Thread B: a wrong HTTP method on a known LINE route must be recorded as a
+  // violation (and route-counted), not silently 404'd.
+  it('rejects and records a GET against the POST-only createSession route (Thread B)', async () => {
+    mock.state.configure({
+      scenarioId: 'wrong-method-create-session', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await fetch(origin + createSessionPath, { method: 'GET' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    const report = mock.state.report();
+    expect(report.routeCounts.createSession).toBe(1);
+    expect(report.violations).toHaveLength(0);
+    expect(report.ok).toBe(true);
+  });
+
+  // Thread C: after a second login supersedes the first, the first login's
+  // refresh token must NOT be able to mint a fresh access token, and the
+  // second login's refresh token must still work.
+  it('rejects a prior login refresh token after a second login and accepts the current one (Thread C)', async () => {
+    mock.state.configure({
+      scenarioId: 'prior-login-refresh', mode: 'full-auth', epochSeconds,
+      expectedRefreshCount: 1, expectedLoginBranches: ['pin', 'pin'],
+      expectedRejections: { unknown_refresh_token: 1, superseded_access_token: 1 },
+    });
+
+    const first = await runPinLogin();
+    const second = await runPinLogin();
+
+    // The first login's refresh token must be rejected.
+    const staleRefreshResponse = await fetch(origin + '/api/auth/tokenRefresh', {
+      method: 'POST',
+      headers: REQUIRED_LINE_HEADERS,
+      body: JSON.stringify({ refreshToken: first.refreshToken }),
+    });
+    expect(staleRefreshResponse.status).toBe(400);
+    expect(await staleRefreshResponse.json()).toMatchObject({ code: 10009, message: 'REQUEST_UNKNOWN_REFRESH_TOKEN' });
+
+    // The second (current) login's refresh token must still rotate.
+    const okRefreshResponse = await fetch(origin + '/api/auth/tokenRefresh', {
+      method: 'POST',
+      headers: REQUIRED_LINE_HEADERS,
+      body: JSON.stringify({ refreshToken: second.refreshToken }),
+    });
+    expect(okRefreshResponse.status).toBe(200);
+    const okRefresh = await okRefreshResponse.json() as { accessToken: string; refreshToken: string };
+    expect(okRefresh.accessToken).not.toBe(second.accessToken);
+
+    // The first login's original access token must still be rejected as
+    // superseded for identity (defense-in-depth: even if refresh had somehow
+    // rotated it, the inherited issuedBySession would be the superseded S1).
+    const identityResponse = await signedPost(identityPath, '[]', first.accessToken);
+    expect(identityResponse.status).toBe(401);
+    expect(await identityResponse.json()).toMatchObject({ code: 10008, message: 'REQUEST_SUPERSEDED_ACCESS_TOKEN' });
+
+    expect(mock.state.report().ok).toBe(true);
+  });
+});

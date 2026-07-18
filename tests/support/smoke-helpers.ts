@@ -451,4 +451,3 @@ export async function assertMcpUnauthorized(
     expect(res.headers.get('www-authenticate')).toBe(expectedWww);
   }
 }
-
