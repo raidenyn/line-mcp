@@ -39,6 +39,22 @@ function redact(value: string): string {
     .replace(/(wrappedNonce=)([^\s\r\n]*)/gi, '$1<redacted>')
     .replace(/(kdfParameter1=)([^\s\r\n]*)/gi, '$1<redacted>')
     .replace(/(kdfParameter2=)([^\s\r\n]*)/gi, '$1<redacted>')
+    // JSON-quoted credential key/value pairs (double-quoted form).
+    .replace(/"accessToken"\s*:\s*"[^"]*"/gi, '"accessToken":"<redacted>"')
+    .replace(/"refreshToken"\s*:\s*"[^"]*"/gi, '"refreshToken":"<redacted>"')
+    .replace(/"certificate"\s*:\s*"[^"]*"/gi, '"certificate":"<redacted>"')
+    .replace(/"wrappedNonce"\s*:\s*"[^"]*"/gi, '"wrappedNonce":"<redacted>"')
+    .replace(/"kdfParameter1"\s*:\s*"[^"]*"/gi, '"kdfParameter1":"<redacted>"')
+    .replace(/"kdfParameter2"\s*:\s*"[^"]*"/gi, '"kdfParameter2":"<redacted>"')
+    // JSON-quoted credential key/value pairs (single-quoted form, for
+    // robustness against children that emit JS/JSON-ish literals with
+    // single quotes).
+    .replace(/'accessToken'\s*:\s*'[^']*'/gi, "'accessToken':'<redacted>'")
+    .replace(/'refreshToken'\s*:\s*'[^']*'/gi, "'refreshToken':'<redacted>'")
+    .replace(/'certificate'\s*:\s*'[^']*'/gi, "'certificate':'<redacted>'")
+    .replace(/'wrappedNonce'\s*:\s*'[^']*'/gi, "'wrappedNonce':'<redacted>'")
+    .replace(/'kdfParameter1'\s*:\s*'[^']*'/gi, "'kdfParameter1':'<redacted>'")
+    .replace(/'kdfParameter2'\s*:\s*'[^']*'/gi, "'kdfParameter2':'<redacted>'")
     // JWT-like tokens (base64url header starting with eyJ...) — match the
     // full three-segment JWT form, or any long eyJ... run, and replace.
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-jwt>')
@@ -170,18 +186,19 @@ export function spawnManagedNode(options: SpawnOptions): Promise<ManagedProcess>
 
     child.on('exit', (code, signal) => {
       if (!settled) {
-        settled = true;
         cleanupEarly();
         if (options.readyLine) {
           const exitCode = code != null ? code : (signal != null ? -1 : 0);
-          reject(buildReadyError(
-            options.label,
-            `child exited before readiness (code=${exitCode} signal=${signal ?? 'null'})`,
-            stdoutBuf,
-            stderrBuf,
-            options.env,
-          ));
+          // Route the early-exit rejection through failSpawn so the child's
+          // process group is cleaned up (terminateChildNow + group-kill +
+          // waitForGroupExit) before the rejection fires. A descendant
+          // that the child spawned in the same group and that ignores
+          // signals would otherwise survive a synchronous reject() here.
+          // failSpawn is async and child.on('exit') can't await, so use the
+          // same void-fire pattern as child.on('error') below.
+          void failSpawn(`child exited before readiness (code=${exitCode} signal=${signal ?? 'null'})`);
         } else {
+          settled = true;
           resolve(makeManaged(child, () => stdoutBuf, () => stderrBuf));
         }
       }

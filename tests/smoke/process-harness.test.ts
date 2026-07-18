@@ -123,6 +123,63 @@ describe('process harness', () => {
     expect(gcAlive).toBe(false);
   });
 
+  it('cleans up the process group when the child exits before readiness', async () => {
+    // The child spawns a same-group signal-ignoring descendant (NOT detached)
+    // and then exits before writing the ready line. The early-exit path must
+    // still kill the whole process group — the descendant must not survive
+    // the rejection.
+    let capturedPid: number | undefined;
+    let grandchildPid: number | undefined;
+    let thrown: Error | null = null;
+    try {
+      await spawnManagedNode({
+        label: 'early-exit-with-descendant', cwd: projectRoot,
+        args: ['-e', [
+          "const { spawn } = require('child_process');",
+          "const gc = spawn(process.execPath, ['-e', \"process.on('SIGTERM',()=>{}); process.on('SIGKILL',()=>{}); setInterval(()=>{},1000)\"], { stdio: 'ignore' });",
+          "process.stderr.write('grandchild=' + gc.pid + '\\n');",
+          "setTimeout(() => process.exit(7), 100);",
+        ].join(' ')],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 5_000,
+        onSpawn: (child) => { capturedPid = child.pid; },
+      });
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toMatch(/child exited before readiness/);
+    expect(capturedPid).toBeDefined();
+    expect(capturedPid!).toBeGreaterThan(0);
+    // The grandchild must have been killed as part of the group cleanup
+    // routed through failSpawn. If the early-exit path rejected
+    // synchronously without cleaning up, the group (and grandchild) would
+    // still be alive here.
+    let groupAlive = true;
+    try {
+      process.kill(-capturedPid!, 0);
+    } catch (err: unknown) {
+      groupAlive = false;
+      expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+    }
+    expect(groupAlive).toBe(false);
+    // Best-effort: if a grandchild pid was discoverable via the (now-gone)
+    // stderr, also assert it is dead. We parse it from the thrown error
+    // message since the stderr buffer is surfaced there.
+    const match = thrown!.message.match(/grandchild=(\d+)/);
+    if (match) {
+      grandchildPid = Number.parseInt(match[1], 10);
+      let gcAlive = true;
+      try {
+        process.kill(grandchildPid!, 0);
+      } catch (err: unknown) {
+        gcAlive = false;
+        expect((err as NodeJS.ErrnoException).code).toBe('ESRCH');
+      }
+      expect(gcAlive).toBe(false);
+    }
+  });
+
   it('connectMcp rejects and cleans up when the URL is unreachable', async () => {
     // A port that is not listening — connect() must reject, and the
     // half-opened transport/client must not leak.
@@ -190,6 +247,46 @@ describe('process harness', () => {
     expect(thrown!.message).toContain('refreshToken=<redacted>');
     expect(thrown!.message).toContain('certificate=<redacted>');
     expect(thrown!.message).toContain('<redacted-jwt>');
+  });
+
+  it('redacts JSON-quoted credential forms from child output', async () => {
+    // A child that writes a JSON object containing credential keys to
+    // stderr and then never becomes ready must surface a readiness-timeout
+    // error whose message does NOT contain any of the raw secret values,
+    // regardless of whether the JSON is double- or single-quoted.
+    const accessValue = 'opaque_access_probe_742';
+    const refreshValue = 'opaque_refresh_probe_742';
+    const certValue = 'cert_probe_742';
+    const nonceValue = 'nonce_probe_742';
+    const doubleJson = `{"accessToken":"${accessValue}","refreshToken":"${refreshValue}","certificate":"${certValue}","wrappedNonce":"${nonceValue}","kdfParameter1":"kp1_742","kdfParameter2":"kp2_742"}`;
+    const singleJson = `{'accessToken':'${accessValue}','refreshToken':'${refreshValue}','certificate':'${certValue}','wrappedNonce':'${nonceValue}'}`;
+    let thrown: Error | null = null;
+    try {
+      await spawnManagedNode({
+        label: 'json-credential-redaction-fixture', cwd: projectRoot,
+        args: ['-e', `process.stderr.write(${JSON.stringify(doubleJson)}); process.stderr.write(${JSON.stringify(singleJson)}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 500,
+      });
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
+    // None of the raw secret values may appear in the thrown error.
+    expect(thrown!.message).not.toContain(accessValue);
+    expect(thrown!.message).not.toContain(refreshValue);
+    expect(thrown!.message).not.toContain(certValue);
+    expect(thrown!.message).not.toContain(nonceValue);
+    expect(thrown!.message).not.toContain('kp1_742');
+    expect(thrown!.message).not.toContain('kp2_742');
+    // The redaction markers should be present for both quote styles.
+    expect(thrown!.message).toContain('"accessToken":"<redacted>"');
+    expect(thrown!.message).toContain('"refreshToken":"<redacted>"');
+    expect(thrown!.message).toContain('"certificate":"<redacted>"');
+    expect(thrown!.message).toContain('"wrappedNonce":"<redacted>"');
+    expect(thrown!.message).toContain("'accessToken':'<redacted>'");
+    expect(thrown!.message).toContain("'refreshToken':'<redacted>'");
   });
 
   it('removes a temporary root even when setup throws after creation', () => {
