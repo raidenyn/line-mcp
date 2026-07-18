@@ -83,18 +83,18 @@ Two build targets share one multi-stage `Dockerfile`:
 
 ```bash
 # Composed server (ten tools) — the docker-compose default
-docker compose up -d line-mcp
+docker compose up -d line-mcp-full
 claude mcp add --transport http --scope user line http://localhost:3000/mcp
 
 # Standalone messenger server (five tools) — its OWN data volume
-docker compose --profile standalone up -d line-mcp-standalone
+docker compose --profile min up -d line-mcp
 # → listens on host port 3100
 ```
 
 Or build the targets directly:
 
 ```bash
-docker build --target server   -t line-mcp-server:latest     .
+docker build --target server    -t line-mcp-full:latest      .
 docker build --target line-mcp  -t line-mcp-standalone:latest .
 ```
 

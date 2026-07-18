@@ -160,7 +160,7 @@ One multi-stage `Dockerfile`, two runtime targets. The `builder` stage (`node:24
 - `--target server` → `packages/server/dist/cli.js`, whole `packages/` tree (ten tools).
 - `--target line-mcp` → `packages/line-mcp/dist/cli.js`, only the four-package closure (five tools).
 
-Both run as the non-root `node` user, expose `/data` as a volume, and healthcheck `GET ${BASE_PATH}/healthz` via Node's http client. `docker-compose.yml` defaults to the `server` target; the `line-mcp` standalone service is under the `standalone` profile with its **own** volume.
+Both run as the non-root `node` user, expose `/data` as a volume, and healthcheck `GET ${BASE_PATH}/healthz` via Node's http client. `docker-compose.yml` defaults to the `server` target (service `line-mcp-full`, volume `bank-mcp-data`); the `line-mcp` standalone service is under the `min` profile with its **own** volume (`line-mcp-data`).
 
 ### Specs & artifact policy
 
