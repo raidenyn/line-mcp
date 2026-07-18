@@ -27,8 +27,41 @@ async function waitForGroupExit(pid: number, timeoutMs: number): Promise<void> {
   }
 }
 
+const QUOTED_CREDENTIAL_PREFIX = /(["'])(accessToken|refreshToken|certificate|wrappedNonce|kdfParameter1|kdfParameter2)\1(\s*:\s*)(["'])/gi;
+
+function redactQuotedCredentials(value: string): string {
+  let result = '';
+  let copiedThrough = 0;
+  let match: RegExpExecArray | null;
+
+  QUOTED_CREDENTIAL_PREFIX.lastIndex = 0;
+  while ((match = QUOTED_CREDENTIAL_PREFIX.exec(value)) !== null) {
+    const valueQuote = match[4];
+    let cursor = QUOTED_CREDENTIAL_PREFIX.lastIndex;
+
+    result += value.slice(copiedThrough, cursor) + '<redacted>';
+    while (cursor < value.length && value[cursor] !== '\r' && value[cursor] !== '\n') {
+      if (value[cursor] === '\\' && cursor + 1 < value.length
+          && value[cursor + 1] !== '\r' && value[cursor + 1] !== '\n') {
+        cursor += 2;
+        continue;
+      }
+      if (value[cursor] === valueQuote) {
+        result += valueQuote;
+        cursor += 1;
+        break;
+      }
+      cursor += 1;
+    }
+    copiedThrough = cursor;
+    QUOTED_CREDENTIAL_PREFIX.lastIndex = cursor;
+  }
+
+  return result + value.slice(copiedThrough);
+}
+
 function redact(value: string): string {
-  return value
+  return redactQuotedCredentials(value)
     .replace(/(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1<redacted>')
     .replace(/(x-mock-control-token:\s*)([^\r\n]*)/gi, '$1<redacted>')
     .replace(/(x-line-access:\s*)([^\s\r\n]*)/gi, '$1<redacted>')
@@ -39,22 +72,6 @@ function redact(value: string): string {
     .replace(/(wrappedNonce=)([^\s\r\n]*)/gi, '$1<redacted>')
     .replace(/(kdfParameter1=)([^\s\r\n]*)/gi, '$1<redacted>')
     .replace(/(kdfParameter2=)([^\s\r\n]*)/gi, '$1<redacted>')
-    // JSON-quoted credential key/value pairs (double-quoted form).
-    .replace(/"accessToken"\s*:\s*"[^"]*"/gi, '"accessToken":"<redacted>"')
-    .replace(/"refreshToken"\s*:\s*"[^"]*"/gi, '"refreshToken":"<redacted>"')
-    .replace(/"certificate"\s*:\s*"[^"]*"/gi, '"certificate":"<redacted>"')
-    .replace(/"wrappedNonce"\s*:\s*"[^"]*"/gi, '"wrappedNonce":"<redacted>"')
-    .replace(/"kdfParameter1"\s*:\s*"[^"]*"/gi, '"kdfParameter1":"<redacted>"')
-    .replace(/"kdfParameter2"\s*:\s*"[^"]*"/gi, '"kdfParameter2":"<redacted>"')
-    // JSON-quoted credential key/value pairs (single-quoted form, for
-    // robustness against children that emit JS/JSON-ish literals with
-    // single quotes).
-    .replace(/'accessToken'\s*:\s*'[^']*'/gi, "'accessToken':'<redacted>'")
-    .replace(/'refreshToken'\s*:\s*'[^']*'/gi, "'refreshToken':'<redacted>'")
-    .replace(/'certificate'\s*:\s*'[^']*'/gi, "'certificate':'<redacted>'")
-    .replace(/'wrappedNonce'\s*:\s*'[^']*'/gi, "'wrappedNonce':'<redacted>'")
-    .replace(/'kdfParameter1'\s*:\s*'[^']*'/gi, "'kdfParameter1':'<redacted>'")
-    .replace(/'kdfParameter2'\s*:\s*'[^']*'/gi, "'kdfParameter2':'<redacted>'")
     // JWT-like tokens (base64url header starting with eyJ...) — match the
     // full three-segment JWT form, or any long eyJ... run, and replace.
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '<redacted-jwt>')
@@ -106,9 +123,9 @@ function buildReadyError(label: string, reason: string, stdout: string, stderr: 
   const msg = [
     `[${label}] ${reason}`,
     `--- stdout ---`,
-    redact(stdout.slice(-Math.min(stdout.length, DEFAULT_STDIO_CAP))),
+    redact(stdout).slice(-Math.min(stdout.length, DEFAULT_STDIO_CAP)),
     `--- stderr ---`,
-    redact(stderr.slice(-Math.min(stderr.length, DEFAULT_STDIO_CAP))),
+    redact(stderr).slice(-Math.min(stderr.length, DEFAULT_STDIO_CAP)),
     envSummary ? `--- env (safe allowlist) ---\n${envSummary}` : '',
   ].filter(Boolean).join('\n');
   return new Error(msg);

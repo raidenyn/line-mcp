@@ -259,44 +259,94 @@ describe('process harness', () => {
     expect(thrown!.message).toContain('<redacted-jwt>');
   });
 
-  it('redacts JSON-quoted credential forms from child output', async () => {
-    // A child that writes a JSON object containing credential keys to
-    // stderr and then never becomes ready must surface a readiness-timeout
-    // error whose message does NOT contain any of the raw secret values,
-    // regardless of whether the JSON is double- or single-quoted.
-    const accessValue = 'opaque_access_probe_742';
-    const refreshValue = 'opaque_refresh_probe_742';
-    const certValue = 'cert_probe_742';
-    const nonceValue = 'nonce_probe_742';
-    const doubleJson = `{"accessToken":"${accessValue}","refreshToken":"${refreshValue}","certificate":"${certValue}","wrappedNonce":"${nonceValue}","kdfParameter1":"kp1_742","kdfParameter2":"kp2_742"}`;
-    const singleJson = `{'accessToken':'${accessValue}','refreshToken':'${refreshValue}','certificate':'${certValue}','wrappedNonce':'${nonceValue}'}`;
+  it('redacts escaped and truncated quoted credentials from child output', async () => {
+    const credentialKeys = [
+      'accessToken', 'refreshToken', 'certificate',
+      'wrappedNonce', 'kdfParameter1', 'kdfParameter2',
+    ];
+    const secrets: Array<{ key: string; form: string; value: string }> = [];
+    const output: string[] = [];
+
+    for (const key of credentialKeys) {
+      const doubleValue = [`double`, key, `probe`, `742`].join('_');
+      const singleValue = [`single`, key, `probe`, `742`].join('_');
+      secrets.push(
+        { key, form: 'double', value: doubleValue },
+        { key, form: 'single', value: singleValue },
+      );
+      output.push(`{"${key}":"prefix\\"${doubleValue}\\\\suffix"}`);
+      output.push(`{'${key}':'prefix\\'${singleValue}\\\\suffix'}`);
+    }
+
+    const lineTruncated = ['line', 'access', 'probe', '742'].join('_');
+    const endTruncated = ['end', 'refresh', 'probe', '742'].join('_');
+    secrets.push(
+      { key: 'accessToken', form: 'line-truncated', value: lineTruncated },
+      { key: 'refreshToken', form: 'end-truncated', value: endTruncated },
+    );
+    output.push(`{"accessToken":"${lineTruncated}\nSAFE_NEXT_LINE`);
+    output.push(`{'refreshToken':'${endTruncated}`);
+
     let thrown: Error | null = null;
     try {
       await spawnManagedNode({
         label: 'json-credential-redaction-fixture', cwd: projectRoot,
-        args: ['-e', `process.stderr.write(${JSON.stringify(doubleJson)}); process.stderr.write(${JSON.stringify(singleJson)}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        args: ['-e', `process.stderr.write(${JSON.stringify(output.join('\n'))}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
         readyLine: line => line === 'ready',
         readyTimeoutMs: 500,
       });
     } catch (err) {
       thrown = err as Error;
     }
+
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
-    // None of the raw secret values may appear in the thrown error.
-    expect(thrown!.message).not.toContain(accessValue);
-    expect(thrown!.message).not.toContain(refreshValue);
-    expect(thrown!.message).not.toContain(certValue);
-    expect(thrown!.message).not.toContain(nonceValue);
-    expect(thrown!.message).not.toContain('kp1_742');
-    expect(thrown!.message).not.toContain('kp2_742');
-    // The redaction markers should be present for both quote styles.
-    expect(thrown!.message).toContain('"accessToken":"<redacted>"');
-    expect(thrown!.message).toContain('"refreshToken":"<redacted>"');
-    expect(thrown!.message).toContain('"certificate":"<redacted>"');
-    expect(thrown!.message).toContain('"wrappedNonce":"<redacted>"');
-    expect(thrown!.message).toContain("'accessToken':'<redacted>'");
-    expect(thrown!.message).toContain("'refreshToken':'<redacted>'");
+    for (const secret of secrets) {
+      if (thrown!.message.includes(secret.value)) {
+        throw new Error(`credential sentinel leaked for ${secret.key} (${secret.form})`);
+      }
+    }
+    expect(thrown!.message).toContain('SAFE_NEXT_LINE');
+    expect(thrown!.message.match(/<redacted>/g)?.length).toBe(secrets.length);
+  });
+
+  it('redacts quoted credentials when the stdioCap tail slice splits a credential', async () => {
+    // buildReadyError tail-slices each captured buffer to the last
+    // DEFAULT_STDIO_CAP bytes before redacting. If a caller sets stdioCap
+    // above DEFAULT_STDIO_CAP and an unterminated credential's key prefix
+    // falls before the 64 KiB tail boundary while its value extends past
+    // it, slice-before-redact drops the prefix and the scanner cannot
+    // match — so the value bytes leak. Redact must run on the full buffer
+    // before the slice. This test pins that ordering by placing the
+    // `{"accessToken":"` prefix just before the 64 KiB tail boundary and
+    // a unique sentinel at the end of an unterminated value that spans
+    // the boundary.
+    const capBoundary = 64 * 1024;
+    const stdioCap = 70_000;
+    const leadingPadding = 4_000;
+    const sentinel = 'UNIQUE_CAP_SENTINEL_742';
+    const valuePadding = 'x'.repeat(stdioCap - leadingPadding - 16 - sentinel.length);
+    const payload = 'x'.repeat(leadingPadding) + `{"accessToken":"` + valuePadding + sentinel;
+    expect(payload.length).toBe(stdioCap);
+    let thrown: Error | null = null;
+    try {
+      await spawnManagedNode({
+        label: 'cap-boundary-redaction-fixture', cwd: projectRoot,
+        args: ['-e', `process.stderr.write(${JSON.stringify(payload)}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 500,
+        stdioCap,
+      });
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
+    if (thrown!.message.includes(sentinel)) {
+      throw new Error('credential sentinel leaked for accessToken (cap-boundary)');
+    }
+    expect(thrown!.message).toContain('<redacted>');
+    void capBoundary;
   });
 
   it('removes a temporary root even when setup throws after creation', () => {
