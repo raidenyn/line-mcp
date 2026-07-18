@@ -9,17 +9,21 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "test:unit": "vitest run packages tests/architecture",
+    "test:unit": "vitest run packages tests/architecture tests/release",
     "test:smoke": "npm run build && vitest run tests/smoke",
     "test:e2e": "vitest run tests/e2e.test.ts",
     "lint": "eslint .",
-    "start": "node packages/server/dist/cli.js"
+    "start": "node packages/server/dist/cli.js",
+    "commitlint": "commitlint",
+    "prepare": "husky"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
+    "@commitlint/cli": "21.2.1",
+    "@commitlint/config-conventional": "21.2.0",
     "@eslint/js": "^10.0.1",
     "@tsconfig/node20": "^20.1.9",
     "@types/better-sqlite3": "^7.6.13",
@@ -27,10 +31,12 @@
     "@types/node": "^25.9.3",
     "@types/qrcode": "^1.5.6",
     "eslint": "^10.6.0",
+    "husky": "9.1.7",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.8",
+    "yaml": "2.9.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
