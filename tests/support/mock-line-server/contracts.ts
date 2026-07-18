@@ -148,23 +148,47 @@ export interface HeaderValidationResult {
   diagnostic?: unknown;
 }
 
-export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
+export interface CommonHeaderValidationResult {
+  ok: boolean;
+  rejection?: ExpectedRejectionKind;
+  diagnostic?: unknown;
+}
+
+/**
+ * Validates the 7 required Chrome headers (presence + exact value) shared by
+ * every LINE route, including the refresh path. Returns a rejection result on
+ * the first missing or mismatched header.
+ */
+export function validateCommonChromeHeaders(req: MockRawRequest): CommonHeaderValidationResult {
   const h = lowerHeaders(req.headers);
   for (const key of REQUIRED_LINE_HEADER_KEYS) {
     const value = singleString(h[key]);
     if (value == null) {
-      return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { missingHeader: key } };
+      return { ok: false, rejection: 'invalid_body', diagnostic: { missingHeader: key } };
     }
     if (value !== REQUIRED_LINE_HEADERS[key as keyof typeof REQUIRED_LINE_HEADERS]) {
-      return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { header: key, expected: REQUIRED_LINE_HEADERS[key as keyof typeof REQUIRED_LINE_HEADERS], actual: value } };
+      return { ok: false, rejection: 'invalid_body', diagnostic: { header: key, expected: REQUIRED_LINE_HEADERS[key as keyof typeof REQUIRED_LINE_HEADERS], actual: value } };
     }
+  }
+  return { ok: true };
+}
+
+export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
+  const common = validateCommonChromeHeaders(req);
+  if (!common.ok) {
+    return { ok: false, rejection: common.rejection, accessToken: '', longPoll: false, diagnostic: common.diagnostic };
+  }
+  const h = lowerHeaders(req.headers);
+  const preAuth = isPreAuth(req.pathname);
+  const access = singleString(h['x-line-access']) ?? '';
+  // x-line-access (authorization) is forbidden on every pre-auth route.
+  if (preAuth && access) {
+    return { ok: false, rejection: 'invalid_body', accessToken: '', longPoll: false, diagnostic: { forbiddenHeader: 'x-line-access' } };
   }
   const hmacHeader = singleString(h['x-hmac']);
   if (hmacHeader == null) {
-    return { ok: false, rejection: 'missing_hmac', accessToken: '', longPoll: false };
+    return { ok: false, rejection: 'missing_hmac', accessToken: access, longPoll: false };
   }
-  const preAuth = isPreAuth(req.pathname);
-  const access = singleString(h['x-line-access']) ?? '';
   if (!preAuth) {
     if (!access) {
       return { ok: false, rejection: 'missing_auth_header', accessToken: '', longPoll: false };
@@ -184,6 +208,14 @@ export function validateHeaders(req: MockRawRequest): HeaderValidationResult {
       return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: true, diagnostic: { missingHeader: 'x-line-session-id' } };
     }
     return { ok: true, accessToken: access, longPoll: true, sessionId };
+  }
+  // Non-long-poll routes: x-lst and x-line-session-id are forbidden
+  // (they are long-poll control headers and must not leak onto other routes).
+  if (singleString(h['x-lst']) != null) {
+    return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: false, diagnostic: { forbiddenHeader: 'x-lst' } };
+  }
+  if (singleString(h['x-line-session-id']) != null) {
+    return { ok: false, rejection: 'invalid_body', accessToken: access, longPoll: false, diagnostic: { forbiddenHeader: 'x-line-session-id' } };
   }
   return { ok: true, accessToken: access, longPoll: false };
 }

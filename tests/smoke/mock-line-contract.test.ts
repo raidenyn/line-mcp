@@ -1055,3 +1055,235 @@ describe('mock LINE QR/PIN transition enforcement', () => {
     expect(mock.state.report().ok).toBe(true);
   });
 });
+
+describe('mock LINE forbidden-header enforcement', () => {
+  it('rejects refresh with a wrong content-type value', async () => {
+    mock.state.configure({
+      scenarioId: 'refresh-wrong-content-type', mode: 'seeded', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const oldRefresh = mock.state.fixtures.seededAuth.refreshToken;
+    const response = await fetch(origin + '/api/auth/tokenRefresh', {
+      method: 'POST',
+      headers: { ...REQUIRED_LINE_HEADERS, 'content-type': 'text/plain' },
+      body: JSON.stringify({ refreshToken: oldRefresh }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects refresh missing the origin header', async () => {
+    mock.state.configure({
+      scenarioId: 'refresh-missing-origin', mode: 'seeded', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const oldRefresh = mock.state.fixtures.seededAuth.refreshToken;
+    const headers = { ...REQUIRED_LINE_HEADERS };
+    delete headers.origin;
+    const response = await fetch(origin + '/api/auth/tokenRefresh', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ refreshToken: oldRefresh }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects createSession with x-line-access present', async () => {
+    mock.state.configure({
+      scenarioId: 'create-session-x-line-access', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const response = await signedPostWithHeaders(
+      '/api/talk/thrift/LoginQrCode/SecondaryQrCodeLoginService/createSession',
+      '[ {} ]',
+      { 'x-line-access': 'forbidden-token' },
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects getProfile with x-lst present', async () => {
+    mock.state.configure({
+      scenarioId: 'profile-x-lst', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const response = await signedPostWithHeaders(
+      '/api/talk/thrift/Talk/TalkService/getProfile',
+      '[2]',
+      { 'x-lst': '150000' },
+      accessToken,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects getProfile with x-line-session-id present', async () => {
+    mock.state.configure({
+      scenarioId: 'profile-x-session-id', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const response = await signedPostWithHeaders(
+      '/api/talk/thrift/Talk/TalkService/getProfile',
+      '[2]',
+      { 'x-line-session-id': 'some-session' },
+      accessToken,
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+});
+
+describe('mock LINE pagination boundary validation', () => {
+  const previousPath = '/api/talk/thrift/Talk/TalkService/getPreviousMessagesV2WithRequest';
+  const chatsPath = '/api/talk/thrift/Talk/TalkService/getChats';
+  const contactsPath = '/api/talk/thrift/Talk/TalkService/getContactsV2';
+  const recentPath = '/api/talk/thrift/Talk/TalkService/getRecentMessagesV2';
+
+  it('rejects previous with an extra key inside endMessageId', async () => {
+    mock.state.configure({
+      scenarioId: 'previous-extra-endkey', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const history = mock.state.fixtures.messagesByChat[MOCK_GROUP_MID];
+    const boundary = history[10];
+    const body = JSON.stringify([
+      {
+        messageBoxId: MOCK_GROUP_MID,
+        endMessageId: { messageId: boundary.id, deliveredTime: boundary.deliveredTime, extra: 'nope' },
+        messagesCount: 3,
+      },
+      1,
+    ]);
+    const response = await signedPost(previousPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects previous with a negative messagesCount', async () => {
+    mock.state.configure({
+      scenarioId: 'previous-negative-count', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const history = mock.state.fixtures.messagesByChat[MOCK_GROUP_MID];
+    const boundary = history[10];
+    const body = JSON.stringify([
+      {
+        messageBoxId: MOCK_GROUP_MID,
+        endMessageId: { messageId: boundary.id, deliveredTime: boundary.deliveredTime },
+        messagesCount: -5,
+      },
+      1,
+    ]);
+    const response = await signedPost(previousPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects previous with a zero messagesCount', async () => {
+    mock.state.configure({
+      scenarioId: 'previous-zero-count', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const history = mock.state.fixtures.messagesByChat[MOCK_GROUP_MID];
+    const boundary = history[10];
+    const body = JSON.stringify([
+      {
+        messageBoxId: MOCK_GROUP_MID,
+        endMessageId: { messageId: boundary.id, deliveredTime: boundary.deliveredTime },
+        messagesCount: 0,
+      },
+      1,
+    ]);
+    const response = await signedPost(previousPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects previous with a wrong deliveredTime for the given messageId', async () => {
+    mock.state.configure({
+      scenarioId: 'previous-wrong-delivered-time', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const history = mock.state.fixtures.messagesByChat[MOCK_GROUP_MID];
+    const boundary = history[10];
+    const body = JSON.stringify([
+      {
+        messageBoxId: MOCK_GROUP_MID,
+        endMessageId: { messageId: boundary.id, deliveredTime: String(Date.UTC(2030, 0, 1)) },
+        messagesCount: 3,
+      },
+      1,
+    ]);
+    const response = await signedPost(previousPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects chats with an unknown chat MID', async () => {
+    mock.state.configure({
+      scenarioId: 'chats-unknown-mid', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const body = JSON.stringify([{ chatMids: ['c_unknown_chat_9999'] }, 2]);
+    const response = await signedPost(chatsPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects contacts with an unknown contact MID', async () => {
+    mock.state.configure({
+      scenarioId: 'contacts-unknown-mid', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const body = JSON.stringify([{ targetUserMids: ['u_unknown_contact_9999'] }]);
+    const response = await signedPost(contactsPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects contacts with a duplicate MID', async () => {
+    mock.state.configure({
+      scenarioId: 'contacts-duplicate-mid', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const body = JSON.stringify([{ targetUserMids: [MOCK_DIRECT_MID, MOCK_DIRECT_MID] }]);
+    const response = await signedPost(contactsPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+
+  it('rejects recent with an unknown chat MID', async () => {
+    mock.state.configure({
+      scenarioId: 'recent-unknown-mid', mode: 'contract', epochSeconds,
+      expectedRefreshCount: 0, expectedLoginBranches: [], expectedRejections: { invalid_body: 1 },
+    });
+    const accessToken = mock.state.fixtures.seededAuth.accessToken;
+    const body = JSON.stringify(['c_unknown_chat_9999', 3]);
+    const response = await signedPost(recentPath, body, accessToken);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: 10002, message: 'REQUEST_INVALID_BODY' });
+    expect(mock.state.report().ok).toBe(true);
+  });
+});

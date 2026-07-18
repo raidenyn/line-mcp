@@ -21,6 +21,7 @@ import {
   lineApiCode,
   readRawBody,
   validateHeaders,
+  validateCommonChromeHeaders,
   validateHmac,
   parseJsonBody,
   redact,
@@ -207,9 +208,23 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       }
 
       if (pathname === LINE_ROUTES.refresh) {
+        // Refresh must carry the same 7 Chrome headers as every other route,
+        // but explicitly forbids authorization/long-poll/HMAC control headers.
+        const rawReq: MockRawRequest = {
+          pathname,
+          method: req.method ?? 'POST',
+          headers: req.headers,
+          rawBody,
+        };
+        const common = validateCommonChromeHeaders(rawReq);
+        if (!common.ok) {
+          rejectLine(res, common.rejection!, pathname, common.diagnostic);
+          return;
+        }
         const h = lowerHeadersOnce(req.headers);
-        if (h['x-line-access'] != null || h['x-hmac'] != null) {
-          rejectLine(res, 'invalid_body', pathname, { reason: 'auth/hmac headers forbidden on refresh' });
+        if (h['x-line-access'] != null || h['x-hmac'] != null ||
+            h['x-lst'] != null || h['x-line-session-id'] != null) {
+          rejectLine(res, 'invalid_body', pathname, { reason: 'auth/hmac/long-poll headers forbidden on refresh' });
           return;
         }
         const parsed = parseJsonBody(rawBody);
@@ -610,20 +625,38 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     }
     const arg = arr[0] as { chatMids: string[] };
     const chatMids = arg.chatMids;
-    if (!Array.isArray(chatMids)) {
+    if (!Array.isArray(chatMids) || chatMids.length === 0) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { unexpected: arr });
       return;
     }
+    for (const m of chatMids) {
+      if (typeof m !== 'string') {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { nonStringMid: m });
+        return;
+      }
+    }
+    const seen = new Set<string>();
+    for (const m of chatMids) {
+      if (seen.has(m)) {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { duplicateMid: m });
+        return;
+      }
+      seen.add(m);
+    }
     if (!requireCurrentAccess(res, LINE_ROUTES.chats, accessToken)) return;
     const known = new Set<string>(Object.keys(state.fixtures.messagesByChat));
-    const chats = chatMids
-      .filter((m): m is string => typeof m === 'string' && known.has(m))
-      .map((mid) => ({
-        chatMid: mid,
-        chatName: mid === MOCK_GROUP_MID ? 'Mock Bank Group' : mid,
-        memberCount: 2,
-        picturePath: mid === MOCK_GROUP_MID ? '/mock-group-picture.png' : undefined,
-      }));
+    for (const m of chatMids) {
+      if (!known.has(m)) {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.chats, { unknownChatMid: m });
+        return;
+      }
+    }
+    const chats = chatMids.map((mid) => ({
+      chatMid: mid,
+      chatName: mid === MOCK_GROUP_MID ? 'Mock Bank Group' : mid,
+      memberCount: 2,
+      picturePath: mid === MOCK_GROUP_MID ? '/mock-group-picture.png' : undefined,
+    }));
     json(res, 200, lineOk({ chats }));
   }
 
@@ -639,17 +672,35 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
       rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { unexpected: arr });
       return;
     }
+    for (const m of mids) {
+      if (typeof m !== 'string') {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { nonStringMid: m });
+        return;
+      }
+    }
+    const seen = new Set<string>();
+    for (const m of mids) {
+      if (seen.has(m)) {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { duplicateMid: m });
+        return;
+      }
+      seen.add(m);
+    }
     if (!requireCurrentAccess(res, LINE_ROUTES.contacts, accessToken)) return;
     const knownContacts: Record<string, { displayName: string }> = {
       [MOCK_DIRECT_MID]: { displayName: 'Alice Mock' },
       [MOCK_BANK_SENDER_MID]: { displayName: 'Mock Bank' },
     };
+    for (const m of mids) {
+      if (!knownContacts[m]) {
+        rejectLine(res, 'invalid_body', LINE_ROUTES.contacts, { unknownContactMid: m });
+        return;
+      }
+    }
     const contacts: Record<string, { contact: { mid: string; displayName: string } }> = {};
     for (const mid of mids) {
       const known = knownContacts[mid];
-      if (known) {
-        contacts[mid] = { contact: { mid, displayName: known.displayName } };
-      }
+      contacts[mid] = { contact: { mid, displayName: known.displayName } };
     }
     json(res, 200, lineOk({ contacts }));
   }
@@ -669,7 +720,7 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     if (!requireCurrentAccess(res, LINE_ROUTES.recent, accessToken)) return;
     const history = state.fixtures.messagesByChat[chatMid];
     if (!history) {
-      rejectLine(res, 'invalid_session', LINE_ROUTES.recent, { unknownChatMid: chatMid });
+      rejectLine(res, 'invalid_body', LINE_ROUTES.recent, { unknownChatMid: chatMid });
       return;
     }
     const slice = history.slice(-count).reverse();
@@ -690,8 +741,12 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     const chatMid = arg.messageBoxId;
     const endMessageId = arg.endMessageId;
     const messagesCount = arg.messagesCount;
-    if (typeof chatMid !== 'string' || !endMessageId || typeof endMessageId.messageId !== 'string' ||
-        typeof endMessageId.deliveredTime !== 'string' || typeof messagesCount !== 'number') {
+    if (typeof chatMid !== 'string' ||
+        endMessageId == null || typeof endMessageId !== 'object' || Array.isArray(endMessageId) ||
+        !exactObjectKeys(endMessageId, ['messageId', 'deliveredTime']) ||
+        typeof endMessageId.messageId !== 'string' ||
+        typeof endMessageId.deliveredTime !== 'string' ||
+        typeof messagesCount !== 'number' || !Number.isInteger(messagesCount) || messagesCount < 1 || messagesCount > 200) {
       rejectLine(res, 'invalid_body', LINE_ROUTES.previous, { unexpected: arr });
       return;
     }
@@ -704,6 +759,17 @@ export function createMockLineServer(options: MockLineServerOptions): MockLineSe
     const boundaryIdx = history.findIndex((m) => m.id === endMessageId.messageId);
     if (boundaryIdx === -1) {
       rejectLine(res, 'unknown_boundary', LINE_ROUTES.previous, { unknownMessageId: endMessageId.messageId });
+      return;
+    }
+    // The deliveredTime must match the referenced fixture message exactly.
+    // A mismatch indicates the caller fabricated or reused a stale boundary.
+    const boundaryMessage = history[boundaryIdx];
+    if (boundaryMessage.deliveredTime !== endMessageId.deliveredTime) {
+      rejectLine(res, 'invalid_body', LINE_ROUTES.previous, {
+        messageId: endMessageId.messageId,
+        expected: boundaryMessage.deliveredTime,
+        actual: endMessageId.deliveredTime,
+      });
       return;
     }
     if (boundaryIdx === 0) {
