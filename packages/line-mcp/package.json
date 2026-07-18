@@ -1,6 +1,6 @@
 {
   "name": "@raidenyn/line-mcp",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "LINE messenger MCP product package: five messenger tools, LINE OAuth provider, import service, and sync loop.",
   "private": true,
   "main": "dist/index.js",
@@ -19,9 +19,9 @@
   ],
   "type": "commonjs",
   "dependencies": {
-    "@raidenyn/line-client": "^1.0.0",
-    "@raidenyn/line-client-sqlite": "^1.0.0",
-    "@raidenyn/mcp-runtime": "^1.0.0",
+    "@raidenyn/line-client": "^0.1.0",
+    "@raidenyn/line-client-sqlite": "^0.1.0",
+    "@raidenyn/mcp-runtime": "^0.1.0",
     "express": "^5.2.1",
     "qrcode": "^1.5.4",
     "zod": "^4.4.3"

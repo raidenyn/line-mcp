@@ -1,6 +1,6 @@
 {
   "name": "@raidenyn/server",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Composition root: wires line-mcp and bank-mcp tools onto the shared mcp-runtime HTTP server.",
   "private": true,
   "main": "dist/index.js",
@@ -19,11 +19,11 @@
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@raidenyn/bank-mcp": "^1.0.0",
-    "@raidenyn/line-client": "^1.0.0",
-    "@raidenyn/line-client-sqlite": "^1.0.0",
-    "@raidenyn/line-mcp": "^1.0.0",
-    "@raidenyn/mcp-runtime": "^1.0.0",
+    "@raidenyn/bank-mcp": "^0.1.0",
+    "@raidenyn/line-client": "^0.1.0",
+    "@raidenyn/line-client-sqlite": "^0.1.0",
+    "@raidenyn/line-mcp": "^0.1.0",
+    "@raidenyn/mcp-runtime": "^0.1.0",
     "express": "^5.2.1"
   },
   "devDependencies": {

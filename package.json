@@ -1,6 +1,6 @@
 {
   "name": "line-mcp",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "",
   "private": true,
   "workspaces": [
@@ -46,9 +46,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@raidenyn/line-client": "^1.0.0",
-    "@raidenyn/line-client-sqlite": "^1.0.0",
-    "@raidenyn/mcp-runtime": "^1.0.0",
+    "@raidenyn/line-client": "^0.1.0",
+    "@raidenyn/line-client-sqlite": "^0.1.0",
+    "@raidenyn/mcp-runtime": "^0.1.0",
     "better-sqlite3": "^12.11.1",
     "express": "^5.2.1",
     "qrcode": "^1.5.4",
