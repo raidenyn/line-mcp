@@ -310,6 +310,45 @@ describe('process harness', () => {
     expect(thrown!.message.match(/<redacted>/g)?.length).toBe(secrets.length);
   });
 
+  it('redacts quoted credentials when the stdioCap tail slice splits a credential', async () => {
+    // buildReadyError tail-slices each captured buffer to the last
+    // DEFAULT_STDIO_CAP bytes before redacting. If a caller sets stdioCap
+    // above DEFAULT_STDIO_CAP and an unterminated credential's key prefix
+    // falls before the 64 KiB tail boundary while its value extends past
+    // it, slice-before-redact drops the prefix and the scanner cannot
+    // match — so the value bytes leak. Redact must run on the full buffer
+    // before the slice. This test pins that ordering by placing the
+    // `{"accessToken":"` prefix just before the 64 KiB tail boundary and
+    // a unique sentinel at the end of an unterminated value that spans
+    // the boundary.
+    const capBoundary = 64 * 1024;
+    const stdioCap = 70_000;
+    const leadingPadding = 4_000;
+    const sentinel = 'UNIQUE_CAP_SENTINEL_742';
+    const valuePadding = 'x'.repeat(stdioCap - leadingPadding - 16 - sentinel.length);
+    const payload = 'x'.repeat(leadingPadding) + `{"accessToken":"` + valuePadding + sentinel;
+    expect(payload.length).toBe(stdioCap);
+    let thrown: Error | null = null;
+    try {
+      await spawnManagedNode({
+        label: 'cap-boundary-redaction-fixture', cwd: projectRoot,
+        args: ['-e', `process.stderr.write(${JSON.stringify(payload)}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        readyLine: line => line === 'ready',
+        readyTimeoutMs: 500,
+        stdioCap,
+      });
+    } catch (err) {
+      thrown = err as Error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
+    if (thrown!.message.includes(sentinel)) {
+      throw new Error('credential sentinel leaked for accessToken (cap-boundary)');
+    }
+    expect(thrown!.message).toContain('<redacted>');
+    void capBoundary;
+  });
+
   it('removes a temporary root even when setup throws after creation', () => {
     // The mock-line-smoke scenarios create the dataRoot FIRST, then run every
     // setup step (mock.reset, mock.configure, prepareSeededDataRoot,

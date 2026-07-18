@@ -123,9 +123,9 @@ function buildReadyError(label: string, reason: string, stdout: string, stderr: 
   const msg = [
     `[${label}] ${reason}`,
     `--- stdout ---`,
-    redact(stdout.slice(-Math.min(stdout.length, DEFAULT_STDIO_CAP))),
+    redact(stdout).slice(-Math.min(stdout.length, DEFAULT_STDIO_CAP)),
     `--- stderr ---`,
-    redact(stderr.slice(-Math.min(stderr.length, DEFAULT_STDIO_CAP))),
+    redact(stderr).slice(-Math.min(stderr.length, DEFAULT_STDIO_CAP)),
     envSummary ? `--- env (safe allowlist) ---\n${envSummary}` : '',
   ].filter(Boolean).join('\n');
   return new Error(msg);
