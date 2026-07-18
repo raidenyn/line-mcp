@@ -259,44 +259,55 @@ describe('process harness', () => {
     expect(thrown!.message).toContain('<redacted-jwt>');
   });
 
-  it('redacts JSON-quoted credential forms from child output', async () => {
-    // A child that writes a JSON object containing credential keys to
-    // stderr and then never becomes ready must surface a readiness-timeout
-    // error whose message does NOT contain any of the raw secret values,
-    // regardless of whether the JSON is double- or single-quoted.
-    const accessValue = 'opaque_access_probe_742';
-    const refreshValue = 'opaque_refresh_probe_742';
-    const certValue = 'cert_probe_742';
-    const nonceValue = 'nonce_probe_742';
-    const doubleJson = `{"accessToken":"${accessValue}","refreshToken":"${refreshValue}","certificate":"${certValue}","wrappedNonce":"${nonceValue}","kdfParameter1":"kp1_742","kdfParameter2":"kp2_742"}`;
-    const singleJson = `{'accessToken':'${accessValue}','refreshToken':'${refreshValue}','certificate':'${certValue}','wrappedNonce':'${nonceValue}'}`;
+  it('redacts escaped and truncated quoted credentials from child output', async () => {
+    const credentialKeys = [
+      'accessToken', 'refreshToken', 'certificate',
+      'wrappedNonce', 'kdfParameter1', 'kdfParameter2',
+    ];
+    const secrets: Array<{ key: string; form: string; value: string }> = [];
+    const output: string[] = [];
+
+    for (const key of credentialKeys) {
+      const doubleValue = [`double`, key, `probe`, `742`].join('_');
+      const singleValue = [`single`, key, `probe`, `742`].join('_');
+      secrets.push(
+        { key, form: 'double', value: doubleValue },
+        { key, form: 'single', value: singleValue },
+      );
+      output.push(`{"${key}":"prefix\\"${doubleValue}\\\\suffix"}`);
+      output.push(`{'${key}':'prefix\\'${singleValue}\\\\suffix'}`);
+    }
+
+    const lineTruncated = ['line', 'access', 'probe', '742'].join('_');
+    const endTruncated = ['end', 'refresh', 'probe', '742'].join('_');
+    secrets.push(
+      { key: 'accessToken', form: 'line-truncated', value: lineTruncated },
+      { key: 'refreshToken', form: 'end-truncated', value: endTruncated },
+    );
+    output.push(`{"accessToken":"${lineTruncated}\nSAFE_NEXT_LINE`);
+    output.push(`{'refreshToken':'${endTruncated}`);
+
     let thrown: Error | null = null;
     try {
       await spawnManagedNode({
         label: 'json-credential-redaction-fixture', cwd: projectRoot,
-        args: ['-e', `process.stderr.write(${JSON.stringify(doubleJson)}); process.stderr.write(${JSON.stringify(singleJson)}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
+        args: ['-e', `process.stderr.write(${JSON.stringify(output.join('\n'))}); setInterval(() => {}, 1000); process.stdout.write('not-ready\\n')`],
         readyLine: line => line === 'ready',
         readyTimeoutMs: 500,
       });
     } catch (err) {
       thrown = err as Error;
     }
+
     expect(thrown).toBeInstanceOf(Error);
     expect(thrown!.message).toMatch(/readiness timeout after 500ms/);
-    // None of the raw secret values may appear in the thrown error.
-    expect(thrown!.message).not.toContain(accessValue);
-    expect(thrown!.message).not.toContain(refreshValue);
-    expect(thrown!.message).not.toContain(certValue);
-    expect(thrown!.message).not.toContain(nonceValue);
-    expect(thrown!.message).not.toContain('kp1_742');
-    expect(thrown!.message).not.toContain('kp2_742');
-    // The redaction markers should be present for both quote styles.
-    expect(thrown!.message).toContain('"accessToken":"<redacted>"');
-    expect(thrown!.message).toContain('"refreshToken":"<redacted>"');
-    expect(thrown!.message).toContain('"certificate":"<redacted>"');
-    expect(thrown!.message).toContain('"wrappedNonce":"<redacted>"');
-    expect(thrown!.message).toContain("'accessToken':'<redacted>'");
-    expect(thrown!.message).toContain("'refreshToken':'<redacted>'");
+    for (const secret of secrets) {
+      if (thrown!.message.includes(secret.value)) {
+        throw new Error(`credential sentinel leaked for ${secret.key} (${secret.form})`);
+      }
+    }
+    expect(thrown!.message).toContain('SAFE_NEXT_LINE');
+    expect(thrown!.message.match(/<redacted>/g)?.length).toBe(secrets.length);
   });
 
   it('removes a temporary root even when setup throws after creation', () => {
