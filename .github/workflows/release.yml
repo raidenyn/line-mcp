@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/heads/main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Verify current main
+        run: |
+          git fetch origin refs/heads/main:refs/remotes/origin/main --tags
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+
+      - name: Record tags at HEAD
+        run: git tag --points-at HEAD --list 'v*' | sort > "$RUNNER_TEMP/release-tags-before"
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run release
+
+      - name: Detect new release tag
+        id: release-tag
+        shell: bash
+        run: |
+          git tag --points-at HEAD --list 'v*' | sort > "$RUNNER_TEMP/release-tags-after"
+          mapfile -t new_tags < <(comm -13 "$RUNNER_TEMP/release-tags-before" "$RUNNER_TEMP/release-tags-after")
+          if (( ${#new_tags[@]} > 1 )); then
+            printf 'Expected at most one new release tag, found %s\n' "${#new_tags[@]}" >&2
+            exit 1
+          fi
+          if (( ${#new_tags[@]} == 1 )); then
+            printf 'tag=%s\n' "${new_tags[0]}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch Docker publishing
+        if: steps.release-tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+        run: |
+          jq -n --arg tag "$RELEASE_TAG" \
+            '{event_type: "release-published", client_payload: {tag: $tag}}' \
+            | gh api --method POST "repos/${{ github.repository }}/dispatches" --input -
