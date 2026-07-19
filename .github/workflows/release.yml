@@ -31,6 +31,15 @@ jobs:
           git fetch origin refs/heads/main:refs/remotes/origin/main --tags
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
+      - name: Verify baseline tag exists
+        run: |
+          if ! git rev-parse --verify --quiet refs/tags/v0.1.0 >/dev/null; then
+            printf 'v0.1.0 baseline tag is missing. Create it before dispatching releases\n' \
+              >&2
+            printf '(see docs/RELEASING.md "One-time v0.1.0 Bootstrap").\n' >&2
+            exit 1
+          fi
+
       - name: Record tags at HEAD
         run: git tag --points-at HEAD --list 'v*' | sort > "$RUNNER_TEMP/release-tags-before"
 

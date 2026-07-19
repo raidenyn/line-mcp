@@ -38,6 +38,12 @@ describe('release workflow', () => {
       .toContain('refs/remotes/origin/main');
   });
 
+  it('refuses to run without the v0.1.0 baseline tag', () => {
+    const baseline = steps.find((step) => step.name === 'Verify baseline tag exists');
+    expect(baseline?.run).toContain('refs/tags/v0.1.0');
+    expect(baseline?.run).toContain('exit 1');
+  });
+
   it('releases and dispatches only for a newly detected tag', () => {
     expect(steps.find((step) => step.name === 'Run semantic-release')?.run)
       .toBe('npm run release');
