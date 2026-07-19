@@ -1,6 +1,6 @@
 {
   "name": "@raidenyn/line-client-sqlite",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "SQLite-backed message cache wrapper around @raidenyn/line-client.",
   "private": true,
   "main": "dist/index.js",
@@ -17,7 +17,7 @@
   ],
   "type": "commonjs",
   "dependencies": {
-    "@raidenyn/line-client": "^1.0.0",
+    "@raidenyn/line-client": "^0.1.0",
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 {
   "name": "@raidenyn/mcp-runtime",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Shared MCP-over-HTTP scaffolding: Express app wiring, OAuth/bearer plumbing, transport glue.",
   "private": true,
   "main": "dist/index.js",

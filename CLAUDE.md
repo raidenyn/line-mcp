@@ -22,6 +22,7 @@ npm run test:e2e     # live LINE e2e (requires .line-auth.json; manual, pre-rele
 npx vitest run <file>                                    # single test file
 npx vitest run tests/docker/docker-smoke.test.ts         # both Docker targets: healthz + tools/list
 npx vitest run tests/artifacts/line-client-pack.test.ts  # packed line-client artifact check
+npm run commitlint  # validate a commit message/range with commitlint
 ```
 
 `LINE_API_BASE_URL` repoints the LINE client at a different gateway — tests
@@ -42,7 +43,9 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 - Format `type(scope?): subject`. Allowed types: `feat`, `fix`, `refactor`,
   `test`, `docs`, `chore`, `ci`, `build`, `perf`.
 - Breaking changes: `!` after the type/scope, or a `BREAKING CHANGE:` footer.
-- Semver mapping: `feat` → minor, `fix` → patch, breaking → major.
+- Semver mapping: `feat` → minor, `fix` / `perf` → patch, breaking → major.
+- A Husky `commit-msg` hook checks local commits; CI checks every PR commit and
+  the PR title, so `--no-verify` cannot bypass repository enforcement.
 - **Name every PR in the identical format** — squash-merge turns the PR
   title into the commit subject on `main`.
 
@@ -81,3 +84,5 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 - `docs/superpowers/specs/` + `docs/superpowers/plans/` — design docs and
   implementation plans; new designs go here.
 - `packages/line-client/THIRD_PARTY_NOTICES.md` — LTSM distribution policy.
+- `docs/RELEASING.md` — commit enforcement, version policy, release workflow,
+  and the one-time `v0.1.0` bootstrap runbook.

@@ -1,6 +1,6 @@
 {
   "name": "@raidenyn/line-client",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "LINE Chrome-extension API client: QR login, message fetch, image download.",
   "private": true,
   "main": "dist/index.js",
