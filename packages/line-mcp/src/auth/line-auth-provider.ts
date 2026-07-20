@@ -8,7 +8,8 @@ import {
 } from '@raidenyn/mcp-runtime';
 import {
   type CredentialStore,
-  latestAuthData,
+  maskMid,
+  persistAuthData,
 } from './credential-store';
 import {
   mountOAuthRoutes,
@@ -103,6 +104,11 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
   private readonly refreshTtlSeconds: number;
   // e2e-only bearer bypass; never populated in production.
   private readonly testOverrides = new Map<string, AuthData>();
+  // Freshest-known LINE credential per MID, owned by THIS provider instance —
+  // never a module-level map. Two providers on the same MID but different
+  // dataRoots (two independent LineAuthProvider instances in one process)
+  // each get their own map, so neither can resolve the other's snapshot.
+  private readonly freshness = new Map<string, AuthData>();
 
   constructor(private readonly options: LineAuthProviderOptions) {
     const { endpoints } = options;
@@ -148,7 +154,7 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
     // seeded snapshot and serve an already-superseded credential downstream.
     const override = this.testOverrides.get(token);
     if (override) {
-      if (!latestAuthData.has(override.mid)) latestAuthData.set(override.mid, override);
+      if (!this.freshness.has(override.mid)) this.freshness.set(override.mid, override);
       return this.makePrincipal(override.mid, this.scopes);
     }
 
@@ -166,14 +172,44 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
   // A missing record means the account must reauthorize.
   async resolveCredentials(principal: LinePrincipal): Promise<Readonly<AuthData> | null> {
     if (principal.subject !== principal.mid) return null;
-    const cached = latestAuthData.get(principal.mid);
-    if (cached) return cached;
-    return this.options.credentialStore.load(principal.mid);
+    return this.freshestCredential(principal.mid);
   }
 
   /** e2e-only: register a bearer token that bypasses the codec. */
   seedTestToken(token: string, authData: AuthData): void {
     this.testOverrides.set(token, authData);
+  }
+
+  /**
+   * Records the freshest known LINE credential for a MID — called both when a
+   * LINE token rotates mid-request and right after a login completes. Updates
+   * this provider's own in-memory snapshot FIRST (so it's served immediately,
+   * even to the request that triggered the refresh), then attempts an atomic
+   * disk replacement. Persistence failure is logged with a credential-free
+   * message and swallowed: the LINE token-refresh callback that drives this is
+   * synchronous and must never throw, and the fresh snapshot is still served
+   * from memory until restart.
+   */
+  recordRefreshedAuth(authData: AuthData): void {
+    this.freshness.set(authData.mid, authData);
+    try {
+      persistAuthData(authData, undefined, this.options.authStoreDir);
+    } catch {
+      process.stderr.write(
+        `[OAuth] Refreshed LINE auth for ${maskMid(authData.mid)} but could not persist it\n`,
+      );
+    }
+  }
+
+  // Checks this provider's own in-memory freshness map first, then falls back
+  // to a lazy disk load — priming the map on a disk hit so a later call
+  // resolves from memory without a repeat disk round-trip.
+  private async freshestCredential(mid: string): Promise<Readonly<AuthData> | null> {
+    const cached = this.freshness.get(mid);
+    if (cached) return cached;
+    const loaded = await this.options.credentialStore.load(mid);
+    if (loaded) this.freshness.set(mid, loaded);
+    return loaded;
   }
 
   // ─── Token issuance (used by the OAuth router) ──────────────────────────
@@ -182,7 +218,7 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
     const mid = authData.mid;
     // Prime the freshest-known snapshot so a follow-up request resolves
     // credentials from memory without a disk round-trip.
-    if (!latestAuthData.has(mid)) latestAuthData.set(mid, authData);
+    if (!this.freshness.has(mid)) this.freshness.set(mid, authData);
     return {
       access_token: this.codec.issueAccessToken({ subject: mid, scopes: this.scopes, ttlSeconds: this.accessTtlSeconds }),
       refresh_token: this.codec.issueRefreshToken({ subject: mid, scopes: this.scopes, ttlSeconds: this.refreshTtlSeconds }),
@@ -192,10 +228,9 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
   private async issueFromRefresh(refreshToken: string): Promise<IssuedTokenPair | null> {
     const claims = this.codec.verifyRefreshToken(refreshToken, { requiredScopes: this.scopes });
     if (!claims) return null; // legacy or malformed refresh token → reauthorize
-    const mid = claims.subject;
     // Reload credentials by MID: memory first, then the store. No record → the
     // account must reauthorize (the refresh token alone carries no credential).
-    const authData = latestAuthData.get(mid) ?? (await this.options.credentialStore.load(mid));
+    const authData = await this.freshestCredential(claims.subject);
     if (!authData) return null;
     return this.issueTokens(authData);
   }

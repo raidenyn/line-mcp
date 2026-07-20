@@ -11,7 +11,7 @@ import {
   publicEndpointConfig,
   type PublicEndpointConfig,
 } from './line-auth-provider';
-import { FileCredentialStore, latestAuthData, persistAuthData } from './credential-store';
+import { FileCredentialStore, persistAuthData } from './credential-store';
 
 // Guard against any accidental real LINE network use in the refresh round-trip.
 vi.mock('@raidenyn/line-client', async importOriginal => {
@@ -56,12 +56,10 @@ let dir: string;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-provider-'));
-  latestAuthData.clear();
 });
 
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
-  latestAuthData.clear();
 });
 
 // ───────────────────────────────────────────────────────────
@@ -169,11 +167,30 @@ describe('resolveCredentials', () => {
     const provider = providerWith(publicEndpointConfig(3000, ''), dir);
     persistAuthData(AUTH, 'Personal LINE', dir);
     const fresher: AuthData = { ...AUTH, accessToken: 'access-rotated' };
-    latestAuthData.set(AUTH.mid, fresher);
+    provider.recordRefreshedAuth(fresher);
     const resolved = await provider.resolveCredentials({
       provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
     });
     expect(resolved?.accessToken).toBe('access-rotated');
+  });
+
+  it('never resolves one provider\'s recorded credential from another provider on a different dataRoot (same MID)', async () => {
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-provider-other-'));
+    try {
+      const providerA = providerWith(publicEndpointConfig(3000, ''), dir);
+      const providerB = providerWith(publicEndpointConfig(3000, ''), otherDir);
+      providerA.recordRefreshedAuth({ ...AUTH, accessToken: 'root-a-access' });
+      providerB.recordRefreshedAuth({ ...AUTH, accessToken: 'root-b-access' });
+
+      const principal = { provider: 'line' as const, subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'] };
+      const resolvedFromA = await providerA.resolveCredentials(principal);
+      const resolvedFromB = await providerB.resolveCredentials(principal);
+
+      expect(resolvedFromA?.accessToken).toBe('root-a-access');
+      expect(resolvedFromB?.accessToken).toBe('root-b-access');
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -191,7 +208,6 @@ describe('refresh grant survives a restart using persisted credentials', () => {
     }).issueTokens(AUTH).refresh_token;
 
     // Process 2 (restart): brand-new provider, empty in-memory cache.
-    latestAuthData.clear();
     const provider2 = providerWith(publicEndpointConfig(3000, ''), dir);
     const app = express();
     app.use(express.json());
