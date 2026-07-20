@@ -136,7 +136,7 @@ export function createServer(options: ServerOptions): ComposedServer {
       const createRequestClient = createServerRequestClientFactory({
         cache,
         resolveCredentials: (principal) => authProvider.resolveCredentials(principal),
-        authStoreDir: layout.authDir,
+        onAuthRefreshed: (fresh) => authProvider.recordRefreshedAuth(fresh),
         lineApiBaseUrl: options.lineApiBaseUrl,
       });
 

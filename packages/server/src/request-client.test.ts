@@ -28,19 +28,20 @@ describe('createServerRequestClientFactory — plumbing (Step 2)', () => {
     vi.restoreAllMocks();
   });
 
-  it('passes cache and resolveCredentials straight through to @raidenyn/line-mcp\'s createRequestClientFactory unmodified', () => {
+  it('passes cache, resolveCredentials, and onAuthRefreshed straight through to @raidenyn/line-mcp\'s createRequestClientFactory unmodified', () => {
     const cache = new SqliteMessageCache({ dbPath: ':memory:' });
     const resolveCredentials = vi.fn(async () => authDataFor('u-owner'));
+    const onAuthRefreshed = vi.fn();
     const factorySpy = vi.spyOn(lineMcpModule, 'createRequestClientFactory');
 
-    createServerRequestClientFactory({ cache, resolveCredentials, authStoreDir: '/tmp/does-not-matter' });
+    createServerRequestClientFactory({ cache, resolveCredentials, onAuthRefreshed });
 
     expect(factorySpy).toHaveBeenCalledTimes(1);
     const passedOptions = factorySpy.mock.calls[0][0];
-    // Exact passthrough — no extra wrapping layer around cache/resolveCredentials.
+    // Exact passthrough — no extra wrapping layer around any option.
     expect(passedOptions.cache).toBe(cache);
     expect(passedOptions.resolveCredentials).toBe(resolveCredentials);
-    expect(typeof passedOptions.onAuthRefreshed).toBe('function');
+    expect(passedOptions.onAuthRefreshed).toBe(onAuthRefreshed);
     cache.close();
   });
 
@@ -50,37 +51,11 @@ describe('createServerRequestClientFactory — plumbing (Step 2)', () => {
     const factorySpy = vi.spyOn(lineMcpModule, 'createRequestClientFactory');
     const lineApiBaseUrl = 'http://127.0.0.1:18202';
 
-    createServerRequestClientFactory({ cache, resolveCredentials, authStoreDir: '/tmp/does-not-matter', lineApiBaseUrl });
+    createServerRequestClientFactory({ cache, resolveCredentials, onAuthRefreshed: () => {}, lineApiBaseUrl });
 
     expect(factorySpy).toHaveBeenCalledTimes(1);
     expect(factorySpy.mock.calls[0][0].lineApiBaseUrl).toBe(lineApiBaseUrl);
     cache.close();
-  });
-
-  it('wires onAuthRefreshed to persist the EXACT refreshed snapshot via recordRefreshedAuth(fresh, authStoreDir)', () => {
-    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
-    const authStoreDir = mkdtemp();
-    try {
-      const recordSpy = vi.spyOn(lineMcpModule, 'recordRefreshedAuth').mockImplementation(() => {});
-      const factorySpy = vi.spyOn(lineMcpModule, 'createRequestClientFactory');
-
-      createServerRequestClientFactory({
-        cache,
-        resolveCredentials: async () => authDataFor('u-owner'),
-        authStoreDir,
-      });
-
-      const onAuthRefreshed = factorySpy.mock.calls[0][0].onAuthRefreshed!;
-      const freshSnapshot = authDataFor('u-owner');
-      // Immutable — object identity is what "the exact snapshot" means here.
-      onAuthRefreshed(freshSnapshot);
-
-      expect(recordSpy).toHaveBeenCalledTimes(1);
-      expect(recordSpy).toHaveBeenCalledWith(freshSnapshot, authStoreDir);
-    } finally {
-      cache.close();
-      fs.rmSync(authStoreDir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -100,7 +75,7 @@ describe('createServerRequestClientFactory — real behavior (no mocks, no netwo
 
   it('loads credentials by the exact principal (MID-keyed)', async () => {
     const resolveCredentials = vi.fn(async (p: LinePrincipal) => authDataFor(p.mid));
-    const factory = createServerRequestClientFactory({ cache, resolveCredentials, authStoreDir: mkdtemp() });
+    const factory = createServerRequestClientFactory({ cache, resolveCredentials, onAuthRefreshed: () => {} });
 
     const principal = principalFor('u-alice');
     await factory(principal);
@@ -112,7 +87,7 @@ describe('createServerRequestClientFactory — real behavior (no mocks, no netwo
     const factory = createServerRequestClientFactory({
       cache,
       resolveCredentials: async (p) => authDataFor(p.mid),
-      authStoreDir: mkdtemp(),
+      onAuthRefreshed: () => {},
     });
 
     const client = await factory(principalFor('u-alice'));
@@ -140,7 +115,7 @@ describe('createServerRequestClientFactory — real behavior (no mocks, no netwo
     const factory = createServerRequestClientFactory({
       cache,
       resolveCredentials: async (p) => authDataFor(p.mid),
-      authStoreDir: mkdtemp(),
+      onAuthRefreshed: () => {},
     });
 
     const aliceClient = await factory(principalFor('u-alice'));

@@ -5,7 +5,7 @@ import type express from 'express';
 import { createMcpHost, normalizeBasePath, type McpHost } from '@raidenyn/mcp-runtime';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { LineAuthProvider, publicEndpointConfig, type LinePrincipal } from './auth/line-auth-provider';
-import { FileCredentialStore, recordRefreshedAuth } from './auth/credential-store';
+import { FileCredentialStore } from './auth/credential-store';
 import { registerLineTools } from './tools';
 import { registerLineResources } from './resources';
 import { ImportService } from './import-service';
@@ -164,7 +164,7 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
       const createRequestClient = createRequestClientFactory({
         cache,
         resolveCredentials: (principal) => authProvider.resolveCredentials(principal),
-        onAuthRefreshed: (fresh) => recordRefreshedAuth(fresh, authStoreDir),
+        onAuthRefreshed: (fresh) => authProvider.recordRefreshedAuth(fresh),
         lineApiBaseUrl: options.lineApiBaseUrl,
       });
 

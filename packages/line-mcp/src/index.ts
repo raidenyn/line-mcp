@@ -19,8 +19,6 @@ export {
   inventoryStoredAuthRecords,
   persistAuthData,
   loadAuthFromDisk,
-  recordRefreshedAuth,
-  latestAuthData,
   // Async credential-store port for the auth provider.
   type CredentialStore,
   FileCredentialStore,

@@ -5,7 +5,6 @@ import { LineClient, AuthData } from '@raidenyn/line-client';
 import {
   CredentialStore,
   StoredAuthRecord,
-  latestAuthData,
   listStoredAuthRecords,
   loadStoredAuthRecord,
   maskMid,
@@ -33,6 +32,8 @@ export interface OAuthRouterDeps {
   lineApiBaseUrl?: string;
   issueTokens(authData: AuthData): IssuedTokenPair;
   issueFromRefresh(refreshToken: string): Promise<IssuedTokenPair | null>;
+  /** Records a just-completed login's credential as the freshest known snapshot for its MID. */
+  recordRefreshedAuth(authData: AuthData): void;
 }
 
 // ─── Login session types ──────────────────────────────────────────────────────
@@ -240,7 +241,7 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
         return;
       }
 
-      latestAuthData.set(authData.mid, authData);
+      deps.recordRefreshedAuth(authData);
       const code = crypto.randomBytes(16).toString('hex');
       pendingCodes.set(code, {
         authData,

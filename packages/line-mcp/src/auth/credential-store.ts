@@ -17,15 +17,6 @@ function defaultAuthDir(): string {
   return path.join(process.env.DATA_DIR ?? path.join(process.cwd(), 'data'), 'auth');
 }
 
-// ─── In-memory LINE credential cache (updated on LINE token refresh) ─────────
-//
-// Process-global freshest-credential cache keyed by mid. Populated on login,
-// on LINE token refresh (`recordRefreshedAuth`), and lazily from disk. Shared
-// by the auth provider's credential resolution, the sync loop, and the request
-// handler so a rotated LINE access token propagates everywhere without a
-// restart.
-export const latestAuthData = new Map<string, AuthData>();
-
 // ─── Path / structural validation ───────────────────────────────────────────
 
 function isSafeMid(mid: string): boolean {
@@ -191,32 +182,9 @@ export function persistAuthData(
   }
 }
 
-// Non-fatal freshness update. Update the in-memory snapshot FIRST (so a
-// rotated LINE credential is served immediately, even to the request that
-// triggered the refresh), then attempt an atomic disk replacement. Persistence
-// failure is logged with a credential-free message and swallowed: the LINE
-// token-refresh callback that drives this is synchronous and must never throw,
-// and the fresh snapshot is still served from memory until restart.
-export function recordRefreshedAuth(
-  authData: AuthData,
-  storeDir = defaultAuthDir(),
-): void {
-  latestAuthData.set(authData.mid, authData);
-  try {
-    persistAuthData(authData, undefined, storeDir);
-  } catch {
-    process.stderr.write(
-      `[OAuth] Refreshed LINE auth for ${maskMid(authData.mid)} but could not persist it\n`,
-    );
-  }
-}
-
 export function loadAuthFromDisk(mid: string, storeDir = defaultAuthDir()): AuthData | null {
   const record = loadStoredAuthRecord(mid, storeDir);
-  if (!record) return null;
-  const authData = authDataFromStoredRecord(record);
-  latestAuthData.set(mid, authData);
-  return authData;
+  return record ? authDataFromStoredRecord(record) : null;
 }
 
 // ─── Async credential store (the auth provider's persistence port) ──────────
@@ -236,8 +204,6 @@ export class FileCredentialStore implements CredentialStore {
   constructor(private readonly authStoreDir: string) {}
 
   async load(mid: string): Promise<Readonly<AuthData> | null> {
-    // loadAuthFromDisk primes latestAuthData so the in-memory freshness cache
-    // and the on-disk store never disagree after a lazy load.
     return loadAuthFromDisk(mid, this.authStoreDir);
   }
 
