@@ -11,9 +11,7 @@ import {
 } from './line-auth-provider';
 import {
   FileCredentialStore,
-  latestAuthData,
   persistAuthData,
-  recordRefreshedAuth,
   loadStoredAuthRecord,
 } from './credential-store';
 
@@ -91,12 +89,10 @@ describe('breaking token cutover', () => {
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'token-transition-'));
-    latestAuthData.clear();
   });
 
   afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
-    latestAuthData.clear();
   });
 
   describe('legacy token rejection (same secret)', () => {
@@ -174,7 +170,6 @@ describe('breaking token cutover', () => {
   describe('credential freshness', () => {
     it('loads credentials by MID after a restart (empty in-memory cache)', async () => {
       persistAuthData(AUTH, 'Personal LINE', dir);
-      latestAuthData.clear(); // simulate a fresh process
       const provider = makeProvider(dir);
       const resolved = await provider.resolveCredentials({
         provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
@@ -192,61 +187,103 @@ describe('breaking token cutover', () => {
 
     it('refuses the refresh grant when the account has no stored record', async () => {
       // A syntactically valid, signature-valid, MID-only refresh token whose
-      // account is not on disk must not mint new tokens.
-      const provider = makeProvider(dir);
-      const pair = (provider as unknown as {
+      // account is not on disk must not mint new tokens. Minted from a
+      // THROWAWAY provider sharing the same secret (so the token verifies) —
+      // the provider under test never has AUTH primed into its own in-memory
+      // freshness map, and AUTH is never persisted to `dir`.
+      const throwaway = makeProvider(path.join(dir, 'never-used'));
+      const pair = (throwaway as unknown as {
         issueTokens(a: AuthData): { access_token: string; refresh_token: string };
       }).issueTokens(AUTH);
-      latestAuthData.clear(); // account gone from memory and never persisted
+      const provider = makeProvider(dir);
       const refresh = refreshHandler(provider);
       const result = (await refresh(pair.refresh_token)) as { statusCode: number };
       expect(result.statusCode).toBe(400);
     });
 
-    it('persists the exact refreshed snapshot and updates memory first', () => {
+    it('persists the exact refreshed snapshot and updates memory first', async () => {
       persistAuthData(AUTH, 'Personal LINE', dir);
-      latestAuthData.clear();
+      const provider = makeProvider(dir);
       const fresher: AuthData = { ...AUTH, accessToken: 'access-rotated', refreshToken: 'refresh-rotated' };
 
-      recordRefreshedAuth(fresher, dir);
+      provider.recordRefreshedAuth(fresher);
 
-      expect(latestAuthData.get(AUTH.mid)).toEqual(fresher);
+      const resolved = await provider.resolveCredentials({
+        provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
+      });
+      expect(resolved).toEqual(fresher);
       expect(loadStoredAuthRecord(AUTH.mid, dir)).toEqual({ ...fresher, displayName: 'Personal LINE' });
     });
 
     it('preserves the account display name across a credential refresh', () => {
       persistAuthData(AUTH, 'Personal LINE', dir);
+      const provider = makeProvider(dir);
       const fresher: AuthData = { ...AUTH, accessToken: 'access-rotated' };
-      recordRefreshedAuth(fresher, dir);
+      provider.recordRefreshedAuth(fresher);
       expect(loadStoredAuthRecord(AUTH.mid, dir)?.displayName).toBe('Personal LINE');
     });
 
-    it('keeps a single in-memory entry per MID across separate auth object copies', () => {
+    it('keeps a single freshest entry per MID across separate auth object copies', async () => {
+      const provider = makeProvider(dir);
       const copyA: AuthData = { ...AUTH, accessToken: 'copy-a' };
       const copyB: AuthData = { ...AUTH, accessToken: 'copy-b' };
-      recordRefreshedAuth(copyA, dir);
-      recordRefreshedAuth(copyB, dir);
+      provider.recordRefreshedAuth(copyA);
+      provider.recordRefreshedAuth(copyB);
       // Same MID → one keyed entry, last write wins (single-flight coalescing).
-      expect(latestAuthData.size).toBe(1);
-      expect(latestAuthData.get(AUTH.mid)?.accessToken).toBe('copy-b');
+      const resolved = await provider.resolveCredentials({
+        provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
+      });
+      expect(resolved?.accessToken).toBe('copy-b');
     });
 
-    it('refreshes independent MIDs without cross-contamination', () => {
+    it('refreshes independent MIDs without cross-contamination', async () => {
+      const provider = makeProvider(dir);
       const other: AuthData = { ...AUTH, mid: 'u-otheraccount', accessToken: 'other-access' };
-      recordRefreshedAuth(AUTH, dir);
-      recordRefreshedAuth(other, dir);
-      expect(latestAuthData.size).toBe(2);
-      expect(latestAuthData.get(AUTH.mid)?.accessToken).toBe(AUTH.accessToken);
-      expect(latestAuthData.get('u-otheraccount')?.accessToken).toBe('other-access');
+      provider.recordRefreshedAuth(AUTH);
+      provider.recordRefreshedAuth(other);
+      const resolvedAuth = await provider.resolveCredentials({
+        provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
+      });
+      const resolvedOther = await provider.resolveCredentials({
+        provider: 'line', subject: 'u-otheraccount', mid: 'u-otheraccount', scopes: ['line'],
+      });
+      expect(resolvedAuth?.accessToken).toBe(AUTH.accessToken);
+      expect(resolvedOther?.accessToken).toBe('other-access');
     });
 
-    it('keeps the refreshed snapshot in memory when disk persistence fails', () => {
+    it('keeps the refreshed snapshot in memory when disk persistence fails', async () => {
       const blocked = path.join(dir, 'blocked-file');
       fs.writeFileSync(blocked, 'not a directory');
+      const provider = makeProvider(blocked);
       const fresher: AuthData = { ...AUTH, accessToken: 'access-rotated' };
       // Non-fatal policy: memory updated, disk write swallowed, no throw.
-      expect(() => recordRefreshedAuth(fresher, blocked)).not.toThrow();
-      expect(latestAuthData.get(AUTH.mid)).toEqual(fresher);
+      expect(() => provider.recordRefreshedAuth(fresher)).not.toThrow();
+      const resolved = await provider.resolveCredentials({
+        provider: 'line', subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'],
+      });
+      expect(resolved).toEqual(fresher);
+    });
+
+    it('never resolves data-root B\'s refreshed credential from data-root A\'s provider (same MID)', async () => {
+      const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), 'token-transition-other-root-'));
+      try {
+        const providerA = makeProvider(dir);
+        const providerB = makeProvider(otherDir);
+        const freshA: AuthData = { ...AUTH, accessToken: 'root-a-access' };
+        const freshB: AuthData = { ...AUTH, accessToken: 'root-b-access' };
+
+        providerA.recordRefreshedAuth(freshA);
+        providerB.recordRefreshedAuth(freshB);
+
+        const principal = { provider: 'line' as const, subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'] };
+        const resolvedFromA = await providerA.resolveCredentials(principal);
+        const resolvedFromB = await providerB.resolveCredentials(principal);
+
+        expect(resolvedFromA?.accessToken).toBe('root-a-access');
+        expect(resolvedFromB?.accessToken).toBe('root-b-access');
+      } finally {
+        fs.rmSync(otherDir, { recursive: true, force: true });
+      }
     });
   });
 });

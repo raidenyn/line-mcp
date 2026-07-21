@@ -1,6 +1,5 @@
 import {
   createRequestClientFactory,
-  recordRefreshedAuth,
   type RequestLineClient,
   type LinePrincipal,
 } from '@raidenyn/line-mcp';
@@ -8,25 +7,25 @@ import type { AuthData, MessageCache } from '@raidenyn/line-client';
 
 /**
  * The composed server's request-client seam. It reuses `@raidenyn/line-mcp`'s
- * already-tested `createRequestClientFactory` verbatim — the ONLY thing this
- * wrapper adds is capturing the executable-owned `authStoreDir` into the
- * refresh-persistence callback, so a LINE token rotated mid-request is written
- * back to the right auth store. No client-construction, credential-resolution,
- * or cache-wrapping logic is reimplemented here.
+ * already-tested `createRequestClientFactory` verbatim — this wrapper exists
+ * purely as this package's own import surface (`@raidenyn/server` re-exports
+ * `RequestLineClient` from here), not to add behavior; every option is passed
+ * straight through.
  *
  * The returned factory, for a given principal:
  *   - loads that account's credentials by MID (via `resolveCredentials`);
  *   - builds a fresh, UNCACHED LINE API client from them;
  *   - binds the shared owner-scoped message cache to the SAME MID, exposing it
  *     as `messages` (`{ api, messages }`);
- *   - persists any refreshed credential snapshot exactly as received.
+ *   - invokes `onAuthRefreshed` with any refreshed credential snapshot exactly
+ *     as received.
  */
 export interface ServerRequestClientOptions {
   cache: MessageCache;
   /** Resolves the freshest LINE credential for a principal; `null` ⇒ reauthorize. */
   resolveCredentials(principal: LinePrincipal): Promise<Readonly<AuthData> | null>;
-  /** Directory refreshed LINE credential snapshots are persisted into. */
-  authStoreDir: string;
+  /** Fired synchronously by the underlying LineClient when a token is refreshed mid-request. */
+  onAuthRefreshed(authData: Readonly<AuthData>): void;
   lineApiBaseUrl?: string;
 }
 
@@ -37,7 +36,7 @@ export function createServerRequestClientFactory(
   return createRequestClientFactory({
     cache: options.cache,
     resolveCredentials: options.resolveCredentials,
-    onAuthRefreshed: (fresh) => recordRefreshedAuth(fresh, options.authStoreDir),
+    onAuthRefreshed: options.onAuthRefreshed,
     lineApiBaseUrl: options.lineApiBaseUrl,
   });
 }

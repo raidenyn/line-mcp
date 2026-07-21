@@ -27,8 +27,7 @@ const FRESH_AUTH: AuthData = {
 
 // The credential-store standalone helpers default their store directory to
 // `<DATA_DIR|cwd/data>/auth`, resolved lazily. Re-importing the module between
-// tests resets its process-global in-memory freshness cache, matching how the
-// old oauth.test.ts exercised these functions.
+// tests gives each test a clean module instance bound to its own DATA_DIR.
 describe('stored auth records', () => {
   let tmpdir: string;
   let mod: typeof import('./credential-store');
@@ -65,29 +64,6 @@ describe('stored auth records', () => {
     expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
       ...FRESH_AUTH,
       displayName: 'Personal LINE',
-    });
-  });
-
-  describe('recordRefreshedAuth', () => {
-    it('updates memory and disk while preserving the account display name', () => {
-      mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-      mod.latestAuthData.clear();
-
-      mod.recordRefreshedAuth(FRESH_AUTH);
-
-      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
-      expect(mod.loadStoredAuthRecord(TEST_AUTH.mid)).toEqual({
-        ...FRESH_AUTH,
-        displayName: 'Personal LINE',
-      });
-    });
-
-    it('keeps refreshed credentials in memory when persistence fails', () => {
-      const blocked = path.join(tmpdir, 'blocked-auth');
-      fs.writeFileSync(blocked, 'not a directory');
-
-      expect(() => mod.recordRefreshedAuth(FRESH_AUTH, blocked)).not.toThrow();
-      expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(FRESH_AUTH);
     });
   });
 
@@ -201,19 +177,12 @@ describe('stored auth records', () => {
     expect(mod.loadStoredAuthRecord('u-bad')).toBeNull();
   });
 
-  it('does not populate latestAuthData during enumeration', () => {
+  it('strips selector metadata when loading a stored record', () => {
     mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    mod.latestAuthData.clear();
-    mod.listStoredAuthRecords();
-    expect(mod.latestAuthData.size).toBe(0);
-  });
 
-  it('strips selector metadata before caching LINE auth data', () => {
-    mod.persistAuthData(TEST_AUTH, 'Personal LINE');
-    mod.latestAuthData.clear();
+    const loaded = mod.loadAuthFromDisk(TEST_AUTH.mid);
 
-    expect(mod.loadAuthFromDisk(TEST_AUTH.mid)).toEqual(TEST_AUTH);
-    expect(mod.latestAuthData.get(TEST_AUTH.mid)).toEqual(TEST_AUTH);
-    expect(mod.latestAuthData.get(TEST_AUTH.mid)).not.toHaveProperty('displayName');
+    expect(loaded).toEqual(TEST_AUTH);
+    expect(loaded).not.toHaveProperty('displayName');
   });
 });

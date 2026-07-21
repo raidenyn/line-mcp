@@ -388,6 +388,7 @@ describe('OAuth router boundary (regression guard)', () => {
       credentialStore: new FileCredentialStore(dir),
       issueTokens: () => ({ access_token: 'a', refresh_token: 'r' }),
       issueFromRefresh: async () => null,
+      recordRefreshedAuth: () => {},
     });
     const { url, close } = await listen(app);
     try {

@@ -6,7 +6,7 @@ import express, { type Express, type Request } from 'express';
 import * as http from 'http';
 import * as crypto from 'crypto';
 import { LineAuthProvider, publicEndpointConfig } from './line-auth-provider';
-import { FileCredentialStore, latestAuthData } from './credential-store';
+import { FileCredentialStore } from './credential-store';
 
 vi.mock('fs', async importOriginal => {
   const original = await importOriginal<typeof import('fs')>();
@@ -156,16 +156,19 @@ const routeParams = () => new URLSearchParams({
   state: 'st',
 });
 
-async function withOAuthServer(authStorePath: string, run: (serverBase: string) => Promise<void>): Promise<void> {
+async function withOAuthServer(
+  authStorePath: string,
+  run: (serverBase: string, provider: LineAuthProvider) => Promise<void>,
+): Promise<void> {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
   const localServer = http.createServer(app);
   await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
   const port = (localServer.address() as { port: number }).port;
-  setupOAuthRoutes(app, port, '', authStorePath);
+  const provider = setupOAuthRoutes(app, port, '', authStorePath);
   try {
-    await run(`http://127.0.0.1:${port}`);
+    await run(`http://127.0.0.1:${port}`, provider);
   } finally {
     await new Promise<void>(resolve => localServer.close(() => resolve()));
   }
@@ -234,7 +237,6 @@ afterAll(() => Promise.all([
 }));
 
 beforeEach(async () => {
-  latestAuthData.clear();
   fs.rmSync(authStoreDir, { recursive: true, force: true });
   fs.mkdirSync(authStoreDir, { recursive: true });
   fs.rmSync(authStoreDir2, { recursive: true, force: true });
@@ -606,20 +608,21 @@ describe('GET /authorize/poll', () => {
 });
 
 describe('OAuth completion persistence', () => {
-  it('does not issue a code or update memory when durable persistence fails', async () => {
+  it('does not issue a code or update the provider\'s freshness state when durable persistence fails', async () => {
     const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-blocked-'));
     const blockedAuthPath = path.join(parent, 'auth');
     fs.writeFileSync(blockedAuthPath, 'not a directory');
-    latestAuthData.clear();
 
-    await withOAuthServer(blockedAuthPath, async serverBase => {
+    await withOAuthServer(blockedAuthPath, async (serverBase, provider) => {
       const authorize = await req(`${serverBase}/authorize?${routeParams()}`);
       const sid = sessionIdFromQrPage(bodyAsHtml(authorize));
       const pollBody = await waitForTerminalLogin(serverBase, sid);
 
       expect(pollBody.phase).toBe('failed');
       expect(pollBody.code).toBeUndefined();
-      expect(latestAuthData.has('umid')).toBe(false);
+      expect(await provider.resolveCredentials({
+        provider: 'line', subject: 'umid', mid: 'umid', scopes: ['line'],
+      })).toBeNull();
     });
   });
 
