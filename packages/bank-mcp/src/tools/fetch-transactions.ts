@@ -60,7 +60,6 @@ export async function fetchParsedTransactions<P extends Principal>(
 
   const warnings: string[] = [];
   const loaded = deps.templates.load(chatMid);
-  if (loaded.warning) warnings.push(loaded.warning);
   const savedTemplates = loaded.templates;
   const savedAliases = loaded.currency_aliases;
 
