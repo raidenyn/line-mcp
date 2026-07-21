@@ -26,29 +26,34 @@ function safeFilePath(chatMid: string, storeDir: string): string {
 export function loadTemplates(
   chatMid: string,
   storeDir: string,
-): { templates: NamedTemplate[]; warning?: string; currency_aliases: Record<string, string> } {
+): { templates: NamedTemplate[]; currency_aliases: Record<string, string> } {
   const path = safeFilePath(chatMid, storeDir);
-  if (!existsSync(path)) return { templates: [], currency_aliases: {} };
+  let contents: string;
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8'));
-    const rawAliases: Record<string, string> = raw.currency_aliases ?? {};
-    const rawTemplates: NamedTemplate[] = raw.templates ?? [];
-    const migrated = rawTemplates.map((t) => {
-      const newPattern = t.pattern
-        .replace(/\(\?<amount>/g, '(?<original_amount>')
-        .replace(/\(\?<currency>/g, '(?<original_currency>');
-      return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
-    });
-    if (migrated.some((t, i) => t !== rawTemplates[i])) {
-      writeFileSync(path, JSON.stringify({ templates: migrated, currency_aliases: rawAliases }, null, 2));
-      process.stderr.write(
-        `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
-      );
+    contents = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { templates: [], currency_aliases: {} };
     }
-    return { templates: migrated, currency_aliases: rawAliases };
-  } catch {
-    return { templates: [], warning: `Template file for ${chatMid} is corrupt or unreadable — returning empty list.`, currency_aliases: {} };
+    throw error;
   }
+
+  const raw = JSON.parse(contents);
+  const rawAliases: Record<string, string> = raw.currency_aliases ?? {};
+  const rawTemplates: NamedTemplate[] = raw.templates ?? [];
+  const migrated = rawTemplates.map((t) => {
+    const newPattern = t.pattern
+      .replace(/\(\?<amount>/g, '(?<original_amount>')
+      .replace(/\(\?<currency>/g, '(?<original_currency>');
+    return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
+  });
+  if (migrated.some((t, i) => t !== rawTemplates[i])) {
+    writeFileSync(path, JSON.stringify({ templates: migrated, currency_aliases: rawAliases }, null, 2));
+    process.stderr.write(
+      `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
+    );
+  }
+  return { templates: migrated, currency_aliases: rawAliases };
 }
 
 function writeTemplates(chatMid: string, templates: NamedTemplate[], aliases: Record<string, string>, storeDir: string): void {
@@ -133,7 +138,7 @@ export function filterByTime(templates: NamedTemplate[], timestampMs: number): N
 export class TemplateStore {
   constructor(private readonly storeDir: string) {}
 
-  load(chatMid: string): { templates: NamedTemplate[]; warning?: string; currency_aliases: Record<string, string> } {
+  load(chatMid: string): { templates: NamedTemplate[]; currency_aliases: Record<string, string> } {
     return loadTemplates(chatMid, this.storeDir);
   }
 

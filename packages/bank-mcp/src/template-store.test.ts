@@ -39,6 +39,12 @@ describe('loadTemplates', () => {
     expect(result.templates).toEqual([]);
     expect(result.warning).toBeUndefined();
   });
+
+  it('throws when an existing file contains malformed JSON', () => {
+    writeFileSync(join(dir, 'mid123.json'), '{"templates":[');
+
+    expect(() => loadTemplates('mid123', dir)).toThrow();
+  });
 });
 
 describe('upsertTemplate', () => {
@@ -270,6 +276,34 @@ describe('listAliases', () => {
     upsertAlias('mid123', 'บาท', 'THB', dir);
     upsertAlias('mid123', 'บ', 'THB', dir);
     expect(listAliases('mid123', dir)).toEqual({ 'บาท': 'THB', 'บ': 'THB' });
+  });
+});
+
+describe('corrupt store reads', () => {
+  it.each([
+    ['listTemplates', () => listTemplates('mid123', dir)],
+    ['listAliases', () => listAliases('mid123', dir)],
+  ])('%s throws instead of treating an existing malformed store as empty', (_name, read) => {
+    writeFileSync(join(dir, 'mid123.json'), '{"templates":[');
+
+    expect(read).toThrow();
+  });
+});
+
+describe('mutations against a corrupt store', () => {
+  const malformed = '{"templates":[';
+
+  it.each([
+    ['upsertTemplate', () => upsertTemplate('mid123', TMPL_A, dir)],
+    ['deleteTemplate', () => deleteTemplate('mid123', TMPL_A.name, dir)],
+    ['upsertAlias', () => upsertAlias('mid123', 'baht', 'THB', dir)],
+    ['deleteAlias', () => deleteAlias('mid123', 'baht', dir)],
+  ])('%s throws and preserves the malformed file', (_name, mutate) => {
+    const file = join(dir, 'mid123.json');
+    writeFileSync(file, malformed);
+
+    expect(mutate).toThrow();
+    expect(readFileSync(file, 'utf8')).toBe(malformed);
   });
 });
 
