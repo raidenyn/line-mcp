@@ -7,12 +7,16 @@ vi.mock('fs', async importOriginal => {
   const original = await importOriginal<typeof import('fs')>();
   return {
     ...original,
+    readFileSync: vi.fn(original.readFileSync),
     writeFileSync: vi.fn(original.writeFileSync),
     renameSync: vi.fn(original.renameSync),
   };
 });
 
 const { mkdtempSync, rmSync, writeFileSync, readFileSync } = fs;
+// The real fs bindings, captured before any mockImplementation overrides them.
+// Used by tests that need to write partial bytes to a mocked-failure target.
+const realWriteFileSync = fs.writeFileSync.getMockImplementation() as typeof fs.writeFileSync;
 import {
   loadTemplates,
   upsertTemplate,
@@ -57,6 +61,22 @@ describe('loadTemplates', () => {
     writeFileSync(join(dir, 'mid123.json'), '{"templates":[');
 
     expect(() => loadTemplates('mid123', dir)).toThrow();
+  });
+
+  it('propagates a non-ENOENT read error without attempting a write', () => {
+    writeFileSync(join(dir, 'mid123.json'), JSON.stringify({ templates: [TMPL_A] }));
+    // Clear spy call history so only the mutation's calls are asserted below.
+    vi.mocked(fs.writeFileSync).mockClear();
+    vi.mocked(fs.renameSync).mockClear();
+    const readErr = new Error('permission denied') as NodeJS.ErrnoException;
+    readErr.code = 'EACCES';
+    vi.mocked(fs.readFileSync).mockImplementationOnce(() => {
+      throw readErr;
+    });
+
+    expect(() => upsertTemplate('mid123', TMPL_B, dir)).toThrow('permission denied');
+    expect(vi.mocked(fs.writeFileSync)).not.toHaveBeenCalled();
+    expect(vi.mocked(fs.renameSync)).not.toHaveBeenCalled();
   });
 });
 
@@ -377,8 +397,18 @@ describe('atomic template writes', () => {
     upsertTemplate('mid123', TMPL_A, dir);
     const file = join(dir, 'mid123.json');
     const previous = readFileSync(file, 'utf8');
-    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
-      throw new Error('write denied');
+    vi.mocked(fs.writeFileSync).mockImplementationOnce((p, ..._rest) => {
+      // Simulate a partial write (e.g. ENOSPC): the temp file is created and
+      // partially populated before the call throws. This makes the cleanup
+      // assertion meaningful — removing the production `unlinkSync` would
+      // leave this partial temp behind and fail `readdirSync`.
+      const path = typeof p === 'number' ? undefined : p;
+      if (typeof path === 'string' && path.endsWith('.tmp')) {
+        realWriteFileSync(path, 'partial');
+      }
+      const err = new Error('write denied') as NodeJS.ErrnoException;
+      err.code = 'ENOSPC';
+      throw err;
     });
 
     expect(() => upsertTemplate('mid123', TMPL_B, dir)).toThrow('write denied');
