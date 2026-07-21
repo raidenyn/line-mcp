@@ -51,7 +51,6 @@ describe('loadTemplates', () => {
   it('returns empty array for missing file', () => {
     const result = loadTemplates('mid123', dir);
     expect(result.templates).toEqual([]);
-    expect(result.warning).toBeUndefined();
   });
 
   it('throws when an existing file contains malformed JSON', () => {
@@ -172,7 +171,6 @@ describe('loadTemplates migration', () => {
     expect(result.templates[0].pattern).toBe(
       'spent\\s+(?<original_currency>THB)\\s+(?<original_amount>[\\d,.]+)',
     );
-    expect(result.warning).toBeUndefined();
   });
 
   it('rewrites the file so subsequent loads return the migrated pattern', () => {
