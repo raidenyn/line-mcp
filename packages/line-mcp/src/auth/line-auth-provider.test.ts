@@ -192,6 +192,70 @@ describe('resolveCredentials', () => {
       fs.rmSync(otherDir, { recursive: true, force: true });
     }
   });
+
+  it('prefers a fresher snapshot installed by recordRefreshedAuth during a pending disk load', async () => {
+    // Regression: freshestCredential awaits credentialStore.load(mid); a
+    // concurrent recordRefreshedAuth() during that await installs a fresher
+    // snapshot. The load resolving with a STALE disk value must NOT overwrite
+    // the in-memory fresher value. (The slowStore captures a stale snapshot
+    // at construction so recordRefreshedAuth's own persist does not feed back
+    // into the load result.)
+    persistAuthData(AUTH, 'Personal LINE', dir);
+    const staleFromDisk: AuthData = { ...AUTH };
+    let releaseLoad!: () => void;
+    const loadHeld = new Promise<void>(resolve => { releaseLoad = resolve; });
+    const slowStore: import('./credential-store').CredentialStore = {
+      async load() {
+        await loadHeld;
+        return staleFromDisk;
+      },
+      async list() { return []; },
+      async saveAtomic() { /* unused */ },
+    };
+    const provider = new LineAuthProvider({
+      secret: SECRET,
+      endpoints: publicEndpointConfig(3000, ''),
+      credentialStore: slowStore,
+      authStoreDir: dir,
+    });
+    const principal = { provider: 'line' as const, subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'] };
+    const pending = provider.resolveCredentials(principal);
+    // While the disk load is still pending, install a fresher snapshot.
+    const fresher: AuthData = { ...AUTH, accessToken: 'access-rotated-during-load' };
+    provider.recordRefreshedAuth(fresher);
+    releaseLoad();
+    const resolved = await pending;
+    expect(resolved?.accessToken).toBe('access-rotated-during-load');
+  });
+
+  it('returns the snapshot installed by recordRefreshedAuth during a pending disk load that ultimately finds no record', async () => {
+    // Same TOCTOU, but the disk load returns null — without the re-check,
+    // resolveCredentials would return null despite the fresh snapshot that
+    // arrived mid-load.
+    let releaseLoad!: () => void;
+    const loadHeld = new Promise<void>(resolve => { releaseLoad = resolve; });
+    const slowStore: import('./credential-store').CredentialStore = {
+      async load() {
+        await loadHeld;
+        return null;
+      },
+      async list() { return []; },
+      async saveAtomic() { /* unused */ },
+    };
+    const provider = new LineAuthProvider({
+      secret: SECRET,
+      endpoints: publicEndpointConfig(3000, ''),
+      credentialStore: slowStore,
+      authStoreDir: dir,
+    });
+    const principal = { provider: 'line' as const, subject: AUTH.mid, mid: AUTH.mid, scopes: ['line'] };
+    const pending = provider.resolveCredentials(principal);
+    const fresher: AuthData = { ...AUTH, accessToken: 'access-fresh-no-disk' };
+    provider.recordRefreshedAuth(fresher);
+    releaseLoad();
+    const resolved = await pending;
+    expect(resolved?.accessToken).toBe('access-fresh-no-disk');
+  });
 });
 
 // ───────────────────────────────────────────────────────────

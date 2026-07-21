@@ -205,11 +205,17 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
 
   // Checks this provider's own in-memory freshness map first, then falls back
   // to a lazy disk load — priming the map on a disk hit so a later call
-  // resolves from memory without a repeat disk round-trip.
+  // resolves from memory without a repeat disk round-trip. Re-checks the map
+  // after the async load: a `recordRefreshedAuth()` call during the await may
+  // have installed a fresher snapshot than whatever disk just returned, and
+  // that fresher value wins (never overwrite it with stale disk data, never
+  // return null when a fresh snapshot arrived mid-load).
   private async freshestCredential(mid: string): Promise<Readonly<AuthData> | null> {
     const cached = this.freshness.get(mid);
     if (cached) return cached;
     const loaded = await this.options.credentialStore.load(mid);
+    const installedDuringLoad = this.freshness.get(mid);
+    if (installedDuringLoad) return installedDuringLoad;
     if (loaded) this.freshness.set(mid, loaded);
     return loaded;
   }
