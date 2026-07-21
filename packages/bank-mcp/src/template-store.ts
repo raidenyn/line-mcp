@@ -1,4 +1,5 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
 import { join } from 'path';
 import { z } from 'zod';
 import { TransactionTemplateSchema } from './transaction-parser';
@@ -30,7 +31,7 @@ export function loadTemplates(
   const path = safeFilePath(chatMid, storeDir);
   let contents: string;
   try {
-    contents = readFileSync(path, 'utf8');
+    contents = fs.readFileSync(path, 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { templates: [], currency_aliases: {} };
@@ -48,7 +49,7 @@ export function loadTemplates(
     return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
   });
   if (migrated.some((t, i) => t !== rawTemplates[i])) {
-    writeFileSync(path, JSON.stringify({ templates: migrated, currency_aliases: rawAliases }, null, 2));
+    writeTemplates(chatMid, migrated, rawAliases, storeDir);
     process.stderr.write(
       `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
     );
@@ -56,9 +57,31 @@ export function loadTemplates(
   return { templates: migrated, currency_aliases: rawAliases };
 }
 
-function writeTemplates(chatMid: string, templates: NamedTemplate[], aliases: Record<string, string>, storeDir: string): void {
-  if (!existsSync(storeDir)) mkdirSync(storeDir, { recursive: true });
-  writeFileSync(safeFilePath(chatMid, storeDir), JSON.stringify({ templates, currency_aliases: aliases }, null, 2));
+function writeTemplates(
+  chatMid: string,
+  templates: NamedTemplate[],
+  aliases: Record<string, string>,
+  storeDir: string,
+): void {
+  const destination = safeFilePath(chatMid, storeDir);
+  const serialized = JSON.stringify({ templates, currency_aliases: aliases }, null, 2);
+  fs.mkdirSync(storeDir, { recursive: true });
+  const temporary = join(
+    storeDir,
+    `.${chatMid}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
+  );
+
+  try {
+    fs.writeFileSync(temporary, serialized, { encoding: 'utf8', flag: 'wx' });
+    fs.renameSync(temporary, destination);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporary);
+    } catch {
+      // The temporary file may not have been created or may already be gone.
+    }
+    throw error;
+  }
 }
 
 export function upsertTemplate(chatMid: string, template: NamedTemplate, storeDir: string): void {

@@ -1,7 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fs from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+
+vi.mock('fs', async importOriginal => {
+  const original = await importOriginal<typeof import('fs')>();
+  return {
+    ...original,
+    writeFileSync: vi.fn(original.writeFileSync),
+    renameSync: vi.fn(original.renameSync),
+  };
+});
+
+const { mkdtempSync, rmSync, writeFileSync, readFileSync } = fs;
 import {
   loadTemplates,
   upsertTemplate,
@@ -18,7 +29,10 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'line-tmpl-'));
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(() => {
+  vi.clearAllMocks();
+  rmSync(dir, { recursive: true, force: true });
+});
 
 const TMPL_A: NamedTemplate = {
   name: 'uob-debit-v1',
@@ -211,6 +225,26 @@ describe('loadTemplates migration', () => {
       'spent (?<original_currency>\\w+) (?<original_amount>[\\d.]+)',
     );
   });
+
+  it('throws and preserves the legacy snapshot when migration rename fails', () => {
+    const file = join(dir, 'mid123.json');
+    const legacy = JSON.stringify({
+      templates: [{ name: 'old', pattern: 'pay (?<currency>\\w+) (?<amount>[\\d.]+)' }],
+      currency_aliases: { baht: 'THB' },
+    });
+    writeFileSync(file, legacy);
+    vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+      throw new Error('rename denied');
+    });
+
+    expect(() => loadTemplates('mid123', dir)).toThrow('rename denied');
+    expect(readFileSync(file, 'utf8')).toBe(legacy);
+    expect(fs.readdirSync(dir)).toEqual(['mid123.json']);
+
+    const retried = loadTemplates('mid123', dir);
+    expect(retried.templates[0].pattern)
+      .toBe('pay (?<original_currency>\\w+) (?<original_amount>[\\d.]+)');
+  });
 });
 
 describe('loadTemplates currency_aliases', () => {
@@ -337,5 +371,41 @@ describe('migration preserves currency_aliases', () => {
     expect(result.currency_aliases).toEqual({ 'บาท': 'THB' });
     const file = JSON.parse(readFileSync(join(dir, 'mid123.json'), 'utf8'));
     expect(file.currency_aliases).toEqual({ 'บาท': 'THB' });
+  });
+});
+
+describe('atomic template writes', () => {
+  it('preserves the previous snapshot and cleans up when the temporary write fails', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    const file = join(dir, 'mid123.json');
+    const previous = readFileSync(file, 'utf8');
+    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
+      throw new Error('write denied');
+    });
+
+    expect(() => upsertTemplate('mid123', TMPL_B, dir)).toThrow('write denied');
+    expect(readFileSync(file, 'utf8')).toBe(previous);
+    expect(fs.readdirSync(dir)).toEqual(['mid123.json']);
+  });
+
+  it('preserves the previous snapshot and cleans up when rename fails', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    const file = join(dir, 'mid123.json');
+    const previous = readFileSync(file, 'utf8');
+    vi.mocked(fs.renameSync).mockImplementationOnce(() => {
+      throw new Error('rename denied');
+    });
+
+    expect(() => upsertTemplate('mid123', TMPL_B, dir)).toThrow('rename denied');
+    expect(readFileSync(file, 'utf8')).toBe(previous);
+    expect(fs.readdirSync(dir)).toEqual(['mid123.json']);
+  });
+
+  it('leaves no temporary file after a successful replacement', () => {
+    upsertTemplate('mid123', TMPL_A, dir);
+    upsertTemplate('mid123', TMPL_B, dir);
+
+    expect(fs.readdirSync(dir)).toEqual(['mid123.json']);
+    expect(loadTemplates('mid123', dir).templates).toEqual([TMPL_A, TMPL_B]);
   });
 });
