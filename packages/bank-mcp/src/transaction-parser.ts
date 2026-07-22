@@ -365,6 +365,7 @@ export async function applyBalanceDiffs(
       }
     } else if (c.diff !== undefined) {
       c.tx.amount = c.diff;
+      c.tx.currency = c.to;
       c.tx.amount_estimated = true;
     }
   }

@@ -492,6 +492,7 @@ describe('applyBalanceDiffs', () => {
     const failingFetcher = async () => null;
     await applyBalanceDiffs(txs, failingFetcher);
     expect(txs[2].amount).toBe(-1500); // 8450 - 9950, diff fallback
+    expect(txs[2].currency).toBe('THB');
     expect(txs[2].amount_estimated).toBe(true);
     expect(txs[2].amount_gap_suspected).toBeUndefined(); // no rate to compare against, no gap-check performed
   });
