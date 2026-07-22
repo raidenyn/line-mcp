@@ -36,12 +36,12 @@ Every package's entry point (`src/index.ts`) is **side-effect free**: importing 
 - **`client.ts`** — `LineClient` + `createLineClient()`. All LINE API logic; targets `https://line-chrome-gw.line-apps.com`, impersonating the Chrome extension (`ophjlpahpchlmihnnnihgmmeilfjmjjc`). Login flow (QR → certificate/PIN → `qrCodeLoginV2` → identity), message fetch with contact-name resolution, image download, on-demand LINE access-token refresh (per-`mid` in-flight lock).
 - **`signer.ts`** — `signForAccount()`. Loads LINE's proprietary LTSM WASM crypto module inside a `happy-dom` sandbox (lazy; first signing call only) to produce request HMACs identical to the genuine extension.
 - **`cached-message-reader.ts`** — `withMessageCache()` and the `MessageReader` / `MessageCache` ports the SQLite cache implements.
-- **`export-parser.ts`** — LINE chat-export file parsing (`parseExportFile`, `parseExportHeader`).
+- **`export-parser.ts`** — LINE chat-export file parsing (`parseExportFile`, `parseExportHeader`). Synthetic IDs hash an unambiguously framed tuple plus a per-identical-message occurrence index, preserving identical same-minute export lines while keeping reimports deterministic.
 - **`assets/ltsm/`** — vendored, proprietary LINE artifacts (`ltsm.wasm`, `ltsmSandbox.js`) plus `provenance.json` and `README.md`. **Do not edit.** See `THIRD_PARTY_NOTICES.md`: public publication is **not approved** (legal review pending). `happy-dom` is a `bundledDependencies` entry; `scripts/vendor-happy-dom.js` runs as `prepack` to vendor its real closure so `npm pack` yields a self-contained, registry-free tarball with **no** better-sqlite3.
 
 ## `@raidenyn/line-client-sqlite` (`packages/line-client-sqlite/src`)
 
-- **`sqlite-message-cache.ts`** — `SqliteMessageCache` over `better-sqlite3`: one `messages` table (`chat_mid`, `message_id`, `created_time`, `raw_json`), `INSERT OR REPLACE` dedup, index on `(chat_mid, created_time)`. Owner-scoped: the same chat/message IDs under two MIDs stay isolated. `:memory:` accepted for tests.
+- **`sqlite-message-cache.ts`** — `SqliteMessageCache` over `better-sqlite3`: one owner-scoped `messages` table (`owner_mid`, `chat_mid`, `message_id`, `created_time`, `raw_json`) with primary-key upserts and an `(owner_mid, chat_mid, created_time)` index. `importMessages` transactionally matches exact text plus UTC minute by multiplicity, while newly seen real LINE IDs replace matching `export-` rows one-for-one. Reads preserve distinct rows and perform no content deduplication. `:memory:` is accepted for tests.
 - **`migration.ts`** — one-time legacy-migration SQL primitives consumed by the server's `persistence-migration.ts`: `readLegacyMessages`, `stageLineDb`, `stageQuarantineDb`, `recoverQuarantinedMessagesSql`.
 
 ## `@raidenyn/line-mcp` (`packages/line-mcp/src`)
@@ -53,7 +53,7 @@ The messenger product and the standalone server.
 - **`tools/`** — `registerLineTools(server, context, deps)`: the five messenger tools `list_chats`, `get_messages`, `get_image`, `initiate_import`, `complete_import`.
 - **`resources.ts`** — `registerLineResources(server, { includeOverview? })`: the messenger `overview.md` (optional) plus the five messenger tool guides, read from this package's `docs/guide/`.
 - **`auth/`** — `line-auth-provider.ts` (`LineAuthProvider`, the concrete `AuthProvider<LinePrincipal>`; MID-only principals; token issuance/refresh via the codec; `seedTestToken` e2e bypass; `publicEndpointConfig`; owns the per-MID in-memory freshness map as a private instance field plus the `recordRefreshedAuth` method that updates it and `freshestCredential(mid)` for lazy disk fallback), `credential-store.ts` (purely disk-backed: `FileCredentialStore` + `StoredAuthRecord` at `data/auth/<mid>.json`, `0600`/`0700`; `loadAuthFromDisk` / `persistAuthData`), `oauth-router.ts` (discovery / `/authorize` / `/authorize/poll` / `/token`, multi-account selector).
-- **`import-service.ts`**, **`request-client.ts`**, **`sync.ts`** — chat-export upload service (OAuth-independent routes; owner-binds writes), the per-request cache-wrapping LINE client factory, and the daily background sync loop.
+- **`import-service.ts`**, **`request-client.ts`**, **`sync.ts`** — chat-export upload service (OAuth-independent routes; owner-binds writes and reports parsed versus newly imported rows), the per-request cache-wrapping LINE client factory, and the daily background sync loop.
 - **`assets/index.html`** — landing page served at `GET ${basePath}/`.
 
 ## `@raidenyn/bank-mcp` (`packages/bank-mcp/src`)
