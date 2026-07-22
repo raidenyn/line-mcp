@@ -72,14 +72,57 @@ export class SqliteMessageCache implements MessageCache {
   }
 
   upsertMessages(ownerMid: string, chatMid: string, messages: Message[]): void {
-    const stmt = this.db.prepare(
-      'INSERT OR REPLACE INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json) VALUES (?, ?, ?, ?, ?)',
-    );
-    const insertAll = this.db.transaction((msgs: Message[]) => {
-      for (const m of msgs) {
-        stmt.run(ownerMid, chatMid, m.id, parseInt(m.createdTime, 10), JSON.stringify(m));
+    const selectById = this.db.prepare(`
+      SELECT message_id, raw_json
+      FROM messages
+      WHERE owner_mid = ? AND chat_mid = ? AND message_id = ?
+    `);
+    const selectSyntheticMinute = this.db.prepare(`
+      SELECT message_id, raw_json
+      FROM messages
+      WHERE owner_mid = ? AND chat_mid = ?
+        AND message_id LIKE 'export-%'
+        AND created_time >= ? AND created_time < ?
+      ORDER BY message_id
+    `);
+    const deleteById = this.db.prepare(`
+      DELETE FROM messages
+      WHERE owner_mid = ? AND chat_mid = ? AND message_id = ?
+    `);
+    const upsert = this.db.prepare(`
+      INSERT OR REPLACE INTO messages
+        (owner_mid, chat_mid, message_id, created_time, raw_json)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    const insertAll = this.db.transaction((batch: Message[]) => {
+      for (const message of batch) {
+        const existing = selectById.get(ownerMid, chatMid, message.id) as StoredMessageRow | undefined;
+        const key = reconciliationKey(message);
+
+        if (!existing && !message.id.startsWith('export-') && key !== null) {
+          const timestamp = timestampMs(message);
+          const minuteStart = Math.floor(timestamp / 60_000) * 60_000;
+          const candidates = selectSyntheticMinute.all(
+            ownerMid,
+            chatMid,
+            minuteStart,
+            minuteStart + 60_000,
+          ) as StoredMessageRow[];
+          const match = candidates.find(row => reconciliationKey(parseStoredMessage(row)) === key);
+          if (match) deleteById.run(ownerMid, chatMid, match.message_id);
+        }
+
+        upsert.run(
+          ownerMid,
+          chatMid,
+          message.id,
+          timestampMs(message),
+          JSON.stringify(message),
+        );
       }
     });
+
     insertAll(messages);
   }
 

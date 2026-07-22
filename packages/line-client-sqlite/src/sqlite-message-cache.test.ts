@@ -1,4 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { SqliteMessageCache } from './sqlite-message-cache';
 import type { Message } from '@raidenyn/line-client';
 
@@ -195,5 +199,88 @@ describe('SqliteMessageCache owner isolation', () => {
     expect(cache.getMessages('u-owner-b', 'c-shared').map(m => m.text)).toEqual(['from B']);
     expect(cache.latestTimestamp('u-owner-a', 'c-shared')).not.toBeNull();
     expect(cache.getDistinctChatMids('u-owner-a')).toEqual(['c-shared']);
+  });
+});
+
+describe('SqliteMessageCache API reconciliation', () => {
+  it('replaces one matching synthetic row with each new real ID', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    cache.importMessages(OWNER, 'chat1', [
+      msg('export-0', '600000', 'Repeated'),
+      msg('export-1', '600000', 'Repeated'),
+    ]);
+
+    cache.upsertMessages(OWNER, 'chat1', [msg('real-0', '627000', 'Repeated')]);
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.id).sort()).toEqual([
+      'export-1',
+      'real-0',
+    ]);
+
+    cache.upsertMessages(OWNER, 'chat1', [msg('real-1', '638000', 'Repeated')]);
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.id).sort()).toEqual([
+      'real-0',
+      'real-1',
+    ]);
+  });
+
+  it('does not consume another synthetic row when a real ID is refetched', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    cache.importMessages(OWNER, 'chat1', [
+      msg('export-0', '600000', 'Repeated'),
+      msg('export-1', '600000', 'Repeated'),
+    ]);
+    const real = msg('real-0', '627000', 'Repeated');
+
+    cache.upsertMessages(OWNER, 'chat1', [real]);
+    cache.upsertMessages(OWNER, 'chat1', [real]);
+
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.id).sort()).toEqual([
+      'export-1',
+      'real-0',
+    ]);
+  });
+
+  it('never content-deduplicates two real IDs', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+
+    cache.upsertMessages(OWNER, 'chat1', [
+      msg('real-0', '627000', 'Repeated'),
+      msg('real-1', '638000', 'Repeated'),
+    ]);
+
+    expect(cache.getMessages(OWNER, 'chat1')).toHaveLength(2);
+  });
+
+  it('rolls back earlier replacements when a later stored row is invalid', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'line-cache-reconcile-'));
+    const dbPath = join(dir, 'messages.db');
+    const cache = new SqliteMessageCache({ dbPath });
+    const rawDb = new Database(dbPath);
+    try {
+      cache.importMessages(OWNER, 'chat1', [
+        msg('export-valid', '600000', 'First'),
+      ]);
+      rawDb.prepare(`
+        INSERT INTO messages (owner_mid, chat_mid, message_id, created_time, raw_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(OWNER, 'chat1', 'export-invalid', 660000, '{invalid-json');
+
+      expect(() => cache.upsertMessages(OWNER, 'chat1', [
+        msg('real-first', '627000', 'First'),
+        msg('real-second', '687000', 'Second'),
+      ])).toThrow();
+
+      const ids = (rawDb.prepare(`
+        SELECT message_id FROM messages
+        WHERE owner_mid = ? AND chat_mid = ?
+        ORDER BY message_id
+      `).all(OWNER, 'chat1') as Array<{ message_id: string }>)
+        .map(row => row.message_id);
+      expect(ids).toEqual(['export-invalid', 'export-valid']);
+    } finally {
+      rawDb.close();
+      cache.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
