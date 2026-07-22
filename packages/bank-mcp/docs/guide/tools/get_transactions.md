@@ -19,4 +19,6 @@ Filters combine with AND across the different filter types above; multiple value
 
 **Categorization:** Every returned transaction includes a `category` field — automatically assigned from saved categories (see `manage_categories`), or `"uncategorized"` when no category pattern matches. Categories are global, not per-chat. This applies on both the saved-templates and inline-templates code paths.
 
+**Unlabelled amounts:** Transactions that capture `amount` but no `currency` (the converted-amount pair is incomplete) keep the unlabelled amount out of the main totals. `summarize_transactions` reports these separately under `unknown_currency` and `unknown_by_group`, and a warning is appended when unlabelled amounts remain.
+
 **Avoid:** Don't call without `since` if you need complete monthly data — you will get incomplete results. Don't pass inline `templates` unless testing a new pattern; saved templates are already loaded automatically and apply `valid_from`/`valid_until` filtering per message. An invalid regex in `merchants` returns an error before any messages are fetched — check the pattern named in the error message.

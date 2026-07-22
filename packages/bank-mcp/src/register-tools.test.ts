@@ -10,6 +10,7 @@ import { registerBankResources } from './resources';
 import { TemplateStore } from './template-store';
 import { CategoryStore } from './category-store';
 import { PresetStore } from './preset-store';
+import { buildAmountWarnings } from './tools/fetch-transactions';
 
 // ─── Minimal fakes ─────────────────────────────────────────────────────────
 // A fake server that just captures the tool/resource handlers registered
@@ -65,11 +66,10 @@ function makeContext(): RequestContext<Principal> {
   };
 }
 
-function makeDeps(): BankToolDeps<Principal> {
-  const messagesByPrincipal: Record<string, Message[]> = {
-    'user-a': [textMsg('a1', 'SPENT THB 100.00 at StoreA', '1000')],
-    'user-b': [textMsg('b1', 'SPENT THB 200.00 at StoreB', '2000')],
-  };
+function makeDeps(messagesByPrincipal: Record<string, Message[]> = {
+  'user-a': [textMsg('a1', 'SPENT THB 100.00 at StoreA', '1000')],
+  'user-b': [textMsg('b1', 'SPENT THB 200.00 at StoreB', '2000')],
+}): BankToolDeps<Principal> {
   return {
     createMessageReader: async (p: Principal) => {
       readerCreations.push(p.subject);
@@ -150,6 +150,62 @@ describe('registerBankTools', () => {
     // A fresh reader was created per principal invocation — the per-owner seam.
     expect(readerCreations).toContain('user-a');
     expect(readerCreations).toContain('user-b');
+  });
+
+  it('warns both transaction tools and summarizes unlabelled amounts separately', async () => {
+    const server = new FakeServer();
+    const deps = makeDeps({
+      'user-a': [textMsg('a1', 'FX USD 50 CHARGED 1750', '1782864000000')],
+    });
+    registerBankTools(server as unknown as McpServer, makeContext(), deps);
+
+    const saved = await server.tools.get('manage_templates')!({
+      chatMid: 'chatX',
+      action: 'upsert',
+      template: {
+        name: 'unlabelled-fx',
+        pattern: 'FX (?<original_currency>USD) (?<original_amount>[\\d.]+) CHARGED (?<amount>[\\d.]+)',
+        amount_sign: 'debit',
+      },
+    });
+    expect(saved.isError).toBeFalsy();
+
+    const warning = '1 transaction(s) have an amount with unknown currency; summaries report these amounts separately under unknown_currency and unknown_by_group.';
+    const transactions = await server.tools.get('get_transactions')!({ chatMid: 'chatX' });
+    expect(transactions.isError).toBeFalsy();
+    expect(transactions.content[0].text).toContain(warning);
+
+    const summary = await server.tools.get('summarize_transactions')!({
+      chatMid: 'chatX',
+      group_by: 'month',
+    });
+    expect(summary.isError).toBeFalsy();
+    expect(summary.content[0].text).toContain(warning);
+    expect(parsePayload(summary.content[0].text)).toMatchObject({
+      total_debit: 0,
+      currency: 'none',
+      unknown_currency: {
+        total_debit: 1750,
+        transactions_count: 1,
+      },
+    });
+  });
+
+  it('does not warn when a derived amount has its balance currency', () => {
+    expect(buildAmountWarnings([
+      {
+        id: 'm1',
+        date: '2026-06-01T00:00:00.000Z',
+        original_amount: -50,
+        original_currency: 'USD',
+        amount: -1750,
+        currency: 'THB',
+        amount_estimated: true,
+        rawText: '',
+      },
+    ])).not.toContain(
+      '1 transaction(s) have an amount with unknown currency; summaries report these amounts separately under unknown_currency and unknown_by_group.',
+    );
   });
 });
 

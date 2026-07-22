@@ -43,15 +43,21 @@ export function loadTemplates(
   const rawAliases: Record<string, string> = raw.currency_aliases ?? {};
   const rawTemplates: NamedTemplate[] = raw.templates ?? [];
   const migrated = rawTemplates.map((t) => {
-    const newPattern = t.pattern
-      .replace(/\(\?<amount>/g, '(?<original_amount>')
-      .replace(/\(\?<currency>/g, '(?<original_currency>');
+    let newPattern = t.pattern;
+    // Only rename old group names to new ones if the new name isn't already present,
+    // otherwise we'd create duplicate named capture groups (invalid regex).
+    if (!/\(\?<original_amount>/.test(newPattern)) {
+      newPattern = newPattern.replace(/\(\?<amount>/g, '(?<original_amount>');
+    }
+    if (!/\(\?<original_currency>/.test(newPattern)) {
+      newPattern = newPattern.replace(/\(\?<currency>/g, '(?<original_currency>');
+    }
     return newPattern === t.pattern ? t : { ...t, pattern: newPattern };
   });
   if (migrated.some((t, i) => t !== rawTemplates[i])) {
     writeTemplates(chatMid, migrated, rawAliases, storeDir);
     process.stderr.write(
-      `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
+      `[LINE] Migrated template patterns for chat ${chatMid}: renamed legacy capture group names where safe\n`,
     );
   }
   return { templates: migrated, currency_aliases: rawAliases };

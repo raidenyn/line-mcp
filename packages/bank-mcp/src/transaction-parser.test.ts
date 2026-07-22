@@ -149,6 +149,13 @@ describe('summarize', () => {
     expect(result.by_group['2026-06'].credit).toBe(50);
     expect(result.by_group['2026-07'].debit).toBe(300);
     expect(result.currency).toBe('THB');
+    expect(result.unknown_currency).toEqual({
+      total_debit: 0,
+      total_credit: 0,
+      net: 0,
+      transactions_count: 0,
+    });
+    expect(result.unknown_by_group).toEqual({});
   });
 
   it('groups by merchant', () => {
@@ -236,6 +243,133 @@ describe('summarize', () => {
     expect(result.by_group['Food'].debit).toBe(100);
     expect(result.by_group['Transport'].debit).toBe(200);
     expect(result.by_group['uncategorized'].debit).toBe(50);
+  });
+
+  it('separates an unlabelled amount even when it equals original_amount', () => {
+    const result = summarize([
+      {
+        id: 'm1',
+        date: '2026-06-01T00:00:00.000Z',
+        original_amount: -100,
+        original_currency: 'THB',
+        amount: -100,
+        rawText: '',
+      },
+    ], 'month');
+
+    expect(result.total_debit).toBe(0);
+    expect(result.by_group).toEqual({});
+    expect(result.currency).toBe('none');
+    expect(result.transactions_count).toBe(1);
+    expect(result.unknown_currency).toEqual({
+      total_debit: 100,
+      total_credit: 0,
+      net: -100,
+      transactions_count: 1,
+    });
+    expect(result.unknown_by_group).toEqual({
+      '2026-06': { debit: 100, credit: 0, count: 1 },
+    });
+  });
+
+  it('keeps unlabelled converted amounts out of original-currency totals', () => {
+    const result = summarize([
+      {
+        id: 'm1',
+        date: '2026-06-01T00:00:00.000Z',
+        original_amount: -50,
+        original_currency: 'USD',
+        amount: -1750,
+        merchant: 'Store',
+        rawText: '',
+      },
+    ], 'merchant');
+
+    expect(result.total_debit).toBe(0);
+    expect(result.currency).toBe('none');
+    expect(result.unknown_currency.total_debit).toBe(1750);
+    expect(result.unknown_currency.net).toBe(-1750);
+    expect(result.unknown_by_group).toEqual({
+      Store: { debit: 1750, credit: 0, count: 1 },
+    });
+  });
+
+  it('aggregates known and unknown amounts independently within groups', () => {
+    const result = summarize([
+      {
+        id: 'm1', date: '2026-06-01T00:00:00.000Z',
+        original_amount: -100, original_currency: 'THB', rawText: '',
+      },
+      {
+        id: 'm2', date: '2026-06-02T00:00:00.000Z',
+        original_amount: -50, original_currency: 'USD',
+        amount: -1750, rawText: '',
+      },
+      {
+        id: 'm3', date: '2026-06-03T00:00:00.000Z',
+        original_amount: 20, original_currency: 'THB',
+        amount: 700, rawText: '',
+      },
+    ], 'month');
+
+    expect(result).toMatchObject({
+      total_debit: 100,
+      total_credit: 0,
+      net: -100,
+      by_group: {
+        '2026-06': { debit: 100, credit: 0, count: 1 },
+      },
+      currency: 'THB',
+      transactions_count: 3,
+      unknown_currency: {
+        total_debit: 1750,
+        total_credit: 700,
+        net: -1050,
+        transactions_count: 2,
+      },
+      unknown_by_group: {
+        '2026-06': { debit: 1750, credit: 700, count: 2 },
+      },
+    });
+  });
+
+  it.each([
+    ['month', '2026-06'],
+    ['merchant', 'Cafe'],
+    ['category', 'Food'],
+  ] as const)('routes unknown amounts through %s grouping after date filtering', (groupBy, key) => {
+    const result = summarize([
+      {
+        id: 'old', date: '2026-05-01T00:00:00.000Z',
+        original_amount: -1, original_currency: 'USD', amount: -35,
+        merchant: 'Cafe', category: 'Food', rawText: '',
+      },
+      {
+        id: 'included', date: '2026-06-01T00:00:00.000Z',
+        original_amount: -2, original_currency: 'USD', amount: -70,
+        merchant: 'Cafe', category: 'Food', rawText: '',
+      },
+    ], groupBy, '2026-06-01', '2026-06-30');
+
+    expect(result.transactions_count).toBe(1);
+    expect(result.unknown_by_group).toEqual({
+      [key]: { debit: 70, credit: 0, count: 1 },
+    });
+  });
+
+  it('uses original pair when amount is absent even if currency is orphaned', () => {
+    const result = summarize([
+      {
+        id: 'm1', date: '2026-06-01T00:00:00.000Z',
+        original_amount: -100, original_currency: 'THB',
+        currency: 'USD', rawText: '',
+      },
+    ], 'month');
+
+    expect(result.total_debit).toBe(100);
+    expect(result.currency).toBe('THB');
+    expect(result.unknown_currency.transactions_count).toBe(0);
+    expect(result.unknown_by_group).toEqual({});
   });
 });
 
@@ -373,6 +507,7 @@ describe('applyBalanceDiffs', () => {
     const failingFetcher = async () => null;
     await applyBalanceDiffs(txs, failingFetcher);
     expect(txs[2].amount).toBe(-1500); // 8450 - 9950, diff fallback
+    expect(txs[2].currency).toBe('THB');
     expect(txs[2].amount_estimated).toBe(true);
     expect(txs[2].amount_gap_suspected).toBeUndefined(); // no rate to compare against, no gap-check performed
   });

@@ -244,6 +244,24 @@ describe('loadTemplates migration', () => {
     );
   });
 
+  it('does not rename (?<amount> when (?<original_amount> already exists (prevents duplicate groups)', () => {
+    const migrateDir = mkdtempSync(join(tmpdir(), 'bank-tmpl-migrate-'));
+    writeFileSync(
+      join(migrateDir, 'mid123.json'),
+      JSON.stringify({
+        templates: [{
+          name: 'fx',
+          pattern: 'FX (?<original_currency>USD) (?<original_amount>[\\d.]+) CHARGED (?<amount>[\\d.]+)',
+        }],
+      }),
+    );
+    const { templates } = loadTemplates('mid123', migrateDir);
+    expect(templates[0].pattern).toBe(
+      'FX (?<original_currency>USD) (?<original_amount>[\\d.]+) CHARGED (?<amount>[\\d.]+)',
+    );
+    rmSync(migrateDir, { recursive: true, force: true });
+  });
+
   it('throws and preserves the legacy snapshot when migration rename fails', () => {
     const file = join(dir, 'mid123.json');
     const legacy = JSON.stringify({

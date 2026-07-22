@@ -185,6 +185,13 @@ export interface SummaryOutput {
   by_group: Record<string, { debit: number; credit: number; count: number }>;
   currency: string;
   transactions_count: number;
+  unknown_currency: {
+    total_debit: number;
+    total_credit: number;
+    net: number;
+    transactions_count: number;
+  };
+  unknown_by_group: Record<string, { debit: number; credit: number; count: number }>;
 }
 
 export function summarize(
@@ -200,18 +207,37 @@ export function summarize(
   }
 
   const byGroup: Record<string, { debit: number; credit: number; count: number }> = {};
+  const unknownByGroup: Record<string, { debit: number; credit: number; count: number }> = {};
   let total_debit = 0;
   let total_credit = 0;
+  let unknownDebit = 0;
+  let unknownCredit = 0;
+  let unknownCount = 0;
 
   for (const tx of filtered) {
     const key =
       groupBy === 'month'
-        ? tx.date.slice(0, 7) // "YYYY-MM"
+        ? tx.date.slice(0, 7)
         : groupBy === 'merchant'
         ? (tx.merchant ?? 'unknown')
         : (tx.category ?? 'uncategorized');
-
+    const hasUnknownCurrency = tx.amount !== undefined && tx.currency === undefined;
     const effectiveAmount = tx.amount !== undefined ? tx.amount : tx.original_amount;
+
+    if (hasUnknownCurrency) {
+      if (!unknownByGroup[key]) unknownByGroup[key] = { debit: 0, credit: 0, count: 0 };
+      if (effectiveAmount < 0) {
+        const abs = Math.abs(effectiveAmount);
+        unknownByGroup[key].debit += abs;
+        unknownDebit += abs;
+      } else {
+        unknownByGroup[key].credit += effectiveAmount;
+        unknownCredit += effectiveAmount;
+      }
+      unknownByGroup[key].count++;
+      unknownCount++;
+      continue;
+    }
 
     if (!byGroup[key]) byGroup[key] = { debit: 0, credit: 0, count: 0 };
     if (effectiveAmount < 0) {
@@ -227,11 +253,9 @@ export function summarize(
 
   const currencies = [
     ...new Set(
-      filtered.map((tx) =>
-        tx.amount !== undefined
-          ? (tx.currency ?? tx.original_currency)
-          : tx.original_currency,
-      ),
+      filtered
+        .filter((tx) => tx.amount === undefined || tx.currency !== undefined)
+        .map((tx) => tx.amount !== undefined ? tx.currency! : tx.original_currency),
     ),
   ];
   const currency =
@@ -244,6 +268,13 @@ export function summarize(
     by_group: byGroup,
     currency,
     transactions_count: filtered.length,
+    unknown_currency: {
+      total_debit: unknownDebit,
+      total_credit: unknownCredit,
+      net: unknownCredit - unknownDebit,
+      transactions_count: unknownCount,
+    },
+    unknown_by_group: unknownByGroup,
   };
 }
 
@@ -334,6 +365,7 @@ export async function applyBalanceDiffs(
       }
     } else if (c.diff !== undefined) {
       c.tx.amount = c.diff;
+      c.tx.currency = c.to;
       c.tx.amount_estimated = true;
     }
   }

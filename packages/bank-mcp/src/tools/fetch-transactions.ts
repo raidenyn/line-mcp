@@ -26,6 +26,14 @@ export function buildAmountWarnings(transactions: Transaction[]): string[] {
       `${gapSuspectedCount} transaction(s) show a balance change that doesn't reconcile with their FX-converted amount — there may be other untracked activity nearby. See amount_gap_suspected field.`,
     );
   }
+  const unknownCurrencyCount = transactions.filter(
+    (t) => t.amount !== undefined && t.currency === undefined,
+  ).length;
+  if (unknownCurrencyCount > 0) {
+    warnings.push(
+      `${unknownCurrencyCount} transaction(s) have an amount with unknown currency; summaries report these amounts separately under unknown_currency and unknown_by_group.`,
+    );
+  }
   return warnings;
 }
 
