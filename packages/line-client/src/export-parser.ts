@@ -46,11 +46,16 @@ function localToUtcMs(
 }
 
 function syntheticId(
-  chatMid: string, dateStr: string, timeStr: string, senderName: string, text: string,
+  chatMid: string,
+  dateStr: string,
+  timeStr: string,
+  senderName: string,
+  text: string,
+  occurrence: number,
 ): string {
   return 'export-' + crypto
     .createHash('sha256')
-    .update(chatMid + dateStr + timeStr + senderName + text)
+    .update(JSON.stringify([chatMid, dateStr, timeStr, senderName, text, occurrence]))
     .digest('hex')
     .slice(0, 24);
 }
@@ -70,14 +75,31 @@ export function parseExportFile(text: string, chatMid: string, timezone: string)
   // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)
   const lines = text.replace(/^﻿/, '').split('\n');
   const messages: Message[] = [];
+  const occurrences = new Map<string, number>();
   let currentDate: { year: number; month: number; day: number } | null = null;
   let pending: Pending | null = null;
 
   function flush(): void {
     if (!pending) return;
     const msgText = pending.textLines.join('\n').trimEnd();
+    const identity = JSON.stringify([
+      chatMid,
+      pending.dateStr,
+      pending.timeStr,
+      pending.senderName,
+      msgText,
+    ]);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
     messages.push({
-      id: syntheticId(chatMid, pending.dateStr, pending.timeStr, pending.senderName, msgText),
+      id: syntheticId(
+        chatMid,
+        pending.dateStr,
+        pending.timeStr,
+        pending.senderName,
+        msgText,
+        occurrence,
+      ),
       from: `export:${pending.senderName}`,
       senderName: pending.senderName,
       to: chatMid,
