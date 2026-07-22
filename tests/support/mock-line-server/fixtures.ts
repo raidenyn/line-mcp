@@ -227,6 +227,13 @@ export function buildMockFixtures(input: { origin: string; epochSeconds: number 
     by_group: { '2026-07': { debit: 125.5, credit: 500, count: 2 } },
     currency: 'THB',
     transactions_count: 2,
+    unknown_currency: {
+      total_debit: 0,
+      total_credit: 0,
+      net: 0,
+      transactions_count: 0,
+    },
+    unknown_by_group: {},
   };
 
   const summaryByCategory = {
@@ -236,6 +243,13 @@ export function buildMockFixtures(input: { origin: string; epochSeconds: number 
     by_group: { 'Smoke Banking': { debit: 125.5, credit: 500, count: 2 } },
     currency: 'THB',
     transactions_count: 2,
+    unknown_currency: {
+      total_debit: 0,
+      total_credit: 0,
+      net: 0,
+      transactions_count: 0,
+    },
+    unknown_by_group: {},
   };
 
   return {
