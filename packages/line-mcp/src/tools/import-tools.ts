@@ -14,7 +14,7 @@ interface ToolTextResult {
 // Translates every ImportService.complete() outcome back into the exact
 // content/isError shape the pre-extraction inline handler produced, so this
 // is a structural move, not a behavior change.
-function translateOutcome(outcome: CompleteImportOutcome): ToolTextResult {
+export function translateOutcome(outcome: CompleteImportOutcome): ToolTextResult {
   switch (outcome.kind) {
     case 'not_found_or_expired':
       return {
@@ -84,6 +84,7 @@ function translateOutcome(outcome: CompleteImportOutcome): ToolTextResult {
           type: 'text',
           text: JSON.stringify({
             status: 'success',
+            parsed: outcome.parsed,
             imported: outcome.imported,
             chat_mid: outcome.chat_mid,
             chat_name: outcome.chat_name,
@@ -128,7 +129,7 @@ export function registerCompleteImport(
         'Complete a LINE chat export import started with initiate_import. ' +
         'Always ask the user for their timezone (IANA name, e.g. "Asia/Bangkok") before calling if not already known. ' +
         'Returns status "needs_info" when chat_mid or timezone are required — ask the user and retry. ' +
-        'Returns status "success" with import count and date range when done.',
+        'Returns status "success" with parsed and newly imported counts plus the date range when done.',
       inputSchema: {
         file_ref_id: z.string().describe('From the curl response after uploading to upload_url'),
         timezone: z.string().optional().describe('IANA timezone name, e.g. "Asia/Bangkok". Ask the user explicitly.'),

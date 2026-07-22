@@ -56,6 +56,7 @@ export type CompleteImportOutcome =
   | { kind: 'import_failed'; error: string }
   | {
       kind: 'success';
+      parsed: number;
       imported: number;
       chat_mid: string;
       chat_name: string;
@@ -215,7 +216,11 @@ export class ImportService {
       const messages = this.parseFile(content, resolvedMid, timezone);
       // Owner-scoped write: always the completing principal's mid, never a
       // value read out of the uploaded file or request body.
-      this.options.cache.upsertMessages(principal.mid, resolvedMid, messages);
+      const { imported } = this.options.cache.importMessages(
+        principal.mid,
+        resolvedMid,
+        messages,
+      );
       this.pendingFiles.delete(file_ref_id); // clean up after success
 
       const timestamps = messages.map((m) => parseInt(m.createdTime, 10)).filter(Number.isFinite);
@@ -228,7 +233,8 @@ export class ImportService {
 
       return {
         kind: 'success',
-        imported: messages.length,
+        parsed: messages.length,
+        imported,
         chat_mid: resolvedMid,
         chat_name: chatName,
         date_range: dateRange,

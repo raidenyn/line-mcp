@@ -12,16 +12,17 @@ function principal(mid: string): LinePrincipal {
   return { provider: 'line', subject: mid, mid, scopes: ['line'] };
 }
 
-function fakeCache(): MessageCache & { upserts: Array<{ ownerMid: string; chatMid: string; messages: Message[] }> } {
-  const upserts: Array<{ ownerMid: string; chatMid: string; messages: Message[] }> = [];
+function fakeCache(): MessageCache & {
+  imports: Array<{ ownerMid: string; chatMid: string; messages: Message[] }>;
+} {
+  const imports: Array<{ ownerMid: string; chatMid: string; messages: Message[] }> = [];
   return {
-    upserts,
-    upsertMessages: vi.fn((ownerMid: string, chatMid: string, messages: Message[]) => {
-      upserts.push({ ownerMid, chatMid, messages });
+    imports,
+    upsertMessages: vi.fn(),
+    importMessages: vi.fn((ownerMid: string, chatMid: string, messages: Message[]) => {
+      imports.push({ ownerMid, chatMid, messages });
+      return { imported: messages.length };
     }),
-    importMessages: vi.fn((_ownerMid: string, _chatMid: string, messages: Message[]) => ({
-      imported: messages.length,
-    })),
     getMessages: vi.fn(() => []),
     latestTimestamp: vi.fn(() => null),
     getDistinctChatMids: vi.fn(() => []),
@@ -254,9 +255,38 @@ describe('ImportService — owner-scoped completion writes', () => {
     })();
 
     expect(outcome.kind).toBe('success');
-    expect(cache.upserts).toHaveLength(1);
-    expect(cache.upserts[0].ownerMid).toBe('owner-mid');
-    expect(cache.upserts[0].chatMid).toBe('target-chat');
+    expect(cache.imports).toHaveLength(1);
+    expect(cache.imports[0].ownerMid).toBe('owner-mid');
+    expect(cache.imports[0].chatMid).toBe('target-chat');
+  });
+
+  it('reports parsed rows separately from newly imported rows', async () => {
+    const cache = fakeCache();
+    vi.mocked(cache.importMessages).mockReturnValue({ imported: 1 });
+    const { service } = makeService({ cache });
+    const app = express();
+    service.mountRoutes(app);
+    const { url, close } = await listen(app);
+    try {
+      const { upload_url } = service.initiate(principal('owner-mid'), makeFakeExpressRequest());
+      const token = new URL(upload_url).searchParams.get('token')!;
+      const uploadRes = await fetch(`${url}/import-upload?token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: SAMPLE_EXPORT,
+      });
+      const { file_ref_id } = await uploadRes.json();
+
+      const outcome = await service.complete(principal('owner-mid'), {
+        file_ref_id,
+        timezone: 'UTC',
+        chat_mid: 'target-chat',
+      });
+
+      expect(outcome).toMatchObject({ kind: 'success', parsed: 3, imported: 1 });
+    } finally {
+      await close();
+    }
   });
 });
 
