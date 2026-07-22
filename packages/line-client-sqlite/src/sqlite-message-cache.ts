@@ -154,6 +154,9 @@ export class SqliteMessageCache implements MessageCache {
     `);
 
     const reconcile = this.db.transaction((batch: Message[]): ImportMessagesResult => {
+      // Load all existing rows in the batch's minute range at once — O(existing + parsed),
+      // not quadratic. A full-history export spans the whole chat, which is intentional:
+      // multiplicity matching needs every existing occurrence for each reconciliation key.
       const rangeRows = selectRange.all(
         ownerMid,
         chatMid,
@@ -173,13 +176,17 @@ export class SqliteMessageCache implements MessageCache {
 
       for (const message of batch) {
         if (!existingById.has(message.id)) continue;
-        upsert.run(
-          ownerMid,
-          chatMid,
-          message.id,
-          timestampMs(message),
-          JSON.stringify(message),
-        );
+        const existingRow = existingById.get(message.id)!;
+        const payload = JSON.stringify(message);
+        if (existingRow.raw_json !== payload) {
+          upsert.run(
+            ownerMid,
+            chatMid,
+            message.id,
+            timestampMs(message),
+            payload,
+          );
+        }
         consumedExistingIds.add(message.id);
         consumedParsedIds.add(message.id);
       }

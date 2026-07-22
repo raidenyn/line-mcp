@@ -240,6 +240,24 @@ describe('SqliteMessageCache API reconciliation', () => {
     ]);
   });
 
+  it('replaces two synthetic rows in one batch with two new real IDs sharing a key', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    cache.importMessages(OWNER, 'chat1', [
+      msg('export-0', '600000', 'Repeated'),
+      msg('export-1', '600000', 'Repeated'),
+    ]);
+
+    cache.upsertMessages(OWNER, 'chat1', [
+      msg('real-0', '627000', 'Repeated'),
+      msg('real-1', '638000', 'Repeated'),
+    ]);
+
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.id).sort()).toEqual([
+      'real-0',
+      'real-1',
+    ]);
+  });
+
   it('never content-deduplicates two real IDs', () => {
     const cache = new SqliteMessageCache({ dbPath: ':memory:' });
 
