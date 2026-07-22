@@ -356,6 +356,21 @@ describe('summarize', () => {
       [key]: { debit: 70, credit: 0, count: 1 },
     });
   });
+
+  it('uses original pair when amount is absent even if currency is orphaned', () => {
+    const result = summarize([
+      {
+        id: 'm1', date: '2026-06-01T00:00:00.000Z',
+        original_amount: -100, original_currency: 'THB',
+        currency: 'USD', rawText: '',
+      },
+    ], 'month');
+
+    expect(result.total_debit).toBe(100);
+    expect(result.currency).toBe('THB');
+    expect(result.unknown_currency.transactions_count).toBe(0);
+    expect(result.unknown_by_group).toEqual({});
+  });
 });
 
 describe('applyBalanceDiffs', () => {

@@ -57,7 +57,7 @@ export function loadTemplates(
   if (migrated.some((t, i) => t !== rawTemplates[i])) {
     writeTemplates(chatMid, migrated, rawAliases, storeDir);
     process.stderr.write(
-      `[LINE] Migrated template patterns for chat ${chatMid}: renamed (?<amount>→(?<original_amount>), (?<currency>→(?<original_currency>)\n`,
+      `[LINE] Migrated template patterns for chat ${chatMid}: renamed legacy capture group names where safe\n`,
     );
   }
   return { templates: migrated, currency_aliases: rawAliases };
