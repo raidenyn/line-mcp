@@ -129,11 +129,16 @@ messages.
 1. Group parsed messages by reconciliation key while preserving parser order
    within each group.
 2. Load existing rows for the same owner and chat that can match the imported
-   minute range, parse their `raw_json`, and count them by reconciliation key.
-3. For each group, consume existing rows one-for-one from the start of the
+   minute range, plus any rows whose IDs equal parsed IDs, and parse their
+   `raw_json`.
+3. Match parsed rows to existing rows by exact message ID first. Refresh each
+   exact-ID row with the parsed payload, then mark both occurrences consumed.
+   These updates are not newly imported rows.
+4. Group the unconsumed existing rows by reconciliation key. For each parsed
+   group, consume unconsumed existing rows one-for-one from the start of the
    parsed group.
-4. Insert the remaining parsed occurrences using their deterministic IDs.
-5. Return the number of newly inserted rows after the transaction commits.
+5. Insert the remaining parsed occurrences using their deterministic IDs.
+6. Return the number of newly inserted rows after the transaction commits.
 
 Both existing real rows and existing synthetic rows consume occurrences. This
 provides these multiplicity rules:
@@ -155,8 +160,9 @@ count. Reimporting historical files after upgrading therefore does not add a
 second set merely because the new parser generates different IDs.
 
 If a deterministic ID already exists but its stored payload differs, the
-operation may refresh that row without counting it as newly imported. This
-retains normal upsert behavior without overstating storage growth.
+operation refreshes that row without counting it as newly imported. Matching
+exact IDs before content multiplicity ensures one existing row cannot consume
+two parsed occurrences.
 
 ## API Reconciliation
 
