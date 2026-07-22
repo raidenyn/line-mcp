@@ -47,36 +47,90 @@ describe('SqliteMessageCache.getMessages', () => {
   });
 });
 
-describe('SqliteMessageCache.getMessages deduplication', () => {
-  it('returns one entry when export and API messages have same text in same minute', () => {
+describe('SqliteMessageCache.getMessages message multiplicity', () => {
+  it('returns distinct real IDs with identical text in the same minute', () => {
     const cache = new SqliteMessageCache({ dbPath: ':memory:' });
-    const minute = 60000;
-    // export entry: synthetic ID, timestamp at minute boundary
-    const exportMsg = msg('export-abc123', String(10 * minute), 'You spent THB 100 at Store');
-    // API entry: numeric ID, timestamp a few seconds later within same minute
-    const apiMsg = msg('987654321', String(10 * minute + 27000), 'You spent THB 100 at Store');
-    cache.upsertMessages(OWNER, 'chat1', [exportMsg, apiMsg]);
-    expect(cache.getMessages(OWNER, 'chat1')).toHaveLength(1);
-  });
-
-  it('keeps both entries when same text falls in different minutes', () => {
-    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
-    const minute = 60000;
     cache.upsertMessages(OWNER, 'chat1', [
-      msg('1', String(10 * minute), 'Hello'),
-      msg('2', String(11 * minute), 'Hello'),
+      msg('real-1', '600000', 'Repeated'),
+      msg('real-2', '627000', 'Repeated'),
     ]);
+
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.id)).toEqual([
+      'real-1',
+      'real-2',
+    ]);
+  });
+});
+
+describe('SqliteMessageCache.importMessages', () => {
+  it('stores identical imported occurrences and makes reimport idempotent', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    const imported = [
+      msg('export-first', '600000', 'Repeated'),
+      msg('export-second', '600000', 'Repeated'),
+    ];
+
+    expect(cache.importMessages(OWNER, 'chat1', imported)).toEqual({ imported: 2 });
+    expect(cache.importMessages(OWNER, 'chat1', imported)).toEqual({ imported: 0 });
     expect(cache.getMessages(OWNER, 'chat1')).toHaveLength(2);
   });
 
-  it('keeps both entries when text differs within same minute', () => {
+  it('adds only occurrences beyond existing real and legacy synthetic rows', () => {
     const cache = new SqliteMessageCache({ dbPath: ':memory:' });
-    const minute = 60000;
     cache.upsertMessages(OWNER, 'chat1', [
-      msg('1', String(10 * minute), 'Spent 100'),
-      msg('2', String(10 * minute + 5000), 'Spent 200'),
+      msg('real-1', '627000', 'Repeated'),
+      msg('export-legacy-hash', '600000', 'Repeated'),
     ]);
-    expect(cache.getMessages(OWNER, 'chat1')).toHaveLength(2);
+
+    const result = cache.importMessages(OWNER, 'chat1', [
+      msg('export-new-0', '600000', 'Repeated'),
+      msg('export-new-1', '600000', 'Repeated'),
+      msg('export-new-2', '600000', 'Repeated'),
+    ]);
+
+    expect(result).toEqual({ imported: 1 });
+    expect(cache.getMessages(OWNER, 'chat1')).toHaveLength(3);
+  });
+
+  it('matches exact IDs first and refreshes them without double-consuming', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    cache.upsertMessages(OWNER, 'chat1', [
+      msg('export-same', '540000', 'Old text'),
+    ]);
+
+    const result = cache.importMessages(OWNER, 'chat1', [
+      msg('export-same', '600000', 'Repeated'),
+      msg('export-other', '600000', 'Repeated'),
+    ]);
+
+    expect(result).toEqual({ imported: 1 });
+    expect(cache.getMessages(OWNER, 'chat1').map(message => message.text)).toEqual([
+      'Repeated',
+      'Repeated',
+    ]);
+  });
+
+  it('does not match equal text in different minutes', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    cache.upsertMessages(OWNER, 'chat1', [msg('real-1', '600000', 'Repeated')]);
+
+    expect(cache.importMessages(OWNER, 'chat1', [
+      msg('export-next-minute', '660000', 'Repeated'),
+    ])).toEqual({ imported: 1 });
+  });
+
+  it('rolls back the entire import when a later message cannot be serialized', () => {
+    const cache = new SqliteMessageCache({ dbPath: ':memory:' });
+    const invalid = msg('export-invalid', '660000', 'Second');
+    const metadata: Record<string, string> = {};
+    (metadata as Record<string, unknown>)['self'] = metadata;
+    invalid.contentMetadata = metadata;
+
+    expect(() => cache.importMessages(OWNER, 'chat1', [
+      msg('export-valid', '600000', 'First'),
+      invalid,
+    ])).toThrow();
+    expect(cache.getMessages(OWNER, 'chat1')).toEqual([]);
   });
 });
 

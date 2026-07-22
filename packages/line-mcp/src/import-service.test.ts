@@ -19,6 +19,9 @@ function fakeCache(): MessageCache & { upserts: Array<{ ownerMid: string; chatMi
     upsertMessages: vi.fn((ownerMid: string, chatMid: string, messages: Message[]) => {
       upserts.push({ ownerMid, chatMid, messages });
     }),
+    importMessages: vi.fn((_ownerMid: string, _chatMid: string, messages: Message[]) => ({
+      imported: messages.length,
+    })),
     getMessages: vi.fn(() => []),
     latestTimestamp: vi.fn(() => null),
     getDistinctChatMids: vi.fn(() => []),

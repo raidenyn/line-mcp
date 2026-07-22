@@ -1,7 +1,26 @@
 import Database from 'better-sqlite3';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
-import type { Message, MessageCache } from '@raidenyn/line-client';
+import type { ImportMessagesResult, Message, MessageCache } from '@raidenyn/line-client';
+
+interface StoredMessageRow {
+  message_id: string;
+  raw_json: string;
+}
+
+function timestampMs(message: Message): number {
+  return parseInt(message.createdTime, 10);
+}
+
+function reconciliationKey(message: Message): string | null {
+  const timestamp = timestampMs(message);
+  if (!Number.isFinite(timestamp) || typeof message.text !== 'string') return null;
+  return JSON.stringify([Math.floor(timestamp / 60_000), message.text]);
+}
+
+function parseStoredMessage(row: StoredMessageRow): Message {
+  return JSON.parse(row.raw_json) as Message;
+}
 
 /**
  * SQLite-backed implementation of the `MessageCache` interface
@@ -64,6 +83,96 @@ export class SqliteMessageCache implements MessageCache {
     insertAll(messages);
   }
 
+  importMessages(
+    ownerMid: string,
+    chatMid: string,
+    messages: Message[],
+  ): ImportMessagesResult {
+    if (messages.length === 0) return { imported: 0 };
+
+    const times = messages.map(timestampMs);
+    const rangeStart = Math.floor(Math.min(...times) / 60_000) * 60_000;
+    const rangeEnd = (Math.floor(Math.max(...times) / 60_000) + 1) * 60_000;
+    const selectRange = this.db.prepare(`
+      SELECT message_id, raw_json
+      FROM messages
+      WHERE owner_mid = ? AND chat_mid = ?
+        AND created_time >= ? AND created_time < ?
+    `);
+    const selectById = this.db.prepare(`
+      SELECT message_id, raw_json
+      FROM messages
+      WHERE owner_mid = ? AND chat_mid = ? AND message_id = ?
+    `);
+    const upsert = this.db.prepare(`
+      INSERT OR REPLACE INTO messages
+        (owner_mid, chat_mid, message_id, created_time, raw_json)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    const reconcile = this.db.transaction((batch: Message[]): ImportMessagesResult => {
+      const rangeRows = selectRange.all(
+        ownerMid,
+        chatMid,
+        rangeStart,
+        rangeEnd,
+      ) as StoredMessageRow[];
+      const existingById = new Map(rangeRows.map(row => [row.message_id, row]));
+
+      for (const message of batch) {
+        if (existingById.has(message.id)) continue;
+        const row = selectById.get(ownerMid, chatMid, message.id) as StoredMessageRow | undefined;
+        if (row) existingById.set(row.message_id, row);
+      }
+
+      const consumedExistingIds = new Set<string>();
+      const consumedParsedIds = new Set<string>();
+
+      for (const message of batch) {
+        if (!existingById.has(message.id)) continue;
+        upsert.run(
+          ownerMid,
+          chatMid,
+          message.id,
+          timestampMs(message),
+          JSON.stringify(message),
+        );
+        consumedExistingIds.add(message.id);
+        consumedParsedIds.add(message.id);
+      }
+
+      const availableByKey = new Map<string, number>();
+      for (const row of rangeRows) {
+        if (consumedExistingIds.has(row.message_id)) continue;
+        const key = reconciliationKey(parseStoredMessage(row));
+        if (key !== null) availableByKey.set(key, (availableByKey.get(key) ?? 0) + 1);
+      }
+
+      let imported = 0;
+      for (const message of batch) {
+        if (consumedParsedIds.has(message.id)) continue;
+        const key = reconciliationKey(message);
+        const available = key === null ? 0 : (availableByKey.get(key) ?? 0);
+        if (key !== null && available > 0) {
+          availableByKey.set(key, available - 1);
+          continue;
+        }
+        upsert.run(
+          ownerMid,
+          chatMid,
+          message.id,
+          timestampMs(message),
+          JSON.stringify(message),
+        );
+        imported += 1;
+      }
+
+      return { imported };
+    });
+
+    return reconcile(messages);
+  }
+
   getMessages(ownerMid: string, chatMid: string, sinceMs?: number, untilMs?: number): Message[] {
     const conditions = ['owner_mid = ?', 'chat_mid = ?'];
     const params: unknown[] = [ownerMid, chatMid];
@@ -71,16 +180,7 @@ export class SqliteMessageCache implements MessageCache {
     if (untilMs != null) { conditions.push('created_time <= ?'); params.push(untilMs); }
     const sql = `SELECT raw_json FROM messages WHERE ${conditions.join(' AND ')} ORDER BY created_time ASC`;
     const rows = (this.db.prepare(sql).all(...params)) as { raw_json: string }[];
-    const messages = rows.map(r => JSON.parse(r.raw_json) as Message);
-    // Deduplicate export-vs-API overlap: same non-empty text within the same minute = same message
-    const seen = new Set<string>();
-    return messages.filter(m => {
-      if (!m.text) return true;
-      const key = `${Math.floor(parseInt(m.createdTime, 10) / 60000)}:${m.text}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    return rows.map(row => JSON.parse(row.raw_json) as Message);
   }
 
   latestTimestamp(ownerMid: string, chatMid: string): number | null {
