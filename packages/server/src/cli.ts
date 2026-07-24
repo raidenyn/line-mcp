@@ -20,11 +20,10 @@ function resolveDataRoot(): string {
  * Parses the BANK_REGEX_TIMEOUT_MS environment variable into a number for
  * the composed server's `ServerOptions.regexTimeoutMs`. Returns `undefined`
  * when the variable is unset (the executor's own default applies) and
- * `NaN` when set to a non-numeric value (the executor rejects NaN before
- * clamping, so a malformed env var fails closed rather than silently
- * falling back to the default). This helper only parses; it does NOT
- * clamp — `normalizeRegexTimeoutMs` in `@raidenyn/bank-mcp` remains the
- * single place that defaults (100 ms) and clamps (10–1000 ms).
+ * `NaN` when set to a non-numeric value (the executor treats NaN as the
+ * 100 ms default via `normalizeRegexTimeoutMs`). This helper only parses;
+ * it does NOT clamp — `normalizeRegexTimeoutMs` in `@raidenyn/bank-mcp`
+ * remains the single place that defaults (100 ms) and clamps (10–1000 ms).
  */
 export function resolveRegexTimeoutMs(raw: string | undefined): number | undefined {
   return raw === undefined ? undefined : Number(raw);
