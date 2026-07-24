@@ -70,6 +70,7 @@ interface PendingJob extends WorkerJob {
 interface WorkerSlot {
   worker: Worker;
   ready: boolean;
+  replacing: boolean;
   active?: PendingJob;
 }
 
@@ -79,6 +80,7 @@ export class RegexExecutor implements RegexExecutorPort {
   private readonly queue: PendingJob[] = [];
   private readonly slots: WorkerSlot[] = [];
   private readonly retirements = new Set<Promise<number>>();
+  private closePromise: Promise<void> | undefined;
   private nextId = 1;
   private closed = false;
 
@@ -150,7 +152,7 @@ export class RegexExecutor implements RegexExecutorPort {
         stackSizeMb: 4,
       },
     });
-    const slot: WorkerSlot = { worker, ready: false };
+    const slot: WorkerSlot = { worker, ready: false, replacing: false };
     this.slots[index] = slot;
 
     worker.once('online', () => {
@@ -170,7 +172,7 @@ export class RegexExecutor implements RegexExecutorPort {
   private dispatch(): void {
     if (this.closed) return;
     for (const [index, slot] of this.slots.entries()) {
-      if (!slot.ready || slot.active !== undefined) continue;
+      if (!slot.ready || slot.active !== undefined || slot.replacing) continue;
       const job = this.queue.shift();
       if (!job) return;
       slot.active = job;
@@ -216,11 +218,18 @@ export class RegexExecutor implements RegexExecutorPort {
   }
 
   private replace(index: number, worker: Worker): void {
+    const slot = this.slots[index];
+    if (slot) slot.replacing = true;
     worker.removeAllListeners();
     const termination = worker.terminate();
     this.retirements.add(termination);
-    void termination.finally(() => this.retirements.delete(termination));
-    if (!this.closed) this.spawn(index);
+    void termination
+      .catch(() => {})
+      .finally(() => {
+        this.retirements.delete(termination);
+        if (slot) slot.replacing = false;
+        if (!this.closed && this.slots[index]?.worker === worker) this.spawn(index);
+      });
   }
 
   private failure(code: RegexErrorCode, context: string, pattern: string, detail: string): RegexExecutionError {
@@ -228,21 +237,28 @@ export class RegexExecutor implements RegexExecutorPort {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
-    for (const job of this.queue.splice(0)) {
-      job.reject(this.failure('closed', job.context, job.pattern, 'executor is closed'));
-    }
-    const terminations = this.slots.map((slot) => {
-      const active = slot.active;
-      if (active?.timer) clearTimeout(active.timer);
-      if (active) {
-        active.reject(this.failure('closed', active.context, active.pattern, 'executor is closed'));
+    this.closePromise = (async () => {
+      for (const job of this.queue.splice(0)) {
+        job.reject(this.failure('closed', job.context, job.pattern, 'executor is closed'));
       }
-      slot.worker.removeAllListeners();
-      return slot.worker.terminate();
-    });
-    this.slots.length = 0;
-    await Promise.all([...terminations, ...this.retirements]);
+      const terminations: Promise<unknown>[] = [];
+      for (const slot of this.slots) {
+        const active = slot.active;
+        if (active?.timer) clearTimeout(active.timer);
+        if (active) {
+          active.reject(this.failure('closed', active.context, active.pattern, 'executor is closed'));
+        }
+        if (!slot.replacing) {
+          slot.worker.removeAllListeners();
+          terminations.push(slot.worker.terminate());
+        }
+      }
+      this.slots.length = 0;
+      await Promise.allSettled(terminations);
+      await Promise.allSettled([...this.retirements]);
+    })();
+    return this.closePromise;
   }
 }

@@ -113,4 +113,22 @@ describe('RegexExecutor', () => {
     await expect(queued).resolves.toMatchObject({ code: 'closed' });
     await expect(executor.close()).resolves.toBeUndefined();
   });
+
+  it('concurrent close calls share one shutdown promise', async () => {
+    const executor = createExecutor(1000);
+    const active = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'active')
+      .catch((error) => error);
+    const [a, b] = await Promise.all([executor.close(), executor.close()]);
+    expect(a).toBeUndefined();
+    expect(b).toBeUndefined();
+    await expect(active).resolves.toMatchObject({ code: 'closed' });
+  });
+
+  it('awaits worker termination before spawning a replacement', async () => {
+    const executor = createExecutor(10);
+    await expect(executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad'))
+      .rejects.toMatchObject({ code: 'timeout' });
+    await expect(executor.test('safe', 's', 'safe', 'good')).resolves.toBe(true);
+    await executor.close();
+  });
 });
