@@ -55,6 +55,7 @@ export function registerManageTemplates<P extends Principal>(
           return { content: [{ type: 'text' as const, text: 'template is required for action: upsert' }], isError: true };
         }
         try {
+          await deps.regex.validate(template.pattern, 's', `template "${template.name}"`);
           deps.templates.upsert(chatMid, template);
           return { content: [{ type: 'text' as const, text: `Template '${template.name}' saved for chat ${chatMid}.` }] };
         } catch (err) {
@@ -140,6 +141,13 @@ export function registerManageTemplates<P extends Principal>(
           if (!preset) {
             const available = Object.keys(deps.presets.loadAll()).join(', ') || 'none';
             return { content: [{ type: 'text' as const, text: `Preset '${preset_name}' not found. Available presets: ${available}` }], isError: true };
+          }
+          for (const tmpl of preset.templates) {
+            await deps.regex.validate(
+              tmpl.pattern,
+              's',
+              `preset "${preset_name}" template "${tmpl.name}"`,
+            );
           }
           for (const tmpl of preset.templates) {
             deps.templates.upsert(chatMid, tmpl);
