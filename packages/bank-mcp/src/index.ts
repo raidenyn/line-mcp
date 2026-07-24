@@ -61,6 +61,16 @@ export {
   type BankCategoryStagingResult,
 } from './category-migration';
 
+// ─── Bounded regex worker executor (issue #61, Task 1) ──────────────────────
+export {
+  RegexExecutor,
+  RegexExecutionError,
+  normalizeRegexTimeoutMs,
+  type RegexExecutorPort,
+  type RegexErrorCode,
+  type RegexMatch,
+} from './regex-executor';
+
 // ─── MCP tool + resource registrations ──────────────────────────────────────
 export { type BankToolDeps, registerBankTools } from './tools';
 export { type RegisterBankResourcesOptions, registerBankResources } from './resources';
