@@ -1,5 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { parseTransaction, summarize, expandUntilBound, TransactionTemplate, applyBalanceDiffs, categorize, Transaction, Category, filterTransactions, validateFilters, TransactionFilter } from './transaction-parser';
+import { RegexExecutor } from './regex-executor';
+
+let regex: RegexExecutor;
+beforeAll(() => { regex = new RegexExecutor(); });
+afterAll(async () => { await regex.close(); });
 
 const UOB_DEBIT_MSG = {
   id: 'm1',
@@ -32,8 +37,8 @@ const IMAGE_MSG = {
 };
 
 describe('parseTransaction', () => {
-  it('parses a UOB debit message', () => {
-    const tx = parseTransaction(UOB_DEBIT_MSG, UOB_TEMPLATES);
+  it('parses a UOB debit message', async () => {
+    const tx = await parseTransaction(regex, UOB_DEBIT_MSG, UOB_TEMPLATES);
     expect(tx).not.toBeNull();
     expect(tx!.original_amount).toBe(-241.5);
     expect(tx!.original_currency).toBe('THB');
@@ -43,7 +48,7 @@ describe('parseTransaction', () => {
     expect(tx!.id).toBe('m1');
   });
 
-  it('captures currency and amount from optional groups', () => {
+  it('captures currency and amount from optional groups', async () => {
     const msg = {
       id: 'fx1',
       createdTime: '1749999600000',
@@ -57,7 +62,7 @@ describe('parseTransaction', () => {
         amount_sign: 'debit',
       },
     ];
-    const tx = parseTransaction(msg, templates);
+    const tx = await parseTransaction(regex, msg, templates);
     expect(tx).not.toBeNull();
     expect(tx!.original_amount).toBe(-50);
     expect(tx!.original_currency).toBe('USD');
@@ -66,57 +71,62 @@ describe('parseTransaction', () => {
     expect(tx!.balance).toBe(50000);
   });
 
-  it('returns null for a promotional message', () => {
-    expect(parseTransaction(PROMO_MSG, UOB_TEMPLATES)).toBeNull();
+  it('returns null for a promotional message', async () => {
+    await expect(parseTransaction(regex, PROMO_MSG, UOB_TEMPLATES)).resolves.toBeNull();
   });
 
-  it('returns null for a non-text message', () => {
-    expect(parseTransaction(IMAGE_MSG, UOB_TEMPLATES)).toBeNull();
+  it('returns null for a non-text message', async () => {
+    await expect(parseTransaction(regex, IMAGE_MSG, UOB_TEMPLATES)).resolves.toBeNull();
   });
 
-  it('returns null when pattern is missing required original_amount group', () => {
+  it('returns null when pattern is missing required original_amount group', async () => {
     const badTemplates: TransactionTemplate[] = [
       { pattern: 'spent (?<original_currency>\\w+)', amount_sign: 'debit' },
     ];
-    expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
+    await expect(parseTransaction(regex, UOB_DEBIT_MSG, badTemplates)).resolves.toBeNull();
   });
 
-  it('returns null when pattern is missing required original_currency group', () => {
+  it('returns null when pattern is missing required original_currency group', async () => {
     const badTemplates: TransactionTemplate[] = [
       { pattern: 'spent (?<original_amount>[\\d.]+)', amount_sign: 'debit' },
     ];
-    expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
+    await expect(parseTransaction(regex, UOB_DEBIT_MSG, badTemplates)).resolves.toBeNull();
   });
 
-  it('returns null for an invalid regex pattern', () => {
+  it('rejects an invalid regex pattern with code "invalid"', async () => {
     const badTemplates: TransactionTemplate[] = [{ pattern: '([invalid' }];
-    expect(parseTransaction(UOB_DEBIT_MSG, badTemplates)).toBeNull();
+    await expect(parseTransaction(regex, UOB_DEBIT_MSG, badTemplates))
+      .rejects.toMatchObject({ code: 'invalid' });
   });
 
-  it('returns result (not throw) for DD/MM format with non-numeric date capture', () => {
+  it('returns result (not throw) for DD/MM format with non-numeric date capture', async () => {
     const msg = { ...UOB_DEBIT_MSG, text: 'spent 100 THB on ab/cd' };
     const templates: TransactionTemplate[] = [
       { pattern: 'spent (?<original_amount>[\\d]+) (?<original_currency>\\w+) on (?<date>.+)', date_format: 'DD/MM' },
     ];
-    expect(() => parseTransaction(msg, templates)).not.toThrow();
-    const tx = parseTransaction(msg, templates);
+    await expect(parseTransaction(regex, msg, templates)).resolves.not.toThrow();
+    const tx = await parseTransaction(regex, msg, templates);
     expect(tx).not.toBeNull();
     expect(tx!.date).toBe(new Date(parseInt(UOB_DEBIT_MSG.createdTime, 10)).toISOString());
   });
 
-  it('returns null for a pattern with nested quantifiers (ReDoS guard)', () => {
-    const dangerous: TransactionTemplate[] = [
-      { pattern: '(\\w+\\s*)+(end)?(?<original_amount>\\d+) (?<original_currency>\\w+)', amount_sign: 'debit' },
+  it('runs native-JS regex features (lookahead + backreferences) through the worker', async () => {
+    const templates: TransactionTemplate[] = [
+      { pattern: 'spend (?=\\d)(?<original_amount>\\d+) (?<original_currency>\\w+)', amount_sign: 'debit' },
     ];
-    expect(parseTransaction(UOB_DEBIT_MSG, dangerous)).toBeNull();
+    const msg = { ...UOB_DEBIT_MSG, text: 'spend 241 THB' };
+    const tx = await parseTransaction(regex, msg, templates);
+    expect(tx).not.toBeNull();
+    expect(tx!.original_amount).toBe(-241);
+    expect(tx!.original_currency).toBe('THB');
   });
 
-  it('tries subsequent templates when first does not match', () => {
+  it('tries subsequent templates when first does not match', async () => {
     const templates: TransactionTemplate[] = [
       { pattern: 'NOMATCH (?<original_amount>[\\d]+) (?<original_currency>\\w+)', amount_sign: 'debit' },
       ...UOB_TEMPLATES,
     ];
-    const tx = parseTransaction(UOB_DEBIT_MSG, templates);
+    const tx = await parseTransaction(regex, UOB_DEBIT_MSG, templates);
     expect(tx).not.toBeNull();
     expect(tx!.original_currency).toBe('THB');
   });
@@ -525,71 +535,64 @@ describe('categorize', () => {
     };
   }
 
-  it('matches against the merchant field', () => {
+  it('matches against the merchant field', async () => {
     const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
     const txs = [tx({ merchant: 'Starbucks Siam' })];
-    categorize(txs, categories);
+    await categorize(regex, txs, categories);
     expect(txs[0].category).toBe('Coffee');
   });
 
-  it('falls back to rawText when merchant is absent', () => {
+  it('falls back to rawText when merchant is absent', async () => {
     const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
     const txs = [tx({ rawText: 'You spent THB 120 at Starbucks Siam' })];
     expect(txs[0].merchant).toBeUndefined();
-    categorize(txs, categories);
+    await categorize(regex, txs, categories);
     expect(txs[0].category).toBe('Coffee');
   });
 
-  it('picks the first matching category in list order', () => {
+  it('picks the first matching category in list order', async () => {
     const categories: Category[] = [
       { name: 'Food', pattern: 'starbucks' },
       { name: 'Coffee', pattern: 'starbucks' },
     ];
     const txs = [tx({ merchant: 'Starbucks Siam' })];
-    categorize(txs, categories);
+    await categorize(regex, txs, categories);
     expect(txs[0].category).toBe('Food');
   });
 
-  it('sets uncategorized when no category matches', () => {
+  it('sets uncategorized when no category matches', async () => {
     const categories: Category[] = [{ name: 'Coffee', pattern: 'starbucks' }];
     const txs = [tx({ merchant: 'Grab' })];
-    categorize(txs, categories);
+    await categorize(regex, txs, categories);
     expect(txs[0].category).toBe('uncategorized');
   });
 
-  it('sets uncategorized when no categories are configured', () => {
+  it('sets uncategorized when no categories are configured', async () => {
     const txs = [tx({ merchant: 'Grab' })];
-    categorize(txs, []);
+    await categorize(regex, txs, []);
     expect(txs[0].category).toBe('uncategorized');
   });
 
-  it('matches case-insensitively', () => {
+  it('matches case-insensitively', async () => {
     const categories: Category[] = [{ name: 'Coffee', pattern: 'STARBUCKS' }];
     const txs = [tx({ merchant: 'starbucks siam' })];
-    categorize(txs, categories);
+    await categorize(regex, txs, categories);
     expect(txs[0].category).toBe('Coffee');
   });
 });
 
 describe('validateFilters', () => {
-  it('returns null when merchants is absent', () => {
+  it('returns null when merchants is absent', async () => {
     const filters: TransactionFilter = {};
-    expect(validateFilters(filters)).toBeNull();
+    await expect(validateFilters(regex, filters)).resolves.toBeNull();
   });
 
-  it('returns null when all merchant patterns compile', () => {
-    expect(validateFilters({ merchants: ['starbucks', 'grab.*'] })).toBeNull();
+  it('returns null when all merchant patterns compile', async () => {
+    await expect(validateFilters(regex, { merchants: ['starbucks', 'grab.*'] })).resolves.toBeNull();
   });
 
-  it('returns an error naming the bad pattern', () => {
-    const err = validateFilters({ merchants: ['starbucks', '(unclosed'] });
-    expect(err).not.toBeNull();
-    expect(err).toContain('(unclosed');
-  });
-
-  it('rejects a pattern with catastrophic-backtracking risk', () => {
-    const err = validateFilters({ merchants: ['(\\w+\\s*)+'] });
-    expect(err).not.toBeNull();
+  it('returns an error naming the bad pattern', async () => {
+    await expect(validateFilters(regex, { merchants: ['starbucks', '(unclosed'] })).resolves.toContain('(unclosed');
   });
 });
 
@@ -605,112 +608,123 @@ describe('filterTransactions', () => {
     };
   }
 
-  it('returns all transactions when no filters are given', () => {
+  it('returns all transactions when no filters are given', async () => {
     const txs = [tx({}), tx({ id: 'm2' })];
-    expect(filterTransactions(txs, {})).toHaveLength(2);
+    expect(await filterTransactions(regex, txs, {})).toHaveLength(2);
   });
 
-  it('filters by a single category', () => {
+  it('filters by a single category', async () => {
     const txs = [tx({ category: 'Coffee' }), tx({ id: 'm2', category: 'Transport' })];
-    const result = filterTransactions(txs, { categories: ['Coffee'] });
+    const result = await filterTransactions(regex, txs, { categories: ['Coffee'] });
     expect(result).toHaveLength(1);
     expect(result[0].category).toBe('Coffee');
   });
 
-  it('ORs multiple categories', () => {
+  it('ORs multiple categories', async () => {
     const txs = [
       tx({ id: 'm1', category: 'Coffee' }),
       tx({ id: 'm2', category: 'Transport' }),
       tx({ id: 'm3', category: 'Dining' }),
     ];
-    const result = filterTransactions(txs, { categories: ['Coffee', 'Dining'] });
+    const result = await filterTransactions(regex, txs, { categories: ['Coffee', 'Dining'] });
     expect(result.map((t) => t.id)).toEqual(['m1', 'm3']);
   });
 
-  it('matches the literal "uncategorized" category', () => {
+  it('matches the literal "uncategorized" category', async () => {
     const txs = [tx({ category: 'uncategorized' }), tx({ id: 'm2', category: 'Coffee' })];
-    const result = filterTransactions(txs, { categories: ['uncategorized'] });
+    const result = await filterTransactions(regex, txs, { categories: ['uncategorized'] });
     expect(result).toHaveLength(1);
     expect(result[0].category).toBe('uncategorized');
   });
 
-  it('category match is case-sensitive', () => {
+  it('category match is case-sensitive', async () => {
     const txs = [tx({ category: 'Coffee' })];
-    expect(filterTransactions(txs, { categories: ['coffee'] })).toHaveLength(0);
+    expect(await filterTransactions(regex, txs, { categories: ['coffee'] })).toHaveLength(0);
   });
 
-  it('filters by original_currencies case-insensitively', () => {
+  it('filters by original_currencies case-insensitively', async () => {
     const txs = [
       tx({ id: 'm1', original_currency: 'USD' }),
       tx({ id: 'm2', original_currency: 'THB' }),
     ];
-    const result = filterTransactions(txs, { original_currencies: ['usd'] });
+    const result = await filterTransactions(regex, txs, { original_currencies: ['usd'] });
     expect(result.map((t) => t.id)).toEqual(['m1']);
   });
 
-  it('filters by merchant regex against the merchant field', () => {
+  it('filters by merchant regex against the merchant field', async () => {
     const txs = [
       tx({ id: 'm1', merchant: 'Starbucks Siam' }),
       tx({ id: 'm2', merchant: 'Grab' }),
     ];
-    const result = filterTransactions(txs, { merchants: ['starbucks'] });
+    const result = await filterTransactions(regex, txs, { merchants: ['starbucks'] });
     expect(result.map((t) => t.id)).toEqual(['m1']);
   });
 
-  it('merchant filter falls back to rawText when merchant is absent', () => {
+  it('merchant filter falls back to rawText when merchant is absent', async () => {
     const txs = [tx({ rawText: 'You spent THB 120 at Starbucks Siam' })];
     expect(txs[0].merchant).toBeUndefined();
-    const result = filterTransactions(txs, { merchants: ['starbucks'] });
+    const result = await filterTransactions(regex, txs, { merchants: ['starbucks'] });
     expect(result).toHaveLength(1);
   });
 
-  it('ORs multiple merchant patterns', () => {
+  it('ORs multiple merchant patterns', async () => {
     const txs = [
       tx({ id: 'm1', merchant: 'Starbucks Siam' }),
       tx({ id: 'm2', merchant: 'Grab' }),
       tx({ id: 'm3', merchant: 'Netflix' }),
     ];
-    const result = filterTransactions(txs, { merchants: ['starbucks', 'grab'] });
+    const result = await filterTransactions(regex, txs, { merchants: ['starbucks', 'grab'] });
     expect(result.map((t) => t.id)).toEqual(['m1', 'm2']);
   });
 
-  it('filters by amount range using absolute value, matching debits and credits alike', () => {
+  it('filters by amount range using absolute value, matching debits and credits alike', async () => {
     const txs = [
       tx({ id: 'm1', amount: -500 }),
       tx({ id: 'm2', amount: 500 }),
       tx({ id: 'm3', amount: -50 }),
       tx({ id: 'm4', amount: 5000 }),
     ];
-    const result = filterTransactions(txs, { amount_min: 100, amount_max: 1000 });
+    const result = await filterTransactions(regex, txs, { amount_min: 100, amount_max: 1000 });
     expect(result.map((t) => t.id)).toEqual(['m1', 'm2']);
   });
 
-  it('falls back to original_amount when amount is absent', () => {
+  it('falls back to original_amount when amount is absent', async () => {
     const txs = [tx({ original_amount: -300, amount: undefined })];
-    const result = filterTransactions(txs, { amount_min: 200, amount_max: 400 });
+    const result = await filterTransactions(regex, txs, { amount_min: 200, amount_max: 400 });
     expect(result).toHaveLength(1);
   });
 
-  it('amount_min alone means "at least"', () => {
+  it('amount_min alone means "at least"', async () => {
     const txs = [tx({ id: 'm1', amount: -50 }), tx({ id: 'm2', amount: -500 })];
-    const result = filterTransactions(txs, { amount_min: 100 });
+    const result = await filterTransactions(regex, txs, { amount_min: 100 });
     expect(result.map((t) => t.id)).toEqual(['m2']);
   });
 
-  it('amount_max alone means "at most"', () => {
+  it('amount_max alone means "at most"', async () => {
     const txs = [tx({ id: 'm1', amount: -50 }), tx({ id: 'm2', amount: -500 })];
-    const result = filterTransactions(txs, { amount_max: 100 });
+    const result = await filterTransactions(regex, txs, { amount_max: 100 });
     expect(result.map((t) => t.id)).toEqual(['m1']);
   });
 
-  it('ANDs across filter types', () => {
+  it('ANDs across filter types', async () => {
     const txs = [
       tx({ id: 'm1', category: 'Coffee', original_currency: 'THB', amount: -100 }),
       tx({ id: 'm2', category: 'Coffee', original_currency: 'USD', amount: -100 }),
       tx({ id: 'm3', category: 'Transport', original_currency: 'THB', amount: -100 }),
     ];
-    const result = filterTransactions(txs, { categories: ['Coffee'], original_currencies: ['THB'] });
+    const result = await filterTransactions(regex, txs, { categories: ['Coffee'], original_currencies: ['THB'] });
     expect(result.map((t) => t.id)).toEqual(['m1']);
+  });
+
+  it('rejects a pattern with catastrophic-backtracking risk via timeout', async () => {
+    const timeoutRegex = new RegexExecutor({ timeoutMs: 10 });
+    try {
+      const txs = [tx({ rawText: `${'a'.repeat(40)}!` })];
+      await expect(filterTransactions(timeoutRegex, txs, { merchants: ['(a|aa)+$'] }))
+        .rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      await timeoutRegex.close();
+    }
   });
 });
 
@@ -727,30 +741,30 @@ describe('parseTransaction currency aliases', () => {
     date_format: 'DD/MM/YYYY',
   }];
 
-  it('normalises original_currency via aliases', () => {
-    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, { 'บาท': 'THB' });
+  it('normalises original_currency via aliases', async () => {
+    const tx = await parseTransaction(regex, SCB_MSG, SCB_TEMPLATE, { 'บาท': 'THB' });
     expect(tx).not.toBeNull();
     expect(tx!.original_currency).toBe('THB');
   });
 
-  it('passes through unrecognised currency unchanged', () => {
-    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, { 'บ': 'THB' });
+  it('passes through unrecognised currency unchanged', async () => {
+    const tx = await parseTransaction(regex, SCB_MSG, SCB_TEMPLATE, { 'บ': 'THB' });
     expect(tx).not.toBeNull();
     expect(tx!.original_currency).toBe('บาท');
   });
 
-  it('applies no aliases when aliases param is omitted', () => {
-    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE);
+  it('applies no aliases when aliases param is omitted', async () => {
+    const tx = await parseTransaction(regex, SCB_MSG, SCB_TEMPLATE);
     expect(tx).not.toBeNull();
     expect(tx!.original_currency).toBe('บาท');
   });
 
-  it('aliases empty string aliases map leaves currency unchanged', () => {
-    const tx = parseTransaction(SCB_MSG, SCB_TEMPLATE, {});
+  it('aliases empty string aliases map leaves currency unchanged', async () => {
+    const tx = await parseTransaction(regex, SCB_MSG, SCB_TEMPLATE, {});
     expect(tx!.original_currency).toBe('บาท');
   });
 
-  it('normalises currency group via aliases', () => {
+  it('normalises currency group via aliases', async () => {
     const msg = {
       id: 'fx2',
       createdTime: '1749999600000',
@@ -761,12 +775,12 @@ describe('parseTransaction currency aliases', () => {
       pattern: 'FX spend (?<original_currency>\\w+) (?<original_amount>[\\d.]+) \\((?<currency>บาท) (?<amount>[\\d.]+)\\) at .+',
       amount_sign: 'debit',
     }];
-    const tx = parseTransaction(msg, tmpl, { 'บาท': 'THB' });
+    const tx = await parseTransaction(regex, msg, tmpl, { 'บาท': 'THB' });
     expect(tx).not.toBeNull();
     expect(tx!.currency).toBe('THB');
   });
 
-  it('passes through unrecognised currency group unchanged', () => {
+  it('passes through unrecognised currency group unchanged', async () => {
     const msg = {
       id: 'fx3',
       createdTime: '1749999600000',
@@ -777,7 +791,7 @@ describe('parseTransaction currency aliases', () => {
       pattern: 'FX spend (?<original_currency>\\w+) (?<original_amount>[\\d.]+) \\((?<currency>บาท) (?<amount>[\\d.]+)\\) at .+',
       amount_sign: 'debit',
     }];
-    const tx = parseTransaction(msg, tmpl, { 'บ': 'THB' });
+    const tx = await parseTransaction(regex, msg, tmpl, { 'บ': 'THB' });
     expect(tx).not.toBeNull();
     expect(tx!.currency).toBe('บาท');
   });

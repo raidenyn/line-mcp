@@ -10,6 +10,7 @@ import { registerBankResources } from './resources';
 import { TemplateStore } from './template-store';
 import { CategoryStore } from './category-store';
 import { PresetStore } from './preset-store';
+import { RegexExecutor } from './regex-executor';
 import { buildAmountWarnings } from './tools/fetch-transactions';
 
 // ─── Minimal fakes ─────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ let templatesDir: string;
 let presetsDir: string;
 let currentPrincipal: Principal;
 let readerCreations: string[];
+let regex: RegexExecutor;
 
 function makeContext(): RequestContext<Principal> {
   return {
@@ -80,6 +82,7 @@ function makeDeps(messagesByPrincipal: Record<string, Message[]> = {
     templates: new TemplateStore(templatesDir),
     categories: new CategoryStore(':memory:'),
     presets: new PresetStore(presetsDir), // empty dir → no built-in presets
+    regex,
   };
 }
 
@@ -88,8 +91,10 @@ beforeEach(() => {
   presetsDir = mkdtempSync(join(tmpdir(), 'bank-presets-'));
   readerCreations = [];
   currentPrincipal = { subject: 'user-a', scopes: [] };
+  regex = new RegexExecutor();
 });
-afterEach(() => {
+afterEach(async () => {
+  await regex.close();
   rmSync(templatesDir, { recursive: true, force: true });
   rmSync(presetsDir, { recursive: true, force: true });
 });

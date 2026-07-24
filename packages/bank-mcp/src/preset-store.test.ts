@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadAllPresets, getPreset, detectPresets, Preset } from './preset-store';
+import { RegexExecutor } from './regex-executor';
 
 const FAKE_PRESET: Preset = {
   description: 'Test Bank notifications',
@@ -21,6 +22,9 @@ const OTHER_PRESET: Preset = {
 };
 
 let dir: string;
+let regex: RegexExecutor;
+beforeAll(() => { regex = new RegexExecutor(); });
+afterAll(async () => { await regex.close(); });
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'line-presets-')); });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -78,51 +82,51 @@ describe('detectPresets', () => {
     other: OTHER_PRESET,
   };
 
-  it('suggests a preset when a message matches preset but no saved template', () => {
+  it('suggests a preset when a message matches preset but no saved template', async () => {
     const messages = [{ text: 'TESTBANK debit 100.00 THB' }];
-    const result = detectPresets(messages, [], presets);
+    const result = await detectPresets(regex, messages, [], presets);
     expect(result).toHaveLength(1);
     expect(result[0].preset_name).toBe('testbank');
     expect(result[0].matched_count).toBe(1);
     expect(result[0].description).toBe('Test Bank notifications');
   });
 
-  it('does not suggest preset when message already matched by saved template', () => {
+  it('does not suggest preset when message already matched by saved template', async () => {
     const messages = [{ text: 'TESTBANK debit 100.00 THB' }];
     const savedTemplates = [{ pattern: 'TESTBANK debit (?<original_amount>[\\d.]+) (?<original_currency>THB)' }];
-    const result = detectPresets(messages, savedTemplates, presets);
+    const result = await detectPresets(regex, messages, savedTemplates, presets);
     expect(result).toHaveLength(0);
   });
 
-  it('counts multiple unmatched messages', () => {
+  it('counts multiple unmatched messages', async () => {
     const messages = [
       { text: 'TESTBANK debit 50.00 THB' },
       { text: 'TESTBANK debit 200.00 THB' },
       { text: 'Some promo message' },
     ];
-    const result = detectPresets(messages, [], presets);
+    const result = await detectPresets(regex, messages, [], presets);
     expect(result).toHaveLength(1);
     expect(result[0].matched_count).toBe(2);
   });
 
-  it('suggests multiple presets when different messages match different presets', () => {
+  it('suggests multiple presets when different messages match different presets', async () => {
     const messages = [
       { text: 'TESTBANK debit 50.00 THB' },
       { text: 'OTHERBANK credit 99.00 USD' },
     ];
-    const result = detectPresets(messages, [], presets);
+    const result = await detectPresets(regex, messages, [], presets);
     expect(result).toHaveLength(2);
     const names = result.map(r => r.preset_name).sort();
     expect(names).toEqual(['other', 'testbank']);
   });
 
-  it('does not suggest preset when message has no text', () => {
+  it('does not suggest preset when message has no text', async () => {
     const messages = [{ text: undefined }];
-    const result = detectPresets(messages, [], presets);
+    const result = await detectPresets(regex, messages, [], presets);
     expect(result).toHaveLength(0);
   });
 
-  it('skips preset patterns that are invalid regex', () => {
+  it('rejects an invalid preset pattern with code "invalid"', async () => {
     const badPresets: Record<string, Preset> = {
       bad: {
         description: 'Bad preset',
@@ -131,7 +135,42 @@ describe('detectPresets', () => {
       },
     };
     const messages = [{ text: 'anything' }];
-    expect(() => detectPresets(messages, [], badPresets)).not.toThrow();
-    expect(detectPresets(messages, [], badPresets)).toHaveLength(0);
+    await expect(detectPresets(regex, messages, [], badPresets))
+      .rejects.toMatchObject({ code: 'invalid' });
+  });
+
+  it('times out on a catastrophic-backtracking saved template', async () => {
+    const timeoutRegex = new RegexExecutor({ timeoutMs: 10 });
+    try {
+      await expect(detectPresets(
+        timeoutRegex,
+        [{ text: `${'a'.repeat(40)}!` }],
+        [{ name: 'saved-bad', pattern: '(a|aa)+$' }],
+        presets,
+      )).rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      await timeoutRegex.close();
+    }
+  });
+
+  it('times out on a catastrophic-backtracking built-in preset template', async () => {
+    const timeoutRegex = new RegexExecutor({ timeoutMs: 10 });
+    const badPresets: Record<string, Preset> = {
+      'preset-bad': {
+        description: 'Bad preset',
+        templates: [{ name: 'preset-bad', pattern: '(a|aa)+$', amount_sign: 'debit' }],
+        currency_aliases: {},
+      },
+    };
+    try {
+      await expect(detectPresets(
+        timeoutRegex,
+        [{ text: `${'a'.repeat(40)}!` }],
+        [],
+        badPresets,
+      )).rejects.toMatchObject({ code: 'timeout' });
+    } finally {
+      await timeoutRegex.close();
+    }
   });
 });

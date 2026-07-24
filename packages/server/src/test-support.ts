@@ -14,7 +14,7 @@ import * as os from 'os';
 import { withMessageCache, type LineApiClient, type MessageCache } from '@raidenyn/line-client';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { ImportService, type LineToolDeps, type LinePrincipal } from '@raidenyn/line-mcp';
-import { CategoryStore, TemplateStore, PresetStore, type BankToolDeps } from '@raidenyn/bank-mcp';
+import { CategoryStore, TemplateStore, PresetStore, RegexExecutor, type BankToolDeps } from '@raidenyn/bank-mcp';
 import type { RequestLineClient } from './request-client';
 import { buildRegistrations, type ComposedDeps } from './registrations';
 
@@ -63,7 +63,7 @@ export interface ComposedFixture {
   categories: CategoryStore;
   templates: TemplateStore;
   deps: ComposedDeps;
-  cleanup(): void;
+  cleanup(): Promise<void>;
 }
 
 /**
@@ -79,6 +79,7 @@ export function buildComposedFixture(guideDir: string): ComposedFixture {
   const categories = new CategoryStore(path.join(dataRoot, 'bank', 'bank.db'));
   const templates = new TemplateStore(path.join(dataRoot, 'templates'));
   const presets = new PresetStore();
+  const regex = new RegexExecutor();
 
   const createRequestClient = fakeCreateRequestClient(cacheInstance);
   const importService = new ImportService({ basePath: '', cache: cacheInstance, createRequestClient });
@@ -89,6 +90,7 @@ export function buildComposedFixture(guideDir: string): ComposedFixture {
     templates,
     categories,
     presets,
+    regex,
   };
 
   return {
@@ -97,8 +99,10 @@ export function buildComposedFixture(guideDir: string): ComposedFixture {
     categories,
     templates,
     deps: { line, bank, guideDir },
-    cleanup(): void {
+    async cleanup(): Promise<void> {
+      await regex.close();
       cacheInstance.close();
+      categories.close();
       fs.rmSync(dataRoot, { recursive: true, force: true });
     },
   };

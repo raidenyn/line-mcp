@@ -63,7 +63,7 @@ describe('composed server — tool/resource registration (real MCP roundtrip)', 
   afterAll(async () => {
     await transport?.close().catch(() => {});
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
-    fixture?.cleanup();
+    await fixture?.cleanup();
     fs.rmSync(authStoreDir, { recursive: true, force: true });
   });
 
