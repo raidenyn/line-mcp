@@ -113,7 +113,7 @@ npm start                    # composed server on http://localhost:3000
 node packages/line-mcp/dist/cli.js   # standalone messenger server
 ```
 
-The composed server reads `BANK_REGEX_TIMEOUT_MS` (milliseconds) to tune the per-regex-operation budget for the bank tools; unset uses the 100 ms default, non-numeric values fail the tool call, and the value is clamped to 10-1000 ms. The standalone messenger server has no bank tools and ignores this variable.
+The composed server reads `BANK_REGEX_TIMEOUT_MS` (milliseconds) to tune the per-regex-operation budget for the bank tools; unset or non-numeric values use the 100 ms default, and the value is clamped to 10-1000 ms. The standalone messenger server has no bank tools and ignores this variable.
 
 ## Commands
 

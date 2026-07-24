@@ -368,7 +368,7 @@ export async function validateFilters(regex: RegexExecutorPort, filters: Transac
     try {
       await regex.validate(pattern, 'is', `merchant filter "${pattern}"`);
     } catch (err) {
-      if (err instanceof RegexExecutionError) return err.message;
+      if (err instanceof RegexExecutionError && err.code === 'invalid') return err.message;
       throw err;
     }
   }
