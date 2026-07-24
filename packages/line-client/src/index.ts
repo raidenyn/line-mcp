@@ -13,7 +13,7 @@ export { signForAccount } from './signer';
 export type { StorageKeyMaterial, HmacInput } from './signer';
 
 export { withMessageCache } from './cached-message-reader';
-export type { MessageReader, MessageCache } from './cached-message-reader';
+export type { MessageReader, MessageCache, ImportMessagesResult } from './cached-message-reader';
 
 import { LineClient, type AuthData, type Message } from './client';
 import type { MessageReader } from './cached-message-reader';

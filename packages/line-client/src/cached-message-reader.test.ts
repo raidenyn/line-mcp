@@ -20,6 +20,12 @@ class FakeMessageCache implements MessageCache {
     }
   }
 
+  importMessages(ownerMid: string, chatMid: string, messages: Message[]): { imported: number } {
+    const before = this.rows.length;
+    this.upsertMessages(ownerMid, chatMid, messages);
+    return { imported: this.rows.length - before };
+  }
+
   getMessages(ownerMid: string, chatMid: string, sinceMs?: number, untilMs?: number): Message[] {
     return this.rows
       .filter(r => r.ownerMid === ownerMid && r.chatMid === chatMid)

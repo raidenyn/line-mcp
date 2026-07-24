@@ -100,4 +100,56 @@ Tue, 1/2/2024
     expect(msgs[0].text).toBe('First');
     expect(msgs[1].text).toBe('Second');
   });
+
+  it('gives identical same-minute lines distinct deterministic IDs', () => {
+    const text = `Chat history with Bot
+Saved on: 6/21/2026, 17:00
+
+Mon, 1/1/2024
+09:00\tBot\tRepeated
+09:00\tBot\tRepeated`;
+
+    const first = parseExportFile(text, MID, TZ);
+    const second = parseExportFile(text, MID, TZ);
+
+    expect(first).toHaveLength(2);
+    expect(first[0].id).not.toBe(first[1].id);
+    expect(first.map(message => message.id)).toEqual(second.map(message => message.id));
+  });
+
+  it('frames sender and text fields so ambiguous boundaries do not collide', () => {
+    const text = `Chat history with Bot
+Saved on: 6/21/2026, 17:00
+
+Mon, 1/1/2024
+09:00\tA\tBC
+09:00\tAB\tC`;
+
+    const messages = parseExportFile(text, MID, TZ);
+
+    expect(messages[0].id).not.toBe(messages[1].id);
+  });
+
+  it('does not shift duplicate IDs when an unrelated message is inserted', () => {
+    const base = `Chat history with Bot
+Saved on: 6/21/2026, 17:00
+
+Mon, 1/1/2024
+09:00\tBot\tRepeated
+09:00\tBot\tRepeated`;
+    const withUnrelated = `Chat history with Bot
+Saved on: 6/21/2026, 17:00
+
+Mon, 1/1/2024
+09:00\tBot\tRepeated
+09:00\tBot\tDifferent
+09:00\tBot\tRepeated`;
+
+    const baseIds = parseExportFile(base, MID, TZ).map(message => message.id);
+    const relatedIds = parseExportFile(withUnrelated, MID, TZ)
+      .filter(message => message.text === 'Repeated')
+      .map(message => message.id);
+
+    expect(relatedIds).toEqual(baseIds);
+  });
 });

@@ -183,6 +183,7 @@ export function buildMockFixtures(input: { origin: string; epochSeconds: number 
 
   const importResult = {
     status: 'success',
+    parsed: 1,
     imported: 1,
     chat_mid: MOCK_GROUP_MID,
     chat_name: 'Mock Bank Group',

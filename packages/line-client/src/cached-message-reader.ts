@@ -18,8 +18,13 @@ export interface MessageReader {
  * depends on this interface, so `@raidenyn/line-client` itself never pulls in
  * SQLite.
  */
+export interface ImportMessagesResult {
+  imported: number;
+}
+
 export interface MessageCache {
   upsertMessages(ownerMid: string, chatMid: string, messages: Message[]): void;
+  importMessages(ownerMid: string, chatMid: string, messages: Message[]): ImportMessagesResult;
   getMessages(ownerMid: string, chatMid: string, sinceMs?: number, untilMs?: number): Message[];
   latestTimestamp(ownerMid: string, chatMid: string): number | null;
   getDistinctChatMids(ownerMid: string): string[];
