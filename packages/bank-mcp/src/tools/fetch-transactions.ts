@@ -61,7 +61,7 @@ export async function fetchParsedTransactions<P extends Principal>(
     return { error: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` };
   }
 
-  const filterError = validateFilters(filters);
+  const filterError = await validateFilters(deps.regex, filters);
   if (filterError) {
     return { error: filterError };
   }
@@ -93,19 +93,19 @@ export async function fetchParsedTransactions<P extends Principal>(
     ? await reader.getMessagesInRange(chatMid, new Date(since).getTime())
     : await reader.getMessages(chatMid, 200);
 
-  let transactions = messages
-    .map((msg) => {
-      const templatesForMsg = filterByTime(savedTemplates, parseInt(msg.createdTime, 10));
-      return parseTransaction(msg, templatesForMsg, savedAliases);
-    })
-    .filter((tx): tx is Transaction => tx !== null);
+  let transactions: Transaction[] = [];
+  for (const msg of messages) {
+    const templatesForMsg = filterByTime(savedTemplates, parseInt(msg.createdTime, 10));
+    const tx = await parseTransaction(deps.regex, msg, templatesForMsg, savedAliases);
+    if (tx) transactions.push(tx);
+  }
 
   if (since) transactions = transactions.filter((tx) => tx.date >= since);
   if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
   transactions.sort((a, b) => a.date.localeCompare(b.date));
   await applyBalanceDiffs(transactions);
-  categorize(transactions, deps.categories.list());
-  transactions = filterTransactions(transactions, filters);
+  await categorize(deps.regex, transactions, deps.categories.list());
+  transactions = await filterTransactions(deps.regex, transactions, filters);
   warnings.push(...buildAmountWarnings(transactions));
 
   const rangeNote = since

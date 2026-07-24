@@ -3,6 +3,7 @@ import type { Principal } from '@raidenyn/mcp-runtime';
 import type { TemplateStore } from '../template-store';
 import type { CategoryStore } from '../category-store';
 import type { PresetStore } from '../preset-store';
+import type { RegexExecutorPort } from '../regex-executor';
 
 /**
  * Everything the five bank tools need, injected explicitly rather than reached
@@ -20,4 +21,5 @@ export interface BankToolDeps<P extends Principal> {
   templates: TemplateStore;
   categories: CategoryStore;
   presets: PresetStore;
+  regex: RegexExecutorPort;
 }

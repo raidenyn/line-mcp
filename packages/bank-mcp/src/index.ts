@@ -51,6 +51,7 @@ export {
   detectPresets,
   PresetStore,
   type Preset,
+  type PresetSuggestion,
 } from './preset-store';
 
 // ─── Category migration primitive (issue #75, Task 10) ──────────────────────

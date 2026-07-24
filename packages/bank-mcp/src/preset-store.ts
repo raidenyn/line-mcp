@@ -1,11 +1,18 @@
 import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { NamedTemplate } from './template-store';
+import type { RegexExecutorPort } from './regex-executor';
 
 export interface Preset {
   description: string;
   templates: NamedTemplate[];
   currency_aliases: Record<string, string>;
+}
+
+export interface PresetSuggestion {
+  preset_name: string;
+  matched_count: number;
+  description: string;
 }
 
 // Packaged preset JSON ships under the package's own assets/ tree, resolved
@@ -45,28 +52,33 @@ export function getPreset(name: string, dir = presetsDir()): Preset | null {
   return loadAllPresets(dir)[name] ?? null;
 }
 
-function testPattern(pattern: string, text: string): boolean {
-  try {
-    return new RegExp(pattern, 's').test(text);
-  } catch {
-    return false;
-  }
-}
-
-export function detectPresets(
+export async function detectPresets(
+  regex: RegexExecutorPort,
   messages: Array<{ text?: string }>,
-  savedTemplates: Array<{ pattern: string }>,
+  savedTemplates: Array<{ pattern: string; name?: string }>,
   presets: Record<string, Preset>,
-): Array<{ preset_name: string; matched_count: number; description: string }> {
-  const suggestions: Array<{ preset_name: string; matched_count: number; description: string }> = [];
+): Promise<PresetSuggestion[]> {
+  const suggestions: PresetSuggestion[] = [];
 
   for (const [presetName, preset] of Object.entries(presets)) {
     let gapCount = 0;
     for (const msg of messages) {
       if (!msg.text) continue;
-      const matchedBySaved = savedTemplates.some((t) => testPattern(t.pattern, msg.text!));
+      let matchedBySaved = false;
+      for (const saved of savedTemplates) {
+        if (await regex.test(saved.pattern, 's', msg.text, `saved template "${saved.name ?? 'unnamed'}"`)) {
+          matchedBySaved = true;
+          break;
+        }
+      }
       if (matchedBySaved) continue;
-      const matchedByPreset = preset.templates.some((t) => testPattern(t.pattern, msg.text!));
+      let matchedByPreset = false;
+      for (const template of preset.templates) {
+        if (await regex.test(template.pattern, 's', msg.text, `preset "${presetName}" template "${template.name}"`)) {
+          matchedByPreset = true;
+          break;
+        }
+      }
       if (matchedByPreset) gapCount++;
     }
     if (gapCount > 0) {

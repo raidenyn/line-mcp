@@ -52,7 +52,7 @@ export function registerGetTransactions<P extends Principal>(
           if (until && !Number.isFinite(new Date(until).getTime())) {
             return { content: [{ type: 'text' as const, text: `Invalid 'until' date: "${until}". Use ISO 8601 format, e.g. "2026-05-31".` }], isError: true };
           }
-          const filterError = validateFilters(filters);
+          const filterError = await validateFilters(deps.regex, filters);
           if (filterError) {
             return { content: [{ type: 'text' as const, text: filterError }], isError: true };
           }
@@ -60,15 +60,17 @@ export function registerGetTransactions<P extends Principal>(
           const messages = since
             ? await reader.getMessagesInRange(chatMid, new Date(since).getTime())
             : await reader.getMessages(chatMid, 200);
-          let transactions = messages
-            .map((msg) => parseTransaction(msg, suppliedTemplates))
-            .filter((tx): tx is Transaction => tx !== null);
+          let transactions: Transaction[] = [];
+          for (const msg of messages) {
+            const tx = await parseTransaction(deps.regex, msg, suppliedTemplates);
+            if (tx) transactions.push(tx);
+          }
           if (since) transactions = transactions.filter((tx) => tx.date >= since);
           if (until) transactions = transactions.filter((tx) => tx.date <= expandUntilBound(until));
           transactions.sort((a, b) => a.date.localeCompare(b.date));
           await applyBalanceDiffs(transactions);
-          categorize(transactions, deps.categories.list());
-          transactions = filterTransactions(transactions, filters);
+          await categorize(deps.regex, transactions, deps.categories.list());
+          transactions = await filterTransactions(deps.regex, transactions, filters);
           const inlineWarnings = buildAmountWarnings(transactions);
           const warningBlock = inlineWarnings.length > 0 ? '\n\nWarnings:\n' + inlineWarnings.join('\n') : '';
           const rangeNote = since ? '' : '\n\nNote: Only the latest 200 messages were checked. Pass `since` to fetch the complete history for a time range.';

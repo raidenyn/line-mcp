@@ -14,7 +14,7 @@ import {
   type LineToolDeps,
 } from '@raidenyn/line-mcp';
 import type { AuthData } from '@raidenyn/line-client';
-import { CategoryStore, TemplateStore, PresetStore, type BankToolDeps } from '@raidenyn/bank-mcp';
+import { CategoryStore, TemplateStore, PresetStore, RegexExecutor, type BankToolDeps } from '@raidenyn/bank-mcp';
 import { resolveDataLayout } from './data-layout';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
 import { createServerRequestClientFactory } from './request-client';
@@ -44,6 +44,8 @@ export interface ServerOptions {
   /** Overrides the auto-derived public base URL used in import upload links. */
   publicUrl?: string;
   lineApiBaseUrl?: string;
+  /** Per-regex-operation timeout in ms (clamped to 10–1000). Defaults to 100. */
+  regexTimeoutMs?: number;
   /**
    * e2e-test-only bearer bypass. Never set in production; cli.ts is the only
    * caller that reads the TEST_TOKEN / LINE_AUTH_DATA environment variables
@@ -84,6 +86,10 @@ export function createServer(options: ServerOptions): ComposedServer {
   // line cache); retained here so stop() can close it before resolving, the
   // same way cache.close() releases the messages DB.
   let categoryStore: CategoryStore | undefined;
+  // RegexExecutor owns a small worker pool; retained here so stop() can close
+  // it before resolving, releasing the worker threads cleanly across repeated
+  // start/stop cycles (e.g. tests).
+  let regexExecutor: RegexExecutor | undefined;
   // SyncLoopHandle.stop() awaits the in-flight run before resolving, so the
   // line cache is never closed underneath a still-running sync.
   let syncHandle: ReturnType<typeof startSyncLoop> | undefined;
@@ -110,6 +116,11 @@ export function createServer(options: ServerOptions): ComposedServer {
       // relative to that package, not the data root — constructing this
       // performs no filesystem I/O (assets are read lazily on first use).
       const presets = new PresetStore();
+
+      // Bounded regex worker pool (issue #61) — every bank-domain regex call
+      // site routes through this executor, keeping catastrophic backtracking
+      // off the main thread and capped at `regexTimeoutMs` per operation.
+      regexExecutor = new RegexExecutor({ timeoutMs: options.regexTimeoutMs });
 
       const secret = loadOrCreateSecret(layout.secretPath);
       const credentialStore = new FileCredentialStore(layout.authDir);
@@ -153,6 +164,7 @@ export function createServer(options: ServerOptions): ComposedServer {
         templates,
         categories,
         presets,
+        regex: regexExecutor,
       };
 
       const host: McpHost = createMcpHost<LinePrincipal>({
@@ -205,6 +217,9 @@ export function createServer(options: ServerOptions): ComposedServer {
       if (httpServer) {
         await new Promise<void>((resolve) => httpServer!.close(() => resolve()));
       }
+      // Close the regex worker pool after HTTP is down but before DB stores
+      // close — no in-flight tool request can still be holding the executor.
+      await regexExecutor?.close();
       // Close both DB-backed stores the composed server owns: the line-message
       // cache and the bank/category store. CategoryStore opens its own
       // better-sqlite3 connection (separate from the cache's), so without an
