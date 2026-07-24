@@ -24,3 +24,5 @@
 **Currency aliases:** When a template captures a non-standard currency string (e.g. Thai `"บาท"` or abbreviated `"บ"`), use `upsert_alias` to map it to a standard code. Aliases are applied at parse time so `get_transactions` and `summarize_transactions` always return the canonical code. Presets include aliases — `apply_preset` loads them automatically.
 
 **Avoid:** Never use literal spaces in patterns — LINE bank messages frequently contain non-breaking spaces (U+00A0) that look identical but break literal-space matches. Always use `\\s+`. The `s` (dotAll) flag is applied automatically so `.` matches newlines in bilingual messages.
+
+**Regex safety:** Template syntax is validated before save, and every saved template is compiled once and run in a bounded worker pool (issue #61) with a per-match timeout (default 100 ms, clamped to 10-1000 ms via `BANK_REGEX_TIMEOUT_MS`). `apply_preset` validates all preset templates before writing any, so a malformed preset never partially lands. A timed-out or invalid pattern fails the whole tool call rather than returning partial results.

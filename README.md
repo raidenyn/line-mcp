@@ -71,6 +71,8 @@ The server runs over the [Streamable HTTP MCP transport](https://spec.modelconte
 
 **Legacy persistence migration:** On first start against a pre-modular data root, the composed server performs a one-time migration of the old combined `cache/messages.db` into separate per-generation line and bank databases. Rows whose owning MID cannot be unambiguously determined are **quarantined** (never dropped or arbitrarily assigned) and can be recovered later. The migration is generation-based and pointer-committed: an interrupted restart (before or after the pointer is published) converges on a single authoritative generation. Category IDs and order survive migration and remain shared across principals.
 
+**Regex execution safety:** All bank template, category, merchant-filter, and preset regexes execute in a bounded worker pool rather than on the server event loop. Each match has a 100 ms budget by default. Set `BANK_REGEX_TIMEOUT_MS` to tune the budget; values are clamped to 10-1000 ms. Invalid or timed-out patterns fail the entire tool call so financial results are never silently partial.
+
 ### One process per data root
 
 Never run two servers against the same data root on one host. The composed server owns bank/category data the standalone server knows nothing about, and the **standalone server refuses to start** if it finds a legacy pre-migration combined database with no committed pointer (run the composed server once first to migrate, then start the standalone server). Under Docker, give each server its own data volume.
@@ -98,7 +100,7 @@ docker build --target server    -t line-mcp-full:latest      .
 docker build --target line-mcp  -t line-mcp-standalone:latest .
 ```
 
-Both images build once with Node 24, ship only their own compiled package closure plus production dependencies, run as a non-root `node` user with `/data` as a volume, and expose `GET ${BASE_PATH}/healthz`. To run behind a reverse proxy under a URL prefix, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp`) and include the same prefix in the `claude mcp add` URL.
+Both images build once with Node 24, ship only their own compiled package closure plus production dependencies, run as a non-root `node` user with `/data` as a volume, and expose `GET ${BASE_PATH}/healthz`. To run behind a reverse proxy under a URL prefix, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp`) and include the same prefix in the `claude mcp add` URL. The composed (`server`) target also honors `BANK_REGEX_TIMEOUT_MS` (per-regex-operation timeout, clamped to 10-1000 ms, default 100); the standalone (`line-mcp`) target has no bank tools and ignores it.
 
 ### Local development
 
@@ -110,6 +112,8 @@ npm run build                # tsc -b — composite build of all six packages
 npm start                    # composed server on http://localhost:3000
 node packages/line-mcp/dist/cli.js   # standalone messenger server
 ```
+
+The composed server reads `BANK_REGEX_TIMEOUT_MS` (milliseconds) to tune the per-regex-operation budget for the bank tools; unset uses the 100 ms default, non-numeric values fail the tool call, and the value is clamped to 10-1000 ms. The standalone messenger server has no bank tools and ignores this variable.
 
 ## Commands
 
