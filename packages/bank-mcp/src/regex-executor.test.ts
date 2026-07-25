@@ -118,17 +118,66 @@ describe('RegexExecutor', () => {
     const executor = createExecutor(1000);
     const active = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'active')
       .catch((error) => error);
-    const [a, b] = await Promise.all([executor.close(), executor.close()]);
-    expect(a).toBeUndefined();
-    expect(b).toBeUndefined();
+    const closeA = executor.close();
+    const closeB = executor.close();
+    expect(closeA).toBe(closeB);
+    await closeA;
     await expect(active).resolves.toMatchObject({ code: 'closed' });
   });
 
-  it('awaits worker termination before spawning a replacement', async () => {
-    const executor = createExecutor(10);
+  it('does not spawn a replacement worker before termination settles', async () => {
+    const executor = createExecutor(10) as unknown as {
+      test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
+      validate(pattern: string, flags: string, context: string): Promise<void>;
+      close(): Promise<void>;
+      slots: Array<{ worker: { threadId: number } }>;
+    };
+    // Warm both workers so they're online and have thread IDs.
+    await executor.validate('warm1', 's', 'warm1');
+    await executor.validate('warm2', 's', 'warm2');
+    const initialThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
+    expect(initialThreadIds.size).toBe(2);
+
     await expect(executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad'))
       .rejects.toMatchObject({ code: 'timeout' });
-    await expect(executor.test('safe', 's', 'safe', 'good')).resolves.toBe(true);
+
+    // Immediately after timeout rejection, the retiring slot is replacing.
+    // No new worker should have been spawned yet — the surviving slot's worker
+    // is one of the originals, and the replacing slot still holds the old worker.
+    const currentThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
+    const newWorkers = [...currentThreadIds].filter((id) => !initialThreadIds.has(id));
+    expect(newWorkers).toHaveLength(0);
+
+    // Wait for the replacement to complete, then a new worker should appear.
+    await executor.test('safe', 's', 'safe', 'good');
+    const finalThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
+    const newWorkersAfter = [...finalThreadIds].filter((id) => !initialThreadIds.has(id));
+    expect(newWorkersAfter.length).toBeGreaterThanOrEqual(1);
+
     await executor.close();
+  });
+
+  it('does not admit jobs beyond the queue cap while a slot is replacing', async () => {
+    const executor = createExecutor(1000);
+    await executor.validate('safe', 's', 'warm workers');
+    const initialSlotCount = (executor as unknown as { slots: unknown[] }).slots.length;
+
+    // Fill both workers with catastrophic patterns so both time out and enter replacing.
+    const t1 = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad1').catch((e) => e);
+    const t2 = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad2').catch((e) => e);
+    await Promise.all([t1, t2]);
+
+    // Both slots are replacing — no idle capacity. Submitting 101 jobs should
+    // reject the 101st with 'busy' even though queue.length < 100 at submit time
+    // (because the replacing slots are not counted as idle).
+    const jobs: Promise<unknown>[] = [];
+    for (let i = 0; i < 101; i++) {
+      jobs.push(executor.test('safe', 's', 'safe', `queued ${i}`).catch((e) => e));
+    }
+    await expect(executor.test('safe', 's', 'safe', 'overflow'))
+      .rejects.toMatchObject({ code: 'busy' });
+    await executor.close();
+    await Promise.all(jobs);
+    void initialSlotCount;
   });
 });
