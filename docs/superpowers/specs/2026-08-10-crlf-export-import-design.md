@@ -41,9 +41,8 @@ No messages were found in the LINE chat export.
 ```
 
 The service does not call the cache or delete the pending file in this case.
-The caller can retry completion with corrected inputs while the existing file
-reference remains valid. No new outcome type or tool response contract is
-introduced.
+The file reference remains available for another completion attempt until its
+normal expiry. No new outcome type or tool response contract is introduced.
 
 ## Data Flow
 
