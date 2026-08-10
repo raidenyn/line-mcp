@@ -96,7 +96,7 @@ describe('composed server — account isolation vs. trusted-tenant sharing', () 
     await aliceTransport?.close().catch(() => {});
     await bobTransport?.close().catch(() => {});
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
-    fixture?.cleanup();
+    await fixture?.cleanup();
     fs.rmSync(authStoreDir, { recursive: true, force: true });
   });
 

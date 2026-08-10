@@ -51,6 +51,7 @@ export {
   detectPresets,
   PresetStore,
   type Preset,
+  type PresetSuggestion,
 } from './preset-store';
 
 // ─── Category migration primitive (issue #75, Task 10) ──────────────────────
@@ -60,6 +61,16 @@ export {
   type LegacyCategoryRow,
   type BankCategoryStagingResult,
 } from './category-migration';
+
+// ─── Bounded regex worker executor (issue #61, Task 1) ──────────────────────
+export {
+  RegexExecutor,
+  RegexExecutionError,
+  normalizeRegexTimeoutMs,
+  type RegexExecutorPort,
+  type RegexErrorCode,
+  type RegexMatch,
+} from './regex-executor';
 
 // ─── MCP tool + resource registrations ──────────────────────────────────────
 export { type BankToolDeps, registerBankTools } from './tools';

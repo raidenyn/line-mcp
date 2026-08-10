@@ -15,3 +15,5 @@
 **Matching order:** Categories are tried in the order they were created (insertion order); the first pattern that matches wins. Reordering isn't supported directly — delete and re-upsert categories in the order you want if match priority matters.
 
 **Avoid:** Don't rely on a category matching a transaction with no `merchant` and no distinguishing text in `rawText` — those fall back to `"uncategorized"`.
+
+**Regex safety:** Category syntax is validated before save (issue #61), so an invalid pattern is rejected at upsert time rather than failing later during transaction parsing. At match time, category patterns run in a bounded worker pool with a per-match timeout (default 100 ms, clamped to 10-1000 ms via `BANK_REGEX_TIMEOUT_MS`); a timed-out pattern fails the whole tool call rather than silently returning uncategorized results.

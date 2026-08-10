@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { getHistoricalRate } from './fx-rates';
+import { type RegexExecutorPort, RegexExecutionError } from './regex-executor';
 
 export const TransactionTemplateSchema = z.object({
   pattern: z.string().describe('JS regex with named capture groups: original_amount, original_currency (required); amount, currency, merchant, date, balance, account (optional)'),
@@ -52,29 +53,6 @@ function parseNumeric(str: string): number {
   return parseFloat(str.replace(/,/g, ''));
 }
 
-// Matches a group containing an unbounded quantifier that is itself unbounded-quantified,
-// e.g. (\w+\s*)+ — the primary source of catastrophic backtracking (ReDoS).
-const NESTED_QUANTIFIER_RE = /\([^)]*[+*][^)]*\)[+*]/;
-
-const regexCache = new Map<string, RegExp | null>();
-function getRegex(pattern: string, flags: string = 's'): RegExp | null {
-  const cacheKey = `${flags}:${pattern}`;
-  if (!regexCache.has(cacheKey)) {
-    try {
-      if (NESTED_QUANTIFIER_RE.test(pattern)) {
-        regexCache.set(cacheKey, null);
-      } else {
-        // 's' flag: dot matches newlines — needed for bilingual messages (Thai + English in one blob)
-        // 'i' flag (categories only): case-insensitive merchant matching
-        regexCache.set(cacheKey, new RegExp(pattern, flags));
-      }
-    } catch {
-      regexCache.set(cacheKey, null);
-    }
-  }
-  return regexCache.get(cacheKey)!;
-}
-
 function parseDate(captured: string | undefined, format: string | undefined, fallbackMs: string): string {
   const fallback = () => {
     const ms = parseInt(fallbackMs, 10);
@@ -120,18 +98,17 @@ function parseDate(captured: string | undefined, format: string | undefined, fal
   return Number.isFinite(d.getTime()) ? d.toISOString() : fallback();
 }
 
-export function parseTransaction(
+export async function parseTransaction(
+  regex: RegexExecutorPort,
   message: { id: string; createdTime: string; text?: string; contentType: number },
   templates: TransactionTemplate[],
   aliases: Record<string, string> = {},
-): Transaction | null {
+): Promise<Transaction | null> {
   if (message.contentType !== 0 || !message.text) return null;
 
-  for (const tmpl of templates) {
-    const regex = getRegex(tmpl.pattern);
-    if (!regex) continue;
-
-    const match = regex.exec(message.text);
+  for (const [index, tmpl] of templates.entries()) {
+    const name = 'name' in tmpl && typeof tmpl.name === 'string' ? ` "${tmpl.name}"` : ` #${index + 1}`;
+    const match = await regex.exec(tmpl.pattern, 's', message.text, `transaction template${name}`);
     if (!match?.groups) continue;
 
     const g = match.groups;
@@ -371,13 +348,12 @@ export async function applyBalanceDiffs(
   }
 }
 
-export function categorize(transactions: Transaction[], categories: Category[]): void {
+export async function categorize(regex: RegexExecutorPort, transactions: Transaction[], categories: Category[]): Promise<void> {
   for (const tx of transactions) {
     const text = tx.merchant ?? tx.rawText;
     let matchedName: string | undefined;
     for (const cat of categories) {
-      const regex = getRegex(cat.pattern, 'is');
-      if (regex && regex.test(text)) {
+      if (await regex.test(cat.pattern, 'is', text, `category "${cat.name}"`)) {
         matchedName = cat.name;
         break;
       }
@@ -386,42 +362,48 @@ export function categorize(transactions: Transaction[], categories: Category[]):
   }
 }
 
-export function validateFilters(filters: TransactionFilter): string | null {
+export async function validateFilters(regex: RegexExecutorPort, filters: TransactionFilter): Promise<string | null> {
   if (!filters.merchants) return null;
   for (const pattern of filters.merchants) {
-    if (getRegex(pattern, 'is')) continue;
-    if (NESTED_QUANTIFIER_RE.test(pattern)) {
-      return `Merchant regex rejected — unsafe nested quantifier (catastrophic-backtracking risk): "${pattern}"`;
+    try {
+      await regex.validate(pattern, 'is', `merchant filter "${pattern}"`);
+    } catch (err) {
+      if (err instanceof RegexExecutionError && err.code === 'invalid') return err.message;
+      throw err;
     }
-    return `Invalid merchant regex: "${pattern}"`;
   }
   return null;
 }
 
-export function filterTransactions(transactions: Transaction[], filters: TransactionFilter): Transaction[] {
-  return transactions.filter((tx) => {
+export async function filterTransactions(regex: RegexExecutorPort, transactions: Transaction[], filters: TransactionFilter): Promise<Transaction[]> {
+  const result: Transaction[] = [];
+  for (const tx of transactions) {
     if (filters.categories && !filters.categories.includes(tx.category ?? '')) {
-      return false;
+      continue;
     }
     if (filters.original_currencies) {
       const match = filters.original_currencies.some(
         (c) => c.toLowerCase() === tx.original_currency.toLowerCase(),
       );
-      if (!match) return false;
+      if (!match) continue;
     }
     if (filters.merchants) {
       const text = tx.merchant ?? tx.rawText;
-      const match = filters.merchants.some((pattern) => {
-        const regex = getRegex(pattern, 'is');
-        return regex ? regex.test(text) : false;
-      });
-      if (!match) return false;
+      let matched = false;
+      for (const pattern of filters.merchants) {
+        if (await regex.test(pattern, 'is', text, `merchant filter "${pattern}"`)) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) continue;
     }
     if (filters.amount_min !== undefined || filters.amount_max !== undefined) {
       const effectiveAmount = Math.abs(tx.amount !== undefined ? tx.amount : tx.original_amount);
-      if (filters.amount_min !== undefined && effectiveAmount < filters.amount_min) return false;
-      if (filters.amount_max !== undefined && effectiveAmount > filters.amount_max) return false;
+      if (filters.amount_min !== undefined && effectiveAmount < filters.amount_min) continue;
+      if (filters.amount_max !== undefined && effectiveAmount > filters.amount_max) continue;
     }
-    return true;
-  });
+    result.push(tx);
+  }
+  return result;
 }
