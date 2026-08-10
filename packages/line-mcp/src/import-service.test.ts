@@ -288,6 +288,51 @@ describe('ImportService — owner-scoped completion writes', () => {
       await close();
     }
   });
+
+  it('rejects zero parsed messages without writing or consuming the pending file', async () => {
+    const parseExportFile = vi.fn((_content: string, chatMid: string): Message[] => [{
+      id: 'retry-message',
+      from: 'sender',
+      to: chatMid,
+      toType: 1,
+      createdTime: '1000000',
+      contentType: 0,
+      text: 'message after retry',
+      hasContent: false,
+    }]);
+    parseExportFile.mockReturnValueOnce([]);
+    const { service, cache } = makeService({ parseExportFile });
+    const app = express();
+    service.mountRoutes(app);
+    const { url, close } = await listen(app);
+
+    try {
+      const { upload_url } = service.initiate(principal('owner-mid'), makeFakeExpressRequest());
+      const token = new URL(upload_url).searchParams.get('token')!;
+      const uploadRes = await fetch(`${url}/import-upload?token=${token}`, {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: SAMPLE_EXPORT,
+      });
+      const { file_ref_id } = await uploadRes.json();
+      const args = { file_ref_id, timezone: 'UTC', chat_mid: 'target-chat' };
+
+      const first = await service.complete(principal('owner-mid'), args);
+
+      expect(first).toEqual({
+        kind: 'import_failed',
+        error: 'No messages were found in the LINE chat export.',
+      });
+      expect(cache.importMessages).not.toHaveBeenCalled();
+
+      const second = await service.complete(principal('owner-mid'), args);
+
+      expect(second.kind).toBe('success');
+      expect(cache.importMessages).toHaveBeenCalledTimes(1);
+    } finally {
+      await close();
+    }
+  });
 });
 
 describe('ImportService — requesting-principal chat detection', () => {
