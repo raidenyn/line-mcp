@@ -1,5 +1,12 @@
 import { Worker } from 'node:worker_threads';
+import type { WorkerOptions } from 'node:worker_threads';
 import { REGEX_WORKER_SOURCE } from './regex-worker-source';
+
+function defaultWorkerFactory(source: string, options: WorkerOptions): Worker {
+  return new Worker(source, options);
+}
+
+export type WorkerFactory = (source: string, options: WorkerOptions) => Worker;
 
 const DEFAULT_TIMEOUT_MS = 100;
 const MIN_TIMEOUT_MS = 10;
@@ -77,16 +84,19 @@ interface WorkerSlot {
 export class RegexExecutor implements RegexExecutorPort {
   private readonly timeoutMs: number;
   private readonly workerSource: string;
+  private readonly workerFactory: WorkerFactory;
   private readonly queue: PendingJob[] = [];
   private readonly slots: WorkerSlot[] = [];
   private readonly retirements = new Set<Promise<number>>();
   private closePromise: Promise<void> | undefined;
   private nextId = 1;
   private closed = false;
+  private degraded = false;
 
-  constructor(options: { timeoutMs?: number; workerSource?: string } = {}) {
+  constructor(options: { timeoutMs?: number; workerSource?: string; workerFactory?: WorkerFactory } = {}) {
     this.timeoutMs = normalizeRegexTimeoutMs(options.timeoutMs);
     this.workerSource = options.workerSource ?? REGEX_WORKER_SOURCE;
+    this.workerFactory = options.workerFactory ?? defaultWorkerFactory;
   }
 
   validate(pattern: string, flags: string, context: string): Promise<void> {
@@ -109,6 +119,7 @@ export class RegexExecutor implements RegexExecutorPort {
     context: string,
   ): Promise<T> {
     if (this.closed) return Promise.reject(this.failure('closed', context, pattern, 'executor is closed'));
+    if (this.degraded) return Promise.reject(this.failure('worker_failure', context, pattern, 'executor is degraded'));
     if (pattern.length > MAX_PATTERN_LENGTH) {
       return Promise.reject(this.failure(
         'pattern_too_large', context, pattern,
@@ -143,8 +154,8 @@ export class RegexExecutor implements RegexExecutorPort {
   }
 
   private spawn(index: number): void {
-    if (this.closed) return;
-    const worker = new Worker(this.workerSource, {
+    if (this.closed || this.degraded) return;
+    const worker = this.workerFactory(this.workerSource, {
       eval: true,
       resourceLimits: {
         maxOldGenerationSizeMb: 32,
@@ -174,7 +185,7 @@ export class RegexExecutor implements RegexExecutorPort {
   }
 
   private dispatch(): void {
-    if (this.closed) return;
+    if (this.closed || this.degraded) return;
     for (const [index, slot] of this.slots.entries()) {
       if (!this.isAvailable(slot)) continue;
       const job = this.queue.shift();
@@ -231,14 +242,30 @@ export class RegexExecutor implements RegexExecutorPort {
       () => {
         this.retirements.delete(termination);
         if (slot) slot.replacing = false;
-        if (!this.closed && this.slots[index]?.worker === worker) this.spawn(index);
+        if (!this.closed && !this.degraded && this.slots[index]?.worker === worker) this.spawn(index);
       },
       () => {
         this.retirements.delete(termination);
         if (slot) slot.replacing = false;
-        if (this.slots[index]?.worker === worker) this.slots.splice(index, 1);
+        this.degrade();
       },
     );
+  }
+
+  private degrade(): void {
+    if (this.degraded) return;
+    this.degraded = true;
+    for (const job of this.queue.splice(0)) {
+      job.reject(this.failure('worker_failure', job.context, job.pattern, 'executor degraded after unconfirmed worker termination'));
+    }
+    for (const slot of this.slots) {
+      const active = slot.active;
+      if (active?.timer) clearTimeout(active.timer);
+      if (active) {
+        slot.active = undefined;
+        active.reject(this.failure('worker_failure', active.context, active.pattern, 'executor degraded after unconfirmed worker termination'));
+      }
+    }
   }
 
   private failure(code: RegexErrorCode, context: string, pattern: string, detail: string): RegexExecutionError {
