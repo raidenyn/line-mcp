@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { Worker } from 'node:worker_threads';
 import {
   RegexExecutor,
   normalizeRegexTimeoutMs,
 } from './regex-executor';
+import type { WorkerFactory } from './regex-executor';
 
 const executors: RegexExecutor[] = [];
-function createExecutor(timeoutMs = 100): RegexExecutor {
-  const executor = new RegexExecutor({ timeoutMs });
+function createExecutor(timeoutMs = 100, workerFactory?: WorkerFactory): RegexExecutor {
+  const executor = new RegexExecutor({ timeoutMs, workerFactory });
   executors.push(executor);
   return executor;
 }
@@ -126,58 +128,107 @@ describe('RegexExecutor', () => {
   });
 
   it('does not spawn a replacement worker before termination settles', async () => {
-    const executor = createExecutor(10) as unknown as {
+    const deferreds: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+    const factory: WorkerFactory = (source, options) => {
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      let terminated = false;
+      worker.terminate = () => {
+        if (terminated) return origTerminate();
+        terminated = true;
+        const deferred = Promise.withResolvers<void>();
+        deferreds.push({
+          resolve: () => {
+            origTerminate();
+            deferred.resolve();
+          },
+          reject: deferred.reject,
+        });
+        return deferred.promise.then(() => 0);
+      };
+      return worker;
+    };
+    const executor = createExecutor(10, factory) as unknown as {
       test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
       validate(pattern: string, flags: string, context: string): Promise<void>;
       close(): Promise<void>;
-      slots: Array<{ worker: { threadId: number } }>;
+      slots: Array<{ worker: { threadId: number }; replacing: boolean }>;
     };
-    // Warm both workers so they're online and have thread IDs.
     await executor.validate('warm1', 's', 'warm1');
     await executor.validate('warm2', 's', 'warm2');
     const initialThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
     expect(initialThreadIds.size).toBe(2);
 
-    await expect(executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad'))
-      .rejects.toMatchObject({ code: 'timeout' });
+    const timeoutJob = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad');
+    await expect(timeoutJob).rejects.toMatchObject({ code: 'timeout' });
 
-    // Immediately after timeout rejection, the retiring slot is replacing.
-    // No new worker should have been spawned yet — the surviving slot's worker
-    // is one of the originals, and the replacing slot still holds the old worker.
+    const replacingSlots = executor.slots.filter((s) => s.replacing);
+    expect(replacingSlots.length).toBe(1);
+
     const currentThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
     const newWorkers = [...currentThreadIds].filter((id) => !initialThreadIds.has(id));
     expect(newWorkers).toHaveLength(0);
 
-    // Wait for the replacement to complete, then a new worker should appear.
+    deferreds[0].resolve();
     await executor.test('safe', 's', 'safe', 'good');
+
     const finalThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
     const newWorkersAfter = [...finalThreadIds].filter((id) => !initialThreadIds.has(id));
     expect(newWorkersAfter.length).toBeGreaterThanOrEqual(1);
 
-    await executor.close();
+    for (const d of deferreds) d.resolve();
+    const closePromise = executor.close();
+    for (const d of deferreds) d.resolve();
+    await closePromise;
   });
 
   it('does not admit jobs beyond the queue cap while a slot is replacing', async () => {
-    const executor = createExecutor(1000);
-    await executor.validate('safe', 's', 'warm workers');
-    const initialSlotCount = (executor as unknown as { slots: unknown[] }).slots.length;
+    const deferreds: Array<{ resolve: () => void; reject: (e: Error) => void }> = [];
+    const factory: WorkerFactory = (source, options) => {
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      let terminated = false;
+      worker.terminate = () => {
+        if (terminated) return origTerminate();
+        terminated = true;
+        const deferred = Promise.withResolvers<void>();
+        deferreds.push({
+          resolve: () => {
+            origTerminate().then(
+              () => deferred.resolve(),
+              (e) => deferred.reject(e),
+            );
+          },
+          reject: deferred.reject,
+        });
+        return deferred.promise.then(() => 0);
+      };
+      return worker;
+    };
+    const executor = createExecutor(10, factory) as unknown as {
+      test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
+      validate(pattern: string, flags: string, context: string): Promise<void>;
+      close(): Promise<void>;
+      slots: Array<{ replacing: boolean }>;
+    };
+    await executor.validate('warm1', 's', 'warm1');
+    await executor.validate('warm2', 's', 'warm2');
 
-    // Fill both workers with catastrophic patterns so both time out and enter replacing.
     const t1 = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad1').catch((e) => e);
     const t2 = executor.test('(a|aa)+$', 's', `${'a'.repeat(40)}!`, 'bad2').catch((e) => e);
     await Promise.all([t1, t2]);
 
-    // Both slots are replacing — no idle capacity. Submitting 101 jobs should
-    // reject the 101st with 'busy' even though queue.length < 100 at submit time
-    // (because the replacing slots are not counted as idle).
+    expect(executor.slots.every((s) => s.replacing)).toBe(true);
+
     const jobs: Promise<unknown>[] = [];
-    for (let i = 0; i < 101; i++) {
+    for (let i = 0; i < 100; i++) {
       jobs.push(executor.test('safe', 's', 'safe', `queued ${i}`).catch((e) => e));
     }
     await expect(executor.test('safe', 's', 'safe', 'overflow'))
       .rejects.toMatchObject({ code: 'busy' });
+
+    for (const d of deferreds) d.resolve();
     await executor.close();
     await Promise.all(jobs);
-    void initialSlotCount;
   });
 });
