@@ -214,6 +214,12 @@ export class ImportService {
 
     try {
       const messages = this.parseFile(content, resolvedMid, timezone);
+      if (messages.length === 0) {
+        return {
+          kind: 'import_failed',
+          error: 'No messages were found in the LINE chat export.',
+        };
+      }
       // Owner-scoped write: always the completing principal's mid, never a
       // value read out of the uploaded file or request body.
       const { imported } = this.options.cache.importMessages(

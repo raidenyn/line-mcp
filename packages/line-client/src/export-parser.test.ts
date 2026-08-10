@@ -7,6 +7,11 @@ Saved on: 6/21/2026, 17:00
 Thu, 6/12/2025
 17:09\tTest Bot\tHello world`;
 
+const NON_LF_LINE_ENDINGS = [
+  ['CRLF', '\r\n'],
+  ['CR', '\r'],
+] as const;
+
 describe('parseExportHeader', () => {
   it('extracts chat name', () => {
     expect(parseExportHeader(MINIMAL)).toBe('Test Bot');
@@ -14,6 +19,12 @@ describe('parseExportHeader', () => {
 
   it('throws on invalid format', () => {
     expect(() => parseExportHeader('not a LINE export')).toThrow('LINE chat export');
+  });
+
+  it.each(NON_LF_LINE_ENDINGS)('accepts %s line endings', (_name, lineEnding) => {
+    const text = MINIMAL.replace(/\n/g, lineEnding);
+
+    expect(parseExportHeader(text)).toBe('Test Bot');
   });
 });
 
@@ -151,5 +162,22 @@ Mon, 1/1/2024
       .map(message => message.id);
 
     expect(relatedIds).toEqual(baseIds);
+  });
+
+  it.each(NON_LF_LINE_ENDINGS)('parses %s exports identically to LF', (_name, lineEnding) => {
+    const text = MINIMAL.replace(/\n/g, lineEnding);
+
+    expect(parseExportFile(text, MID, TZ)).toEqual(parseExportFile(MINIMAL, MID, TZ));
+  });
+
+  it.each(NON_LF_LINE_ENDINGS)('normalizes %s continuation lines to LF', (_name, lineEnding) => {
+    const text = `Chat history with Bot
+Saved on: 6/21/2026, 17:00
+
+Mon, 1/1/2024
+10:00\tBot\tFirst line
+Second line`.replace(/\n/g, lineEnding);
+
+    expect(parseExportFile(text, MID, TZ)[0].text).toBe('First line\nSecond line');
   });
 });
