@@ -1,9 +1,13 @@
 import crypto from 'crypto';
 import type { Message } from './client';
 
-export function parseExportHeader(text: string): string {
+function normalizeExportText(text: string): string {
   // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)
-  const firstLine = text.replace(/^﻿/, '').split('\n')[0] ?? '';
+  return text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+}
+
+export function parseExportHeader(text: string): string {
+  const firstLine = normalizeExportText(text).split('\n')[0] ?? '';
   const match = firstLine.match(/^Chat history with (.+)$/);
   if (!match) throw new Error('File does not appear to be a LINE chat export.');
   return match[1].trim();
@@ -72,8 +76,7 @@ interface Pending {
 }
 
 export function parseExportFile(text: string, chatMid: string, timezone: string): Message[] {
-  // eslint-disable-next-line no-irregular-whitespace -- strips a literal UTF-8 BOM (U+FEFF)
-  const lines = text.replace(/^﻿/, '').split('\n');
+  const lines = normalizeExportText(text).split('\n');
   const messages: Message[] = [];
   const occurrences = new Map<string, number>();
   let currentDate: { year: number; month: number; day: number } | null = null;
