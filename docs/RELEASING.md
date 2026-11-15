@@ -62,9 +62,12 @@ gate is a repository variable that only a human sets.
 1. **Pre-check both package names.** Open
    `https://github.com/orgs/raidenyn/packages?repo_name=line-mcp` (and each
    package page) and confirm neither `line-mcp-full` nor `line-mcp` already
-   exists as a **public** package. GHCR cannot turn a public package private
-   again. If one exists and is public, the owner must delete it and the
-   bootstrap must be redone from the start.
+   exists as a **public** package. GHCR cannot make a public package private
+   again, and **this runbook never deletes a package**. If one already exists and
+   is public, **stop**: leave publication disabled (do not set
+   `GHCR_PACKAGES_PRIVATE`, and stop any run that could republish), and state
+   that the owner must decide separately how to proceed — the bootstrap is not
+   continued on top of a public package.
 
 2. **Push an asset-free placeholder to each package.** The
    `org.opencontainers.image.source` label is what links a package to this
@@ -97,12 +100,14 @@ gate is a repository variable that only a human sets.
    The workflow logs in with that environment secret and never with
    `GITHUB_TOKEN`; its permissions stay `contents: read`.
 
-5. **Verify denial in the linked state.** While signed in to GHCR as an
-   **unrelated** GitHub account with no access grant, attempt a pull; it must be
-   denied:
+5. **Verify denial for both packages in the linked state.** The two packages'
+   access controls are independent, so checking one says nothing about the
+   other. While signed in to GHCR as an **unrelated** GitHub account with no
+   access grant, attempt a pull of each; both must be denied:
 
    ```bash
    docker pull ghcr.io/raidenyn/line-mcp-full:placeholder   # must fail
+   docker pull ghcr.io/raidenyn/line-mcp:placeholder        # must fail
    ```
 
 6. **Record the bootstrap variable.** A maintainer (not an agent) sets it, and
@@ -114,12 +119,18 @@ gate is a repository variable that only a human sets.
 
 7. **Keep the placeholders until the first automatic `edge` push lands.** After
    that push, re-open both package pages and confirm "Inherit access from source
-   repository" is still off, repeat the denial check — including a
-   fork-origin credential path (a workflow run from a fork or branch must not be
-   able to read `GHCR_PUBLISH_TOKEN` or the packages) — and only then delete the
-   `placeholder` **versions**. Never delete either package. If a package is
-   deleted, unset the variable, stop any run that could republish, and redo the
-   whole bootstrap.
+   repository" is still off **on each**, then repeat the denial check for **both**
+   packages — including a fork-origin credential path (a workflow run from a fork
+   or branch must not be able to read `GHCR_PUBLISH_TOKEN` or either package):
+
+   ```bash
+   docker pull ghcr.io/raidenyn/line-mcp-full:placeholder   # must still fail
+   docker pull ghcr.io/raidenyn/line-mcp:placeholder        # must still fail
+   ```
+
+   Only then delete the `placeholder` **versions**. Never delete either package.
+   If a package is deleted, unset the variable, stop any run that could
+   republish, and redo the whole bootstrap.
 
 ### Publication and re-publication
 
