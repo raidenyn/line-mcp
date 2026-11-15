@@ -27,3 +27,136 @@ concurrency:
   group: publish-docker
   cancel-in-progress: false
   queue: max
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    if: github.repository == 'raidenyn/line-mcp'
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      edge: ${{ steps.resolve.outputs.edge }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+      major: ${{ steps.resolve.outputs.major }}
+    steps:
+      - name: Resolve publication inputs
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          DISPATCH_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TAG: ${{ inputs.tag }}
+          GHCR_PACKAGES_PRIVATE: ${{ vars.GHCR_PACKAGES_PRIVATE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish=true
+          latest=false
+          edge=false
+          major=''
+          tag=''
+          sha="$SHA"
+          short_sha="${SHA:0:7}"
+          ref="$SHA"
+
+          write_outputs() {
+            {
+              printf 'publish=%s\n' "$publish"
+              printf 'latest=%s\n' "$latest"
+              printf 'edge=%s\n' "$edge"
+              printf 'tag=%s\n' "$tag"
+              printf 'sha=%s\n' "$sha"
+              printf 'short_sha=%s\n' "$short_sha"
+              printf 'major=%s\n' "$major"
+              printf 'ref=%s\n' "$ref"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # Prereleases are skipped before any tag validation.
+          if [ "$EVENT_NAME" = 'release' ] && [ "$RELEASE_PRERELEASE" = 'true' ]; then
+            publish=false
+            write_outputs
+            exit 0
+          fi
+
+          # Never create a package from scratch: the bootstrap makes both
+          # packages private (with inherited access disabled) before merge.
+          if [ "${GHCR_PACKAGES_PRIVATE:-}" != 'true' ]; then
+            printf '::error::GHCR_PACKAGES_PRIVATE is not true; run the GHCR Private-Package Bootstrap in docs/RELEASING.md first\n' >&2
+            exit 1
+          fi
+
+          case "$EVENT_NAME" in
+            repository_dispatch) tag="$DISPATCH_TAG" ;;
+            release) tag="$RELEASE_TAG" ;;
+            workflow_dispatch) tag="$INPUT_TAG" ;;
+          esac
+
+          if [ "$EVENT_NAME" = 'repository_dispatch' ] && [ -z "$tag" ]; then
+            printf '::error::release-published dispatch carried no tag (payload: %s)\n' "$DISPATCH_PAYLOAD" >&2
+            exit 1
+          fi
+
+          if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::unsupported tag %s: expected vX.Y.Z\n' "$tag" >&2
+            exit 1
+          fi
+
+          # Any manual dispatch, tagged or not, must run from main.
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ] && [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::workflow_dispatch must run from refs/heads/main, got %s\n' "$REF" >&2
+            exit 1
+          fi
+
+          REMOTE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          if [ -n "$tag" ]; then
+            sha=$(git ls-remote "$REMOTE" "refs/tags/$tag^{}" | cut -f1)
+            if [ -z "$sha" ]; then
+              sha=$(git ls-remote "$REMOTE" "refs/tags/$tag" | cut -f1)
+            fi
+            if [ -z "$sha" ]; then
+              printf '::error::cannot resolve a commit for tag %s\n' "$tag" >&2
+              exit 1
+            fi
+            short_sha="${sha:0:7}"
+            major="${tag#v}"
+            major="${major%%.*}"
+
+            listing=$(git ls-remote --tags --refs --sort=-v:refname "$REMOTE" 'v*')
+            newest=$(printf '%s\n' "$listing" \
+              | sed 's#.*refs/tags/##' \
+              | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+              | sort -V \
+              | tail -n1)
+            if [ "$newest" = "$tag" ]; then
+              latest=true
+            fi
+          fi
+
+          # `edge` only advances while this run still matches main's head, so a
+          # queued run or a stale re-run cannot move it backwards.
+          if [ -z "$tag" ]; then
+            head=$(git ls-remote "$REMOTE" refs/heads/main | cut -f1)
+            if [ "$head" = "$sha" ]; then
+              edge=true
+            fi
+          fi
+
+          if [ -n "$tag" ]; then
+            ref="refs/tags/$tag"
+          else
+            ref="$sha"
+          fi
+
+          write_outputs

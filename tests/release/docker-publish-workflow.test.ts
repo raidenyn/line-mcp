@@ -1,4 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
@@ -37,5 +40,272 @@ describe('publish workflow', () => {
       group: 'publish-docker',
       queue: 'max',
     });
+  });
+});
+
+const SHA_MAIN = 'a'.repeat(40);
+const SHA_TAG = 'b'.repeat(40);
+
+type Step = {
+  'continue-on-error'?: boolean;
+  env?: Record<string, string>;
+  id?: string;
+  if?: string;
+  name?: string;
+  run?: string;
+  uses?: string;
+  with?: Record<string, unknown>;
+};
+
+const prepare = workflow.jobs.prepare as {
+  if?: string;
+  outputs: Record<string, string>;
+  steps: Step[];
+};
+
+const resolveStep = () => prepare.steps.find((step) => step.id === 'resolve')!;
+
+type ResolveCase = {
+  env?: Record<string, string>;
+  expect: Record<string, string>;
+  exit: number;
+  name: string;
+  stderr?: string;
+  tags?: string[];
+};
+
+const cases: ResolveCase[] = [
+  {
+    name: 'prerelease with a malformed tag is skipped, not rejected',
+    env: { EVENT_NAME: 'release', RELEASE_PRERELEASE: 'true', RELEASE_TAG: 'v1.2.3-rc.1' },
+    exit: 0,
+    expect: { publish: 'false', tag: '' },
+  },
+  {
+    name: 'dispatch without a tag fails',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: '' },
+    exit: 1,
+    expect: {},
+    stderr: 'carried no tag',
+  },
+  {
+    name: 'publication is refused until the private bootstrap is recorded',
+    env: { EVENT_NAME: 'push', GHCR_PACKAGES_PRIVATE: '' },
+    exit: 1,
+    expect: {},
+    stderr: 'GHCR Private-Package Bootstrap',
+  },
+  {
+    name: 'two-component tag is rejected',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2' },
+    exit: 1,
+    expect: {},
+  },
+  {
+    name: 'tagged manual dispatch off main is rejected',
+    env: { EVENT_NAME: 'workflow_dispatch', REF: 'refs/heads/x', INPUT_TAG: 'v1.2.3' },
+    exit: 1,
+    expect: {},
+  },
+  {
+    name: 'untagged manual dispatch off main is rejected',
+    env: { EVENT_NAME: 'workflow_dispatch', REF: 'refs/heads/x', INPUT_TAG: '' },
+    exit: 1,
+    expect: {},
+  },
+  {
+    name: 'annotated tag resolves the peeled commit',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '1' },
+    tags: ['v1.2.3'],
+    exit: 0,
+    expect: {
+      latest: 'true',
+      major: '1',
+      publish: 'true',
+      sha: SHA_TAG,
+      short_sha: SHA_TAG.slice(0, 7),
+    },
+  },
+  {
+    name: 'lightweight tag falls back to the direct ref',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '0' },
+    exit: 0,
+    expect: { sha: SHA_TAG },
+  },
+  {
+    name: 'a newer release tag makes this release not newest',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3' },
+    tags: ['v1.2.3', 'v1.3.0'],
+    exit: 0,
+    expect: { latest: 'false' },
+  },
+  {
+    name: 'a release candidate cannot outrank its stable release',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.3.0' },
+    tags: ['v1.3.0', 'v1.3.0-rc.1'],
+    exit: 0,
+    expect: { latest: 'true' },
+  },
+  {
+    name: 'zero major is parsed but never published as a bare major tag',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v0.2.0' },
+    tags: ['v0.2.0'],
+    exit: 0,
+    expect: { major: '0' },
+  },
+  {
+    name: 'edge holds when main has moved on',
+    env: { EVENT_NAME: 'push', FAKE_MAIN: 'c'.repeat(40) },
+    exit: 0,
+    expect: { edge: 'false' },
+  },
+  {
+    name: 'edge advances when this run still matches main',
+    env: { EVENT_NAME: 'push', FAKE_MAIN: SHA_MAIN },
+    exit: 0,
+    expect: { edge: 'true' },
+  },
+  {
+    name: 'untagged manual dispatch from main moves edge',
+    env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: SHA_MAIN },
+    exit: 0,
+    expect: { edge: 'true', ref: SHA_MAIN },
+  },
+  {
+    name: 'untagged manual dispatch at a stale head does not move edge',
+    env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: 'c'.repeat(40) },
+    exit: 0,
+    expect: { edge: 'false' },
+  },
+  {
+    name: 'release event publishes the release tag',
+    env: { EVENT_NAME: 'release', FAKE_ANNOTATED: '0', RELEASE_TAG: 'v1.2.3' },
+    tags: ['v1.2.3'],
+    exit: 0,
+    expect: { latest: 'true', publish: 'true', tag: 'v1.2.3' },
+  },
+  {
+    name: 'tagged manual dispatch from main publishes the tag',
+    env: { EVENT_NAME: 'workflow_dispatch', FAKE_ANNOTATED: '0', INPUT_TAG: 'v1.2.3' },
+    tags: ['v1.2.3'],
+    exit: 0,
+    expect: { publish: 'true', tag: 'v1.2.3' },
+  },
+  {
+    name: 'a tag missing from the remote fails',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_TAG_MISSING: '1' },
+    exit: 1,
+    expect: {},
+    stderr: 'cannot resolve',
+  },
+  {
+    name: 'a failed tag listing fails instead of silently defaulting latest',
+    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_TAGS_FAIL: '1' },
+    exit: 1,
+    expect: {},
+  },
+];
+
+function runResolve(testCase: ResolveCase) {
+  const dir = mkdtempSync(join(tmpdir(), 'resolve-'));
+  const fakeGit = join(dir, 'git');
+  writeFileSync(
+    fakeGit,
+    `#!/usr/bin/env bash
+set -euo pipefail
+args="$*"
+if [[ "$args" == *refs/heads/main* && "$args" != *--tags* ]]; then
+  printf '%s\trefs/heads/main\n' "\${FAKE_MAIN:-${SHA_MAIN}}"
+elif [[ "$args" == *--tags* ]]; then
+  if [ "\${FAKE_TAGS_FAIL:-0}" = 1 ]; then
+    exit 1
+  fi
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    printf '%s\trefs/tags/%s\n' "${SHA_TAG}" "$tag"
+  done <<< "\${FAKE_TAGS:-}"
+elif [[ "$args" == *'^{}'* ]]; then
+  if [ "\${FAKE_ANNOTATED:-1}" = 1 ] && [ "\${FAKE_TAG_MISSING:-0}" != 1 ]; then
+    printf '%s\trefs/tags/peeled^{}\n' "${SHA_TAG}"
+  fi
+elif [[ "$args" == *refs/tags/* ]]; then
+  if [ "\${FAKE_TAG_MISSING:-0}" != 1 ]; then
+    if [ "\${FAKE_ANNOTATED:-1}" = 1 ]; then
+      printf '%s\trefs/tags/tag\n' "dddddddddddddddddddddddddddddddddddddddd"
+    else
+      printf '%s\trefs/tags/tag\n' "${SHA_TAG}"
+    fi
+  fi
+else
+  exit 1
+fi
+`,
+  );
+  chmodSync(fakeGit, 0o755);
+  const outputPath = join(dir, 'output');
+  writeFileSync(outputPath, '');
+  const result = spawnSync('bash', ['-c', resolveStep().run!], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      DISPATCH_PAYLOAD: '{}',
+      DISPATCH_TAG: '',
+      FAKE_TAGS: (testCase.tags ?? []).join('\n'),
+      GHCR_PACKAGES_PRIVATE: 'true',
+      GITHUB_OUTPUT: outputPath,
+      GITHUB_REPOSITORY: 'owner/repo',
+      GITHUB_SERVER_URL: 'https://github.com',
+      INPUT_TAG: '',
+      PATH: `${dir}:${process.env.PATH}`,
+      REF: 'refs/heads/main',
+      RELEASE_PRERELEASE: 'false',
+      RELEASE_TAG: '',
+      SHA: SHA_MAIN,
+      ...testCase.env,
+    },
+  });
+  const parsed = Object.fromEntries(
+    readFileSync(outputPath, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => {
+        const [key, ...rest] = line.split('=');
+        return [key, rest.join('=')];
+      }),
+  );
+  return { parsed, status: result.status, stderr: result.stderr };
+}
+
+describe('prepare resolve script', () => {
+  it.each(cases)('$name', (testCase) => {
+    const { parsed, status, stderr } = runResolve(testCase);
+    expect(status).toBe(testCase.exit);
+    if (testCase.stderr) {
+      expect(stderr).toContain(testCase.stderr);
+    }
+    for (const [key, value] of Object.entries(testCase.expect)) {
+      expect(parsed).toHaveProperty(key, value);
+    }
+  });
+
+  it('exposes every output the publish job consumes', () => {
+    expect(Object.keys(prepare.outputs).sort()).toEqual(
+      ['edge', 'latest', 'major', 'publish', 'ref', 'sha', 'short_sha', 'tag'],
+    );
+  });
+
+  it('feeds the event payload through the environment', () => {
+    expect(resolveStep().env).toMatchObject({
+      DISPATCH_PAYLOAD: '${{ toJSON(github.event.client_payload) }}',
+      DISPATCH_TAG: '${{ github.event.client_payload.tag }}',
+      INPUT_TAG: '${{ inputs.tag }}',
+      RELEASE_PRERELEASE: '${{ github.event.release.prerelease }}',
+      RELEASE_TAG: '${{ github.event.release.tag_name }}',
+    });
+    expect(resolveStep().run).toContain('GITHUB_OUTPUT');
+  });
+
+  it('never runs from a fork', () => {
+    expect(prepare.if).toBe("github.repository == 'raidenyn/line-mcp'");
   });
 });
