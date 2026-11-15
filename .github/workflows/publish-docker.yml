@@ -1,0 +1,29 @@
+# Publishes both runtime targets to GitHub Container Registry.
+# GHCR only: every image bundles LINE's proprietary LTSM assets, and the
+# repository's provenance policy approves Docker images for internal use only.
+# The packages must stay private; do not add a Docker Hub or other public push.
+name: Publish Docker
+
+on:
+  push:
+    branches: [main]
+  repository_dispatch:
+    types: [release-published]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag to publish (e.g. v1.2.3). Leave empty to publish edge
+          from the current main commit.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-docker
+  cancel-in-progress: false
+  queue: max
