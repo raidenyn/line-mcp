@@ -81,6 +81,63 @@ Never run two servers against the same data root on one host. The composed serve
 
 ### Docker (recommended)
 
+Both runtime targets are published to the **private** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, ten tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Pulling needs registry authentication plus an access grant.
+
+#### Pull the published images
+
+Log in with a GitHub personal access token (classic) that carries `read:packages`:
+
+```bash
+echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+```
+
+A valid token alone is not enough: the maintainer **must grant access** to the `line-mcp-full` and `line-mcp` packages for your GitHub account or team before a pull succeeds. Neither image is anonymously pullable.
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — ten tools
+docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — five messenger tools
+```
+
+Run each image against **its own** data root:
+
+```bash
+# Composed server (ten tools) on host port 3000
+docker run -d --name line-mcp-full \
+  -p 3000:3000 \
+  -v bank-mcp-data:/data \
+  ghcr.io/raidenyn/line-mcp-full:latest
+claude mcp add --transport http --scope user line http://localhost:3000/mcp
+
+# Standalone messenger server (five tools) on host port 3100, its OWN data volume
+docker run -d --name line-mcp \
+  -p 3100:3000 \
+  -v line-mcp-data:/data \
+  ghcr.io/raidenyn/line-mcp:latest
+```
+
+**Never point both containers at the same data root** (see [One process per data root](#one-process-per-data-root)). The composed server owns bank/category data the standalone server knows nothing about, and the standalone server refuses to start against a legacy pre-migration combined database. `bank-mcp-data` belongs to the composed server only; `line-mcp-data` belongs to the standalone server only.
+
+**The two GHCR packages must stay private.** Both images bundle LINE Corporation's proprietary LTSM assets, so they are published to `ghcr.io` only — there is no Docker Hub or other public mirror. Provenance and notices: [`packages/line-client/THIRD_PARTY_NOTICES.md`](packages/line-client/THIRD_PARTY_NOTICES.md), [`packages/line-client/assets/ltsm/provenance.json`](packages/line-client/assets/ltsm/provenance.json). Public distribution is pending the issue #75 review.
+
+##### Image tags
+
+| Tag | Meaning |
+|-----|---------|
+| `latest` | Newest stable release |
+| `X.Y.Z` | One specific release |
+| `X.Y` | Newest release in that minor line — moves only for the newest stable release |
+| `X` | Newest release in that major line — never published on `0.x` |
+| `edge` | Newest build from `main` |
+| `sha-<short>` | Per-commit reference |
+
+`sha-<short>` names the commit an image was built from (not the default-branch head), but it is not byte-for-byte immutable: rebuilding the same commit produces a new digest. Pin a digest for an immutable deployment:
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full@sha256:<digest>
+```
+
+#### Build or run from a checkout
+
 Two build targets share one multi-stage `Dockerfile`:
 
 ```bash
@@ -153,6 +210,8 @@ The repository ships four distinct test surfaces:
 - **smoke** — `npm ci` → `npm run test:smoke`: builds the workspace once, then runs both compiled CLI targets against the strict local LINE mock. No credentials, no Docker.
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
 - **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
+
+**Docker publication** is a separate workflow, `Publish Docker` (`.github/workflows/publish-docker.yml`). It publishes both images to the private `ghcr.io` packages above: on every push to `main` as `edge` (when that commit is still `main`'s head) plus `sha-<short>`, and on a `release-published` dispatch, a published GitHub Release, or a manual `workflow_dispatch` with a `tag` as `X.Y.Z` plus `latest`/`X.Y`/`X` when that tag is the newest stable release. It never runs on pull requests and never pushes to a public registry; the operator steps and the one-time private-package bootstrap are in [docs/RELEASING.md](docs/RELEASING.md).
 
 The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate; it needs real credentials and is a manual pre-release check.
 

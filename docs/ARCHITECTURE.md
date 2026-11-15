@@ -126,6 +126,15 @@ One multi-stage `Dockerfile`, two runtime targets. The `builder` stage (`node:24
 
 Both run as the non-root `node` user, expose `/data` as a volume, and healthcheck `GET ${BASE_PATH}/healthz` via Node's http client. `docker-compose.yml` defaults to the `server` target (service `line-mcp-full`, volume `bank-mcp-data`); the `line-mcp` standalone service is under the `min` profile with its **own** volume (`line-mcp-data`).
 
+## Delivery & publication (`.github/workflows/publish-docker.yml`)
+
+The `Publish Docker` workflow publishes the two existing runtime targets, unmodified, as `linux/amd64` images in **GHCR only** — `ghcr.io/raidenyn/line-mcp-full` (target `server`, ten tools) and `ghcr.io/raidenyn/line-mcp` (target `line-mcp`, five tools). It has no Docker Hub or other public push and never changes package visibility: both packages are private because the images bundle the proprietary LTSM assets.
+
+- **Triggers** — `push` to `main` (`edge` when the commit is still `main`'s head, plus `sha-<short>`), `repository_dispatch: release-published`, `release: published`, and `workflow_dispatch` (from `main`; optional `tag`, otherwise an `edge` rebuild). Prereleases are skipped, pull requests never run it, and no `latest` tag is applied to `main` builds.
+- **Release tags** — `vX.Y.Z` publishes `X.Y.Z` and `sha-<short>`, plus `X.Y`/`X`/`latest` only when that tag is the newest stable release (`X` never on `0.x`). `sha-<short>` identifies the built commit, not the default-branch head; a rebuild of the same commit yields a new digest, so deployments should pin a digest.
+- **Job shape** — a `prepare` job (only `contents: read`) resolves the checkout ref, commit SHA, and tag/edge flags; a matrix `publish` job runs in the `ghcr-publish` environment, authenticates with `GHCR_PUBLISH_TOKEN` (never `GITHUB_TOKEN`), and builds each target with Buildx under its own GHA cache scope. `prepare` refuses to publish unless `GHCR_PACKAGES_PRIVATE` is `true`.
+- **Runbook** — the one-time private-package bootstrap, the variable, and manual re-publication live in `docs/RELEASING.md` ("Docker Images" / "GHCR Private-Package Bootstrap").
+
 ## Specs & artifact policy
 
 - `packages/line-client/assets/ltsm/*` — LINE's proprietary WASM crypto + sandbox (binary, do not edit). Provenance/notice in `THIRD_PARTY_NOTICES.md` and `provenance.json`.

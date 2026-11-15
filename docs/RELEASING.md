@@ -35,3 +35,121 @@ workflow.
 
 Rerun a failed workflow after correcting the reported permission, API, or stale
 checkout error. Semantic-release will not recreate an existing version.
+
+## Docker Images
+
+Both runtime targets are published to **GitHub Container Registry (GHCR) only**,
+as two private packages:
+
+| Workflow target | Image | Tools |
+| --------------- | ----- | ----- |
+| `server` | `ghcr.io/raidenyn/line-mcp-full` | ten (composed) |
+| `line-mcp` | `ghcr.io/raidenyn/line-mcp` | five (standalone) |
+
+Publication is done by the **`Publish Docker`** workflow in
+`.github/workflows/publish-docker.yml`. The packages **must stay private**: every
+image bundles LINE Corporation's proprietary LTSM assets, and the provenance
+policy approves Docker images for internal use only. There is no Docker Hub or
+other public push, no anonymous pull, and no change of package visibility from
+CI.
+
+### GHCR Private-Package Bootstrap
+
+This is a **one-time, maintainer-only** sequence. Do it once, before the publish
+workflow's first run. Nothing here may be delegated to an agent: the workflow
+gate is a repository variable that only a human sets.
+
+1. **Pre-check both package names.** Open
+   `https://github.com/orgs/raidenyn/packages?repo_name=line-mcp` (and each
+   package page) and confirm neither `line-mcp-full` nor `line-mcp` already
+   exists as a **public** package. GHCR cannot turn a public package private
+   again. If one exists and is public, the owner must delete it and the
+   bootstrap must be redone from the start.
+
+2. **Push an asset-free placeholder to each package.** The
+   `org.opencontainers.image.source` label is what links a package to this
+   repository, and inheritance can only be disabled **after** linking. A
+   `FROM scratch` image contains no application files, so nothing proprietary is
+   exposed while inheritance is still on. No runtime image may be pushed until
+   inheritance is off and the denial check below has passed.
+
+   ```bash
+   echo "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
+   printf 'FROM scratch\n' > Dockerfile.placeholder
+   for image in line-mcp-full line-mcp; do
+     docker build \
+       --label org.opencontainers.image.source=https://github.com/raidenyn/line-mcp \
+       -t "ghcr.io/raidenyn/$image:placeholder" \
+       -f Dockerfile.placeholder .
+     docker push "ghcr.io/raidenyn/$image:placeholder"
+   done
+   ```
+
+3. **Privatize and unlink each package.** In each linked package's settings:
+   set visibility to **Private**, and untick **"Inherit access from source
+   repository"**. Do **not** grant `raidenyn/line-mcp` Actions package access —
+   this repository is public, so repository-wide Actions access would let fork
+   runs read the packages. No package role is granted to the repository token.
+
+4. **Create the protected `ghcr-publish` environment.** Restrict it to `main`
+   and `v*` tags, and store the classic personal access token as
+   `GHCR_PUBLISH_TOKEN` (scope `write:packages`, which implies `read:packages`).
+   The workflow logs in with that environment secret and never with
+   `GITHUB_TOKEN`; its permissions stay `contents: read`.
+
+5. **Verify denial in the linked state.** While signed in to GHCR as an
+   **unrelated** GitHub account with no access grant, attempt a pull; it must be
+   denied:
+
+   ```bash
+   docker pull ghcr.io/raidenyn/line-mcp-full:placeholder   # must fail
+   ```
+
+6. **Record the bootstrap variable.** A maintainer (not an agent) sets it, and
+   the workflow refuses to publish while it is not `true`:
+
+   ```bash
+   gh variable set GHCR_PACKAGES_PRIVATE --body true
+   ```
+
+7. **Keep the placeholders until the first automatic `edge` push lands.** After
+   that push, re-open both package pages and confirm "Inherit access from source
+   repository" is still off, repeat the denial check — including a
+   fork-origin credential path (a workflow run from a fork or branch must not be
+   able to read `GHCR_PUBLISH_TOKEN` or the packages) — and only then delete the
+   `placeholder` **versions**. Never delete either package. If a package is
+   deleted, unset the variable, stop any run that could republish, and redo the
+   whole bootstrap.
+
+### Publication and re-publication
+
+Automatic publication happens when the `Release` workflow's `release-published`
+repository dispatch arrives, and when a GitHub Release is published by a
+maintainer. Both build the source at the release tag (not `main`'s head) and
+publish `X.Y.Z` plus `sha-<short>`; `latest`, `X.Y`, and `X` move only when that
+tag is the newest stable release, and `X` is never published on `0.x`.
+
+A **prerelease is skipped**: the run succeeds without pushing and without moving
+any tag.
+
+To re-publish a tag deliberately, dispatch `Publish Docker` **from `main`**:
+
+```bash
+gh workflow run publish-docker.yml --ref main -f tag=v1.2.3
+```
+
+- A **bare tag push** (`git push origin v1.2.3`) publishes no image by design —
+  use the dispatch above.
+- **Tags that predate this workflow** have no images; dispatch the tag to create
+  them.
+- **Promoting a prerelease** to a full release fires `released`, not
+  `published`, so the release trigger does not run, and the workflow only
+  accepts a `vX.Y.Z` tag. If the promoted tag is already `vX.Y.Z`, dispatch it
+  manually.
+- Re-publishing an **older** tag adds only that `X.Y.Z` and its `sha-<short>`;
+  `latest`, `X.Y`, and `X` do not move backwards.
+- If a run fails, **re-run the whole workflow**, not only its failed jobs, so
+  the preparation job recomputes refs and tags.
+
+Readers of the private images need a token with `read:packages` **and** an
+access grant from the maintainer; a valid token alone is not enough.
