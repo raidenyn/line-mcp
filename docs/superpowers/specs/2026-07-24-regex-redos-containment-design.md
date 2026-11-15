@@ -180,7 +180,11 @@ unhandled rejection: pending and future work fails with `worker_failure`, and
 `close()` reports the construction error once. Degradation also retires every
 surviving worker, because rejecting a job clears its timeout; leaving the
 worker alive would let user-controlled regex work keep running past the budget
-it just lost. `close()` awaits those retirements.
+it just lost. `close()` awaits those retirements. Retired workers keep an inert
+`error` listener: a worker can deliver a queued error, for example after
+reaching its heap limit, before its termination settles, and Node rethrows an
+`error` event with no listener as an uncaught exception that would end the
+process.
 
 MCP-facing errors identify the operation and pattern context where available.
 Timeouts abort the whole tool call. Transaction and summary tools never return
@@ -226,6 +230,8 @@ the same change.
 - Verify a synchronous worker-construction failure during replacement degrades
   the executor without an unhandled rejection, terminates every surviving
   worker, and rejects work that was active at the time.
+- Verify a worker error delivered while it is being retired (after degradation
+  or during `close()`) does not become an uncaught exception.
 - Verify timeout configuration defaulting and bounds.
 - Verify `close()` rejects pending work, terminates workers, and is idempotent.
 

@@ -338,21 +338,29 @@ describe('RegexExecutor', () => {
         validate(pattern: string, flags: string, context: string): Promise<void>;
         close(): Promise<void>;
         degraded: boolean;
-        slots: Array<{ worker: Worker }>;
+        slots: Array<{ worker: Worker; ready: boolean; active?: unknown }>;
         replace(index: number, worker: Worker): void;
       };
 
       await executor.validate('warm1', 's', 'warm1');
       await executor.validate('warm2', 's', 'warm2');
+      await vi.waitFor(() => {
+        expect(executor.slots.every((slot) => slot.ready)).toBe(true);
+      });
       expect(factoryCalls).toBe(2);
       const workers = executor.slots.map((slot) => slot.worker);
 
+      // Put the long-running match on one slot and replace the other, so the
+      // worker that survives the failed replacement is the busy one.
       const blocked = executor.test('(a+)+$', 's', `${'a'.repeat(40)}!`, 'blocked');
-      executor.replace(0, workers[0]);
+      const busyIndex = executor.slots.findIndex((slot) => slot.active !== undefined);
+      expect(busyIndex).toBeGreaterThanOrEqual(0);
+      const otherIndex = busyIndex === 0 ? 1 : 0;
+      executor.replace(otherIndex, workers[otherIndex]);
 
       await expect(blocked).rejects.toMatchObject({ code: 'worker_failure' });
       expect(executor.degraded).toBe(true);
-      expect(terminated).toEqual(expect.arrayContaining(workers));
+      expect(terminated).toEqual(expect.arrayContaining([workers[busyIndex], workers[otherIndex]]));
       await expect(executor.test('safe', 's', 'safe', 'after'))
         .rejects.toMatchObject({ code: 'worker_failure' });
       await expect(executor.close()).rejects.toThrow('replacement construction failed');
@@ -362,5 +370,79 @@ describe('RegexExecutor', () => {
     } finally {
       process.off('unhandledRejection', onRejection);
     }
+  });
+
+  it('keeps an error listener while retiring workers during degradation', async () => {
+    const pending: Array<() => void> = [];
+    let factoryCalls = 0;
+    const factory: WorkerFactory = (source, options) => {
+      factoryCalls++;
+      if (factoryCalls > 2) throw new Error('replacement construction failed');
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      worker.terminate = () => {
+        const deferred = Promise.withResolvers<number>();
+        pending.push(() => { void origTerminate().then(deferred.resolve, deferred.reject); });
+        return deferred.promise;
+      };
+      return worker;
+    };
+    const executor = createExecutor(1000, factory) as unknown as {
+      test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
+      validate(pattern: string, flags: string, context: string): Promise<void>;
+      close(): Promise<void>;
+      degraded: boolean;
+      slots: Array<{ worker: Worker }>;
+      replace(index: number, worker: Worker): void;
+    };
+
+    await executor.validate('warm1', 's', 'warm1');
+    await executor.validate('warm2', 's', 'warm2');
+    expect(factoryCalls).toBe(2);
+    const workers = executor.slots.map((slot) => slot.worker);
+
+    try {
+      executor.replace(0, workers[0]);
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      pending[0]();
+      await vi.waitFor(() => expect(executor.degraded).toBe(true));
+      await vi.waitFor(() => expect(pending).toHaveLength(2));
+
+      // A worker can deliver a queued error (for example on heap exhaustion)
+      // before its termination settles. Without a listener Node rethrows it as
+      // an uncaught exception and the process exits.
+      expect(workers[1].listenerCount('error')).toBe(1);
+      expect(() => workers[1].emit('error', new Error('late worker error'))).not.toThrow();
+    } finally {
+      for (const release of pending.splice(0)) release();
+    }
+    await expect(executor.close()).rejects.toThrow('replacement construction failed');
+  });
+
+  it('keeps an error listener while retiring workers during close', async () => {
+    const pending: Array<() => void> = [];
+    const factory: WorkerFactory = (source, options) => {
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      worker.terminate = () => {
+        const deferred = Promise.withResolvers<number>();
+        pending.push(() => { void origTerminate().then(deferred.resolve, deferred.reject); });
+        return deferred.promise;
+      };
+      return worker;
+    };
+    const executor = createExecutor(1000, factory);
+    await executor.validate('warm', 's', 'warm');
+    const worker = (executor as unknown as { slots: Array<{ worker: Worker }> }).slots[0].worker;
+
+    const closing = executor.close();
+    try {
+      await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+      expect(worker.listenerCount('error')).toBe(1);
+      expect(() => worker.emit('error', new Error('late worker error'))).not.toThrow();
+    } finally {
+      for (const release of pending.splice(0)) release();
+    }
+    await closing;
   });
 });

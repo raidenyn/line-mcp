@@ -268,8 +268,7 @@ export class RegexExecutor implements RegexExecutorPort {
   private replace(index: number, worker: Worker): void {
     const slot = this.slots[index];
     if (slot) slot.replacing = true;
-    worker.removeAllListeners();
-    const termination = worker.terminate();
+    const termination = this.retire(worker);
     this.retirements.add(termination);
     void termination.then(
       () => {
@@ -316,12 +315,24 @@ export class RegexExecutor implements RegexExecutorPort {
       // construction then failed.
       if (!slot.replacing && slot.worker.threadId !== -1) {
         slot.replacing = true;
-        slot.worker.removeAllListeners();
-        const termination = slot.worker.terminate();
+        const termination = this.retire(slot.worker);
         this.retirements.add(termination);
         void termination.catch(() => {});
       }
     }
+  }
+
+  /**
+   * Stop a worker we no longer use. A worker can deliver a queued `error`
+   * (for example after reaching its heap limit) while it is being retired;
+   * with no listener Node rethrows that event as an uncaught exception and the
+   * process exits. Keep an inert handler so retirement stays contained, and
+   * let the termination promise report the outcome.
+   */
+  private retire(worker: Worker): Promise<number> {
+    worker.removeAllListeners();
+    worker.on('error', () => {});
+    return worker.terminate();
   }
 
   private failure(code: RegexErrorCode, context: string, pattern: string, detail: string): RegexExecutionError {
@@ -343,8 +354,7 @@ export class RegexExecutor implements RegexExecutorPort {
           active.reject(this.failure('closed', active.context, active.pattern, 'executor is closed'));
         }
         if (!slot.replacing && slot.worker.threadId !== -1) {
-          slot.worker.removeAllListeners();
-          terminations.push(slot.worker.terminate());
+          terminations.push(this.retire(slot.worker));
         }
       }
       this.slots.length = 0;
