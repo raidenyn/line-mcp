@@ -71,7 +71,7 @@ The server runs over the [Streamable HTTP MCP transport](https://spec.modelconte
 
 **Legacy persistence migration:** On first start against a pre-modular data root, the composed server performs a one-time migration of the old combined `cache/messages.db` into separate per-generation line and bank databases. Rows whose owning MID cannot be unambiguously determined are **quarantined** (never dropped or arbitrarily assigned) and can be recovered later. The migration is generation-based and pointer-committed: an interrupted restart (before or after the pointer is published) converges on a single authoritative generation. Category IDs and order survive migration and remain shared across principals.
 
-**Regex execution safety:** All bank template, category, merchant-filter, and preset regexes execute in a bounded worker pool rather than on the server event loop. Each match has a 100 ms budget by default. Set `BANK_REGEX_TIMEOUT_MS` to tune the budget; values are clamped to 10-1000 ms. Invalid or timed-out patterns fail the entire tool call so financial results are never silently partial.
+**Regex execution safety:** All bank template, category, merchant-filter, and preset regexes execute in a bounded worker pool rather than on the server event loop. Each match has a 100 ms budget by default. Set `BANK_REGEX_TIMEOUT_MS` to tune the budget; values are clamped to 10-1000 ms. Workers return only the capture groups transaction parsing consumes and cap reply size, so a pattern cannot stall the server by amplifying captures. Invalid, oversized-output, or timed-out patterns fail the entire tool call so financial results are never silently partial.
 
 ### One process per data root
 

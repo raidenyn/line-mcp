@@ -22,6 +22,7 @@ export type RegexErrorCode =
   | 'busy'
   | 'pattern_too_large'
   | 'subject_too_large'
+  | 'output_too_large'
   | 'worker_failure'
   | 'closed';
 
@@ -44,7 +45,18 @@ export class RegexExecutionError extends Error {
 
 export interface RegexExecutorPort {
   validate(pattern: string, flags: string, context: string): Promise<void>;
-  exec(pattern: string, flags: string, subject: string, context: string): Promise<RegexMatch | null>;
+  /**
+   * @param captures Named capture groups the caller consumes. Only these are
+   * copied across the worker boundary, so a pattern cannot amplify its reply
+   * by naming many groups that each span the whole subject.
+   */
+  exec(
+    pattern: string,
+    flags: string,
+    subject: string,
+    context: string,
+    captures: readonly string[],
+  ): Promise<RegexMatch | null>;
   test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
 }
 
@@ -61,11 +73,12 @@ interface WorkerJob {
   pattern: string;
   flags: string;
   subject: string;
+  captures: readonly string[];
 }
 
 type WorkerReply =
   | { id: number; ok: true; value: unknown }
-  | { id: number; ok: false; message: string };
+  | { id: number; ok: false; message: string; code?: 'output_too_large' };
 
 interface PendingJob extends WorkerJob {
   context: string;
@@ -92,6 +105,7 @@ export class RegexExecutor implements RegexExecutorPort {
   private nextId = 1;
   private closed = false;
   private degraded = false;
+  private terminationFailure?: Error;
 
   constructor(options: { timeoutMs?: number; workerSource?: string; workerFactory?: WorkerFactory } = {}) {
     this.timeoutMs = normalizeRegexTimeoutMs(options.timeoutMs);
@@ -103,8 +117,14 @@ export class RegexExecutor implements RegexExecutorPort {
     return this.submit<void>('validate', pattern, flags, '', context);
   }
 
-  exec(pattern: string, flags: string, subject: string, context: string): Promise<RegexMatch | null> {
-    return this.submit<RegexMatch | null>('exec', pattern, flags, subject, context);
+  exec(
+    pattern: string,
+    flags: string,
+    subject: string,
+    context: string,
+    captures: readonly string[],
+  ): Promise<RegexMatch | null> {
+    return this.submit<RegexMatch | null>('exec', pattern, flags, subject, context, captures);
   }
 
   test(pattern: string, flags: string, subject: string, context: string): Promise<boolean> {
@@ -117,6 +137,7 @@ export class RegexExecutor implements RegexExecutorPort {
     flags: string,
     subject: string,
     context: string,
+    captures: readonly string[] = [],
   ): Promise<T> {
     if (this.closed) return Promise.reject(this.failure('closed', context, pattern, 'executor is closed'));
     if (this.degraded) return Promise.reject(this.failure('worker_failure', context, pattern, 'executor is degraded'));
@@ -133,7 +154,12 @@ export class RegexExecutor implements RegexExecutorPort {
       ));
     }
 
-    this.ensureWorkers();
+    try {
+      this.ensureWorkers();
+    } catch (error) {
+      this.degrade(error instanceof Error ? error : new Error(String(error)));
+    }
+    if (this.degraded) return Promise.reject(this.failure('worker_failure', context, pattern, 'executor is degraded'));
     const hasIdleSlot = this.slots.some((slot) => this.isAvailable(slot));
     if (!hasIdleSlot && this.queue.length >= MAX_QUEUED_JOBS) {
       return Promise.reject(this.failure('busy', context, pattern, 'pending regex queue is full'));
@@ -141,7 +167,7 @@ export class RegexExecutor implements RegexExecutorPort {
 
     return new Promise<T>((resolve, reject) => {
       this.queue.push({
-        id: this.nextId++, operation, pattern, flags, subject, context,
+        id: this.nextId++, operation, pattern, flags, subject, context, captures,
         resolve: (value) => resolve(value as T), reject,
       });
       this.dispatch();
@@ -150,7 +176,13 @@ export class RegexExecutor implements RegexExecutorPort {
 
   private ensureWorkers(): void {
     if (this.slots.length > 0) return;
-    for (let index = 0; index < WORKER_COUNT; index++) this.spawn(index);
+    for (let index = 0; index < WORKER_COUNT; index++) {
+      try {
+        this.spawn(index);
+      } catch (error) {
+        this.degrade(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
   }
 
   private spawn(index: number): void {
@@ -206,6 +238,7 @@ export class RegexExecutor implements RegexExecutorPort {
         pattern: job.pattern,
         flags: job.flags,
         subject: job.subject,
+        captures: job.captures,
       };
       slot.worker.postMessage(message);
     }
@@ -218,7 +251,7 @@ export class RegexExecutor implements RegexExecutorPort {
     slot.active = undefined;
     if (job.timer) clearTimeout(job.timer);
     if (reply.ok) job.resolve(reply.value);
-    else job.reject(this.failure('invalid', job.context, job.pattern, reply.message));
+    else job.reject(this.failure(reply.code ?? 'invalid', job.context, job.pattern, reply.message));
     this.dispatch();
   }
 
@@ -242,28 +275,36 @@ export class RegexExecutor implements RegexExecutorPort {
       () => {
         this.retirements.delete(termination);
         if (slot) slot.replacing = false;
-        if (!this.closed && !this.degraded && this.slots[index]?.worker === worker) this.spawn(index);
+        if (!this.closed && !this.degraded && this.slots[index]?.worker === worker) {
+          try {
+            this.spawn(index);
+          } catch (error) {
+            this.degrade(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
       },
-      () => {
+      (reason) => {
         this.retirements.delete(termination);
         if (slot) slot.replacing = false;
-        this.degrade();
+        this.degrade(reason instanceof Error ? reason : new Error(String(reason)));
       },
-    );
+    ).catch(() => {});
   }
 
-  private degrade(): void {
+  private degrade(error: Error): void {
     if (this.degraded) return;
     this.degraded = true;
+    this.terminationFailure = error;
+    const detail = `executor degraded: ${error.message}`;
     for (const job of this.queue.splice(0)) {
-      job.reject(this.failure('worker_failure', job.context, job.pattern, 'executor degraded after unconfirmed worker termination'));
+      job.reject(this.failure('worker_failure', job.context, job.pattern, detail));
     }
     for (const slot of this.slots) {
       const active = slot.active;
       if (active?.timer) clearTimeout(active.timer);
       if (active) {
         slot.active = undefined;
-        active.reject(this.failure('worker_failure', active.context, active.pattern, 'executor degraded after unconfirmed worker termination'));
+        active.reject(this.failure('worker_failure', active.context, active.pattern, detail));
       }
     }
   }
@@ -294,6 +335,9 @@ export class RegexExecutor implements RegexExecutorPort {
       this.slots.length = 0;
       const results = await Promise.allSettled([...terminations, ...this.retirements]);
       const rejected = results.filter((r) => r.status === 'rejected');
+      if (this.terminationFailure) {
+        throw this.terminationFailure;
+      }
       if (rejected.length > 0) {
         throw new Error(`RegexExecutor close: ${rejected.length} worker termination(s) rejected`);
       }

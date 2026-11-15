@@ -82,8 +82,17 @@ Add an explicitly constructed `RegexExecutor` to `@raidenyn/bank-mcp`. It owns:
 The executor exposes asynchronous `validate`, `exec`, and `test` operations.
 Each operation accepts a caller-supplied context that identifies the source,
 such as a template, category, filter, or preset name. `exec` returns only the
-structured-clone-safe match data needed by transaction parsing, including named
-capture groups. `test` returns a boolean.
+structured-clone-safe match data needed by transaction parsing. `test` returns
+a boolean.
+
+`exec` also takes the names of the capture groups its caller consumes, and the
+worker copies back only those groups. Bounding the reply inside the worker
+matters because a user pattern can name thousands of captures that each span
+the whole subject; without selection, structured-clone deserialization on the
+parent thread would reintroduce the event-loop stall the pool exists to
+prevent. As a second bound, a reply whose match text and selected groups exceed
+131,072 UTF-16 code units is rejected with `output_too_large` before
+`postMessage`, rather than after it reaches the parent.
 
 The worker module is the only bank-package code that constructs or executes a
 native `RegExp` from user-controlled input. Compiled regexes never leave a
@@ -160,10 +169,15 @@ The executor distinguishes these failures internally:
 
 - invalid regex syntax;
 - pattern over 16,384 code units or subject over 65,536 code units;
+- match output over the 131,072-code-unit reply budget;
 - match execution timeout;
 - full pending-work queue;
-- worker crash; and
+- worker crash, including a replacement worker that cannot be constructed; and
 - executor shutdown.
+
+A failed replacement construction degrades the executor instead of leaving an
+unhandled rejection: pending and future work fails with `worker_failure`, and
+`close()` reports the construction error once.
 
 MCP-facing errors identify the operation and pattern context where available.
 Timeouts abort the whole tool call. Transaction and summary tools never return
@@ -193,6 +207,10 @@ the same change.
 
 - Verify successful `exec`, `test`, named groups, lookarounds, and
   backreferences.
+- Verify `exec` returns only the requested capture groups.
+- Verify a capture-amplification pattern returns a small reply instead of
+  deserializing every named group, and that an over-budget reply fails with
+  `output_too_large`.
 - Verify invalid syntax and pattern/subject-size failures.
 - Run `(a|aa)+$` against a non-match with a low injected timeout and assert
   prompt rejection.
@@ -202,6 +220,8 @@ the same change.
 - Verify the timed-out worker is replaced and the next normal job succeeds.
 - Verify queue saturation rejects excess work without creating more workers.
 - Verify worker crashes reject the active job and trigger replacement.
+- Verify a synchronous worker-construction failure during replacement degrades
+  the executor without an unhandled rejection.
 - Verify timeout configuration defaulting and bounds.
 - Verify `close()` rejects pending work, terminates workers, and is idempotent.
 

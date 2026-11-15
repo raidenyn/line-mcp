@@ -9,6 +9,21 @@ export const TransactionTemplateSchema = z.object({
 });
 export type TransactionTemplate = z.infer<typeof TransactionTemplateSchema>;
 
+/**
+ * Capture groups transaction parsing consumes. Only these cross the worker
+ * boundary, so a template cannot amplify its reply with unrelated groups.
+ */
+const TRANSACTION_CAPTURES = [
+  'original_amount',
+  'original_currency',
+  'amount',
+  'currency',
+  'merchant',
+  'date',
+  'balance',
+  'account',
+] as const;
+
 export const CategorySchema = z.object({
   name: z.string().min(1).describe('Unique category name, e.g. "Groceries"'),
   pattern: z.string().describe(
@@ -108,7 +123,9 @@ export async function parseTransaction(
 
   for (const [index, tmpl] of templates.entries()) {
     const name = 'name' in tmpl && typeof tmpl.name === 'string' ? ` "${tmpl.name}"` : ` #${index + 1}`;
-    const match = await regex.exec(tmpl.pattern, 's', message.text, `transaction template${name}`);
+    const match = await regex.exec(
+      tmpl.pattern, 's', message.text, `transaction template${name}`, TRANSACTION_CAPTURES,
+    );
     if (!match?.groups) continue;
 
     const g = match.groups;

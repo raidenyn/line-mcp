@@ -14,7 +14,8 @@ function createExecutor(timeoutMs = 100, workerFactory?: WorkerFactory): RegexEx
 }
 
 afterEach(async () => {
-  await Promise.all(executors.splice(0).map((executor) => executor.close()));
+  // close() reports degraded executors; individual tests assert that explicitly.
+  await Promise.allSettled(executors.splice(0).map((executor) => executor.close()));
 });
 
 describe('normalizeRegexTimeoutMs', () => {
@@ -34,7 +35,44 @@ describe('RegexExecutor', () => {
       'u',
       'USD:USD',
       'compatibility pattern',
+      ['word'],
     )).resolves.toMatchObject({ groups: { word: 'USD' } });
+  });
+
+  it('returns only capture groups the caller requests', async () => {
+    const executor = createExecutor();
+    const match = await executor.exec(
+      '(?<amount>\\d+)-(?<merchant>[A-Za-z]+)',
+      's',
+      '12-Shop',
+      'capture selection',
+      ['amount'],
+    );
+    expect(match).toEqual({ match: '12-Shop', groups: { amount: '12' } });
+    expect(match?.groups).not.toHaveProperty('merchant');
+  });
+
+  it('bounds replies from adversarial capture amplification', async () => {
+    const executor = createExecutor(1000);
+    const names = Array.from({ length: 500 }, (_, index) => `capture${index}`);
+    const pattern = names.map((name) => `(?<${name}>`).join('') + '.*' + ')'.repeat(names.length);
+    const subject = 'x'.repeat(65_536);
+
+    const match = await executor.exec(pattern, 's', subject, 'amplification', ['amount']);
+
+    expect(match?.groups).toEqual({ amount: undefined });
+    expect(JSON.stringify(match).length).toBeLessThan(200_000);
+  });
+
+  it('rejects match output over the reply budget', async () => {
+    const executor = createExecutor(1000);
+    await expect(executor.exec(
+      '(?=(?<a>.*))(?=(?<b>.*))(?=(?<c>.*))',
+      's',
+      'x'.repeat(65_536),
+      'reply budget',
+      ['a', 'b', 'c'],
+    )).rejects.toMatchObject({ code: 'output_too_large' });
   });
 
   it('rejects invalid syntax with pattern context', async () => {
@@ -139,12 +177,14 @@ describe('RegexExecutor', () => {
         const deferred = Promise.withResolvers<void>();
         deferreds.push({
           resolve: () => {
-            origTerminate();
-            deferred.resolve();
+            origTerminate().then(
+              () => deferred.resolve(),
+              (e) => deferred.reject(e),
+            );
           },
           reject: deferred.reject,
         });
-        return deferred.promise.then(() => 0);
+        return deferred.promise.then(() => 0, () => 0);
       };
       return worker;
     };
@@ -170,6 +210,7 @@ describe('RegexExecutor', () => {
     expect(newWorkers).toHaveLength(0);
 
     deferreds[0].resolve();
+    await new Promise((r) => setTimeout(r, 50));
     await executor.test('safe', 's', 'safe', 'good');
 
     const finalThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
@@ -201,7 +242,7 @@ describe('RegexExecutor', () => {
           },
           reject: deferred.reject,
         });
-        return deferred.promise.then(() => 0);
+        return deferred.promise.then(() => 0, () => 0);
       };
       return worker;
     };
@@ -210,6 +251,7 @@ describe('RegexExecutor', () => {
       validate(pattern: string, flags: string, context: string): Promise<void>;
       close(): Promise<void>;
       slots: Array<{ replacing: boolean }>;
+      queue: unknown[];
     };
     await executor.validate('warm1', 's', 'warm1');
     await executor.validate('warm2', 's', 'warm2');
@@ -220,15 +262,49 @@ describe('RegexExecutor', () => {
 
     expect(executor.slots.every((s) => s.replacing)).toBe(true);
 
-    const jobs: Promise<unknown>[] = [];
+    const jobs: Promise<boolean>[] = [];
     for (let i = 0; i < 100; i++) {
-      jobs.push(executor.test('safe', 's', 'safe', `queued ${i}`).catch((e) => e));
+      const p = executor.test('safe', 's', 'safe', `queued ${i}`);
+      p.catch(() => {});
+      jobs.push(p);
     }
+    expect(executor.queue).toHaveLength(100);
+
     await expect(executor.test('safe', 's', 'safe', 'overflow'))
       .rejects.toMatchObject({ code: 'busy' });
+    expect(executor.queue).toHaveLength(100);
 
     for (const d of deferreds) d.resolve();
-    await executor.close();
-    await Promise.all(jobs);
+    const closePromise = executor.close();
+    for (const d of deferreds) d.resolve();
+    await closePromise;
+    await Promise.allSettled(jobs);
+  });
+
+  it('degrades on sync workerFactory error, rejecting all work and close', async () => {
+    let factoryCalls = 0;
+    const factory: WorkerFactory = (source, options) => {
+      factoryCalls++;
+      if (factoryCalls === 2) throw new Error('simulated construction failure');
+      return new Worker(source, options);
+    };
+    const executor = createExecutor(10, factory) as unknown as {
+      test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
+      validate(pattern: string, flags: string, context: string): Promise<void>;
+      close(): Promise<void>;
+    };
+
+    const warm = executor.validate('warm1', 's', 'warm1').catch((e) => e);
+
+    await expect(executor.test('safe', 's', 'safe', 'future'))
+      .rejects.toMatchObject({ code: 'worker_failure' });
+
+    expect(factoryCalls).toBe(2);
+
+    const closeA = executor.close();
+    const closeB = executor.close();
+    expect(closeA).toBe(closeB);
+    await expect(closeA).rejects.toThrow('simulated construction failure');
+    await warm;
   });
 });
