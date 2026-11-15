@@ -64,6 +64,11 @@ class LineHttpError extends Error {
     readonly status: number,
     readonly path: string,
     readonly apiStatus?: number,
+    // LINE answers some business errors with a non-2xx status while still
+    // carrying its usual { code, message, data } envelope. Keep those codes so
+    // callers can branch on them without re-reading the body.
+    readonly lineCode?: number,
+    readonly lineNestedCode?: number,
   ) {
     super(`HTTP ${status} on ${path}`);
   }
@@ -193,14 +198,21 @@ export class LineClient {
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
       let apiStatus: number | undefined;
+      let lineCode: number | undefined;
+      let lineNestedCode: number | undefined;
       try {
-        const parsed = JSON.parse(errBody) as { statusCode?: unknown };
+        const parsed = JSON.parse(errBody) as { statusCode?: unknown; code?: unknown; data?: unknown };
         if (typeof parsed.statusCode === 'number') apiStatus = parsed.statusCode;
+        if (typeof parsed.code === 'number') {
+          lineCode = parsed.code;
+          const nested = (parsed.data as { code?: unknown } | null)?.code;
+          if (typeof nested === 'number') lineNestedCode = nested;
+        }
       } catch {
         // Non-JSON error responses have no status metadata beyond HTTP status.
       }
       process.stderr.write(`[LINE] HTTP ${response.status} on ${path}\n`);
-      throw new LineHttpError(response.status, path, apiStatus);
+      throw new LineHttpError(response.status, path, apiStatus, lineCode, lineNestedCode);
     }
     const rawText = await response.text();
     const json = JSON.parse(rawText) as { code: number; message: string; data: T };
@@ -420,7 +432,10 @@ export class LineClient {
     } catch (err) {
       if (generation !== this.loginGeneration) return;
       const isCertificateRejection =
-        err instanceof LineApiError && err.code === 10051 && err.nestedCode === 2;
+        (err instanceof LineApiError && err.code === 10051 && err.nestedCode === 2) ||
+        // Real LINE reports the same rejection as HTTP 400 with the business
+        // envelope intact, so it surfaces as a LineHttpError carrying the codes.
+        (err instanceof LineHttpError && err.lineCode === 10051 && err.lineNestedCode === 2);
       if (!isCertificateRejection) {
         throw err; // Transient network or 5xx — don't silently swallow
       }
