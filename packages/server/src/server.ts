@@ -219,7 +219,15 @@ export function createServer(options: ServerOptions): ComposedServer {
       }
       // Close the regex worker pool after HTTP is down but before DB stores
       // close — no in-flight tool request can still be holding the executor.
-      await regexExecutor?.close();
+      // A degraded executor reports its failure from close(); the stores must
+      // still close so no DB handle outlives stop(), and the error is rethrown
+      // after cleanup.
+      let executorFailure: unknown;
+      try {
+        await regexExecutor?.close();
+      } catch (error) {
+        executorFailure = error;
+      }
       // Close both DB-backed stores the composed server owns: the line-message
       // cache and the bank/category store. CategoryStore opens its own
       // better-sqlite3 connection (separate from the cache's), so without an
@@ -227,6 +235,7 @@ export function createServer(options: ServerOptions): ComposedServer {
       // across repeated start/stop cycles (e.g. tests).
       categoryStore?.close();
       cache?.close();
+      if (executorFailure) throw executorFailure;
     },
   };
 }

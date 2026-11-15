@@ -129,6 +129,32 @@ describe('composed server — startup order', () => {
     await expect(server.stop()).resolves.toBeUndefined();
     server = undefined; // prevent afterEach from calling stop() again
   });
+
+  it('closes database stores when executor shutdown rejects, preserving the error', async () => {
+    const OriginalRegexExecutor = bankMcpModule.RegexExecutor;
+    let executor: InstanceType<typeof OriginalRegexExecutor> | undefined;
+    vi.spyOn(bankMcpModule, 'RegexExecutor').mockImplementation(function (
+      this: unknown,
+      ...args: ConstructorParameters<typeof OriginalRegexExecutor>
+    ) {
+      executor = new OriginalRegexExecutor(...args);
+      return executor;
+    } as unknown as typeof OriginalRegexExecutor);
+    const categoryClose = vi.spyOn(bankMcpModule.CategoryStore.prototype, 'close');
+    const cacheClose = vi.spyOn(lineClientSqliteModule.SqliteMessageCache.prototype, 'close');
+
+    server = createServer({ dataRoot: tempDataRoot, port: 0 });
+    await server.start();
+    expect(executor).toBeDefined();
+
+    const failure = new Error('executor shutdown failed');
+    vi.spyOn(executor!, 'close').mockRejectedValue(failure);
+
+    await expect(server.stop()).rejects.toBe(failure);
+    expect(categoryClose).toHaveBeenCalledTimes(1);
+    expect(cacheClose).toHaveBeenCalledTimes(1);
+    server = undefined; // resources are already closed
+  });
 });
 
 // ─── Old-volume startup ───────────────────────────────────────────────────────
