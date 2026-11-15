@@ -125,8 +125,8 @@ docker run -d --name line-mcp \
 |-----|---------|
 | `latest` | Newest stable release |
 | `X.Y.Z` | One specific release |
-| `X.Y` | Newest release in that minor line — moves only for the newest stable release |
-| `X` | Newest release in that major line — never published on `0.x` |
+| `X.Y` | Newest release in that minor line — moves only for the globally newest stable tag |
+| `X` | Newest release in that major line — moves only for the globally newest stable tag, and never on `0.x` |
 | `edge` | Newest build from `main` |
 | `sha-<short>` | Per-commit reference |
 

@@ -236,7 +236,11 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          # The cache holds image layers, so it must live in the same private
+          # package: a GHA cache is restorable by fork pull-request workflows
+          # and would leak the bundled LTSM assets. The GHCR login above makes
+          # these registry cache pushes and pulls authenticated.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
           labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}
           tags: ${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}

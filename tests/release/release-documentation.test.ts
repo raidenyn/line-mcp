@@ -31,6 +31,16 @@ describe('release documentation', () => {
     expect(readme).toContain('must grant access');
   });
 
+  it('documents the same newest-stable gate for the X.Y and X moving tags', () => {
+    const readme = readFileSync('README.md', 'utf8');
+    expect(readme).toContain(
+      '| `X.Y` | Newest release in that minor line — moves only for the globally newest stable tag |',
+    );
+    expect(readme).toContain(
+      '| `X` | Newest release in that major line — moves only for the globally newest stable tag, and never on `0.x` |',
+    );
+  });
+
   it('documents publishing, re-publishing, and private visibility', () => {
     const runbook = readFileSync('docs/RELEASING.md', 'utf8');
     expect(runbook).toContain('## Docker Images');
@@ -44,6 +54,16 @@ describe('release documentation', () => {
     expect(runbook).toContain('must stay private');
     expect(runbook).toContain('read:packages');
     expect(runbook).toContain('released');
+  });
+
+  it('points the bootstrap at the authenticated personal package pages', () => {
+    const runbook = readFileSync('docs/RELEASING.md', 'utf8');
+    // `raidenyn` is a personal account, so organization package URLs 404.
+    expect(runbook).toContain('/users/raidenyn/packages/container/');
+    expect(runbook).not.toContain('github.com/orgs/');
+    // Keeping the repository link is required; only inherited access is off.
+    expect(runbook).toContain('**Keep linked, disable inherited access.**');
+    expect(runbook).not.toContain('unlink each package');
   });
 
   it('records the publication workflow in the architecture reference', () => {

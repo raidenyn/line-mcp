@@ -74,12 +74,41 @@ type ResolveCase = {
   tags?: string[];
 };
 
+const OUTPUT_KEYS = ['edge', 'latest', 'major', 'publish', 'ref', 'sha', 'short_sha', 'tag'];
+const SHORT_TAG = SHA_TAG.slice(0, 7);
+const SHORT_MAIN = SHA_MAIN.slice(0, 7);
+
+// Every success case states the complete output map, so an extra or missing
+// key in the emitted outputs cannot slip through.
+const defaults = (overrides: Record<string, string>): Record<string, string> => ({
+  edge: 'false',
+  latest: 'false',
+  major: '',
+  publish: 'true',
+  ref: SHA_MAIN,
+  sha: SHA_MAIN,
+  short_sha: SHORT_MAIN,
+  tag: '',
+  ...overrides,
+});
+
 const cases: ResolveCase[] = [
   {
     name: 'prerelease with a malformed tag is skipped, not rejected',
     env: { EVENT_NAME: 'release', RELEASE_PRERELEASE: 'true', RELEASE_TAG: 'v1.2.3-rc.1' },
     exit: 0,
-    expect: { publish: 'false', tag: '' },
+    expect: defaults({ publish: 'false' }),
+  },
+  {
+    name: 'prerelease is skipped before the private-package gate even without the variable',
+    env: {
+      EVENT_NAME: 'release',
+      GHCR_PACKAGES_PRIVATE: '',
+      RELEASE_PRERELEASE: 'true',
+      RELEASE_TAG: 'v1.2.3',
+    },
+    exit: 0,
+    expect: defaults({ publish: 'false' }),
   },
   {
     name: 'dispatch without a tag fails',
@@ -118,78 +147,120 @@ const cases: ResolveCase[] = [
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '1' },
     tags: ['v1.2.3'],
     exit: 0,
-    expect: {
+    expect: defaults({
       latest: 'true',
       major: '1',
-      publish: 'true',
+      ref: 'refs/tags/v1.2.3',
       sha: SHA_TAG,
-      short_sha: SHA_TAG.slice(0, 7),
-    },
+      short_sha: SHORT_TAG,
+      tag: 'v1.2.3',
+    }),
   },
   {
     name: 'lightweight tag falls back to the direct ref',
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '0' },
     exit: 0,
-    expect: { sha: SHA_TAG },
+    expect: defaults({
+      major: '1',
+      ref: 'refs/tags/v1.2.3',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v1.2.3',
+    }),
   },
   {
     name: 'a newer release tag makes this release not newest',
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3' },
     tags: ['v1.2.3', 'v1.3.0'],
     exit: 0,
-    expect: { latest: 'false' },
+    expect: defaults({
+      latest: 'false',
+      major: '1',
+      ref: 'refs/tags/v1.2.3',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v1.2.3',
+    }),
   },
   {
     name: 'a release candidate cannot outrank its stable release',
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.3.0' },
     tags: ['v1.3.0', 'v1.3.0-rc.1'],
     exit: 0,
-    expect: { latest: 'true' },
+    expect: defaults({
+      latest: 'true',
+      major: '1',
+      ref: 'refs/tags/v1.3.0',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v1.3.0',
+    }),
   },
   {
     name: 'zero major is parsed but never published as a bare major tag',
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v0.2.0' },
     tags: ['v0.2.0'],
     exit: 0,
-    expect: { major: '0' },
+    expect: defaults({
+      latest: 'true',
+      major: '0',
+      ref: 'refs/tags/v0.2.0',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v0.2.0',
+    }),
   },
   {
     name: 'edge holds when main has moved on',
     env: { EVENT_NAME: 'push', FAKE_MAIN: 'c'.repeat(40) },
     exit: 0,
-    expect: { edge: 'false' },
+    expect: defaults({ edge: 'false' }),
   },
   {
     name: 'edge advances when this run still matches main',
     env: { EVENT_NAME: 'push', FAKE_MAIN: SHA_MAIN },
     exit: 0,
-    expect: { edge: 'true' },
+    expect: defaults({ edge: 'true' }),
   },
   {
     name: 'untagged manual dispatch from main moves edge',
     env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: SHA_MAIN },
     exit: 0,
-    expect: { edge: 'true', ref: SHA_MAIN },
+    expect: defaults({ edge: 'true', ref: SHA_MAIN }),
   },
   {
     name: 'untagged manual dispatch at a stale head does not move edge',
     env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: 'c'.repeat(40) },
     exit: 0,
-    expect: { edge: 'false' },
+    expect: defaults({ edge: 'false' }),
   },
   {
     name: 'release event publishes the release tag',
     env: { EVENT_NAME: 'release', FAKE_ANNOTATED: '0', RELEASE_TAG: 'v1.2.3' },
     tags: ['v1.2.3'],
     exit: 0,
-    expect: { latest: 'true', publish: 'true', tag: 'v1.2.3' },
+    expect: defaults({
+      latest: 'true',
+      major: '1',
+      ref: 'refs/tags/v1.2.3',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v1.2.3',
+    }),
   },
   {
     name: 'tagged manual dispatch from main publishes the tag',
     env: { EVENT_NAME: 'workflow_dispatch', FAKE_ANNOTATED: '0', INPUT_TAG: 'v1.2.3' },
     tags: ['v1.2.3'],
     exit: 0,
-    expect: { publish: 'true', tag: 'v1.2.3' },
+    expect: defaults({
+      latest: 'true',
+      major: '1',
+      ref: 'refs/tags/v1.2.3',
+      sha: SHA_TAG,
+      short_sha: SHORT_TAG,
+      tag: 'v1.2.3',
+    }),
   },
   {
     name: 'a tag missing from the remote fails',
@@ -264,8 +335,9 @@ fi
       ...testCase.env,
     },
   });
+  const raw = readFileSync(outputPath, 'utf8');
   const parsed = Object.fromEntries(
-    readFileSync(outputPath, 'utf8')
+    raw
       .split('\n')
       .filter(Boolean)
       .map((line) => {
@@ -273,25 +345,37 @@ fi
         return [key, rest.join('=')];
       }),
   );
-  return { parsed, status: result.status, stderr: result.stderr };
+  return { output: raw, parsed, status: result.status, stderr: result.stderr };
 }
 
 describe('prepare resolve script', () => {
   it.each(cases)('$name', (testCase) => {
-    const { parsed, status, stderr } = runResolve(testCase);
+    const { output, parsed, status, stderr } = runResolve(testCase);
     expect(status).toBe(testCase.exit);
     if (testCase.stderr) {
       expect(stderr).toContain(testCase.stderr);
     }
-    for (const [key, value] of Object.entries(testCase.expect)) {
-      expect(parsed).toHaveProperty(key, value);
+    if (testCase.exit === 0) {
+      expect(Object.keys(parsed).sort()).toEqual(OUTPUT_KEYS);
+      expect(parsed).toEqual(testCase.expect);
+    } else {
+      // A failed resolve must not hand partial outputs to the publish job.
+      expect(output).toBe('');
     }
   });
 
   it('exposes every output the publish job consumes', () => {
-    expect(Object.keys(prepare.outputs).sort()).toEqual(
-      ['edge', 'latest', 'major', 'publish', 'ref', 'sha', 'short_sha', 'tag'],
-    );
+    expect(Object.keys(prepare.outputs).sort()).toEqual(OUTPUT_KEYS);
+    expect(prepare.outputs).toEqual({
+      edge: '${{ steps.resolve.outputs.edge }}',
+      latest: '${{ steps.resolve.outputs.latest }}',
+      major: '${{ steps.resolve.outputs.major }}',
+      publish: '${{ steps.resolve.outputs.publish }}',
+      ref: '${{ steps.resolve.outputs.ref }}',
+      sha: '${{ steps.resolve.outputs.sha }}',
+      short_sha: '${{ steps.resolve.outputs.short_sha }}',
+      tag: '${{ steps.resolve.outputs.tag }}',
+    });
   });
 
   it('feeds the event payload through the environment', () => {
@@ -317,6 +401,12 @@ const publish = workflow.jobs.publish as {
   steps: Step[];
   strategy?: { 'fail-fast'?: boolean; matrix?: { include?: Array<Record<string, string>> } };
 };
+
+const tagLines = (step: Step) =>
+  String(step.with?.tags)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
 
 describe('publish job', () => {
   it('gates on prepare, uses the protected environment, and maps both targets', () => {
@@ -362,6 +452,24 @@ describe('publish job', () => {
       "type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}",
     );
     expect(String(edge.with?.tags)).not.toContain('type=sha');
+
+    // Each complete line, so a dropped or weakened gate cannot pass unnoticed.
+    expect(tagLines(release)).toEqual([
+      'type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}',
+      "type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' }}",
+      "type=semver,pattern={{major}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' && needs.prepare.outputs.major != '0' }}",
+      "type=raw,value=latest,enable=${{ needs.prepare.outputs.latest == 'true' }}",
+      'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
+    ]);
+    expect(tagLines(edge)).toEqual([
+      "type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}",
+      'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
+    ]);
+
+    // Releases and edge builds share one build step, so exactly one metadata
+    // step may run: the tagged one for a tag, the edge one otherwise.
+    expect(release.if).toBe("needs.prepare.outputs.tag != ''");
+    expect(edge.if).toBe("needs.prepare.outputs.tag == ''");
   });
 
   it('labels each image with the built commit', () => {
@@ -373,7 +481,7 @@ describe('publish job', () => {
     }
   });
 
-  it('builds amd64, pushes, and scopes cache per image', () => {
+  it('builds amd64, pushes, and keeps the layer cache in the private package', () => {
     const build = publish.steps.find((step) => step.id === 'build')!;
     expect(build.uses).toBe('docker/build-push-action@v6');
     expect(build.with).toMatchObject({
@@ -383,10 +491,33 @@ describe('publish job', () => {
       push: true,
       provenance: false,
       sbom: false,
-      'cache-from': 'type=gha,scope=${{ matrix.image }}',
-      'cache-to': 'type=gha,scope=${{ matrix.image }},mode=max',
+      'cache-from':
+        'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache',
+      'cache-to':
+        'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max',
       labels: '${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}',
       tags: '${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}',
     });
+  });
+
+  it('never exports layers to a GHA cache that forks could restore', () => {
+    // The images carry LINE's proprietary LTSM assets, and fork pull-request
+    // workflows can restore default-branch GHA caches, so no GHA cache may
+    // ever carry these layers.
+    expect(source).not.toContain('type=gha');
+    expect(source).not.toContain('gha');
+    const build = publish.steps.find((step) => step.id === 'build')!;
+    for (const key of ['cache-from', 'cache-to']) {
+      const value = String(build.with?.[key]);
+      expect(value.startsWith('type=registry,ref=ghcr.io/')).toBe(true);
+      expect(value).toContain(':buildcache');
+    }
+    expect(String(build.with?.['cache-to'])).toContain('mode=max');
+    // The login step must precede the build, otherwise cache push and pull
+    // would be anonymous.
+    const login = publish.steps.findIndex((step) => step.uses === 'docker/login-action@v3');
+    const buildIndex = publish.steps.findIndex((step) => step.id === 'build');
+    expect(login).toBeGreaterThanOrEqual(0);
+    expect(login).toBeLessThan(buildIndex);
   });
 });

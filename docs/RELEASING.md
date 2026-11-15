@@ -59,15 +59,18 @@ This is a **one-time, maintainer-only** sequence. Do it once, before the publish
 workflow's first run. Nothing here may be delegated to an agent: the workflow
 gate is a repository variable that only a human sets.
 
-1. **Pre-check both package names.** Open
-   `https://github.com/orgs/raidenyn/packages?repo_name=line-mcp` (and each
-   package page) and confirm neither `line-mcp-full` nor `line-mcp` already
-   exists as a **public** package. GHCR cannot make a public package private
-   again, and **this runbook never deletes a package**. If one already exists and
-   is public, **stop**: leave publication disabled (do not set
-   `GHCR_PACKAGES_PRIVATE`, and stop any run that could republish), and state
-   that the owner must decide separately how to proceed — the bootstrap is not
-   continued on top of a public package.
+1. **Pre-check both package names.** While signed in, open the authenticated
+   personal package pages
+   `https://github.com/users/raidenyn/packages/container/line-mcp-full` and
+   `https://github.com/users/raidenyn/packages/container/line-mcp` (or the
+   personal account's packages list,
+   `https://github.com/raidenyn?tab=packages`) and confirm neither
+   `line-mcp-full` nor `line-mcp` already exists as a **public** package. GHCR
+   cannot make a public package private again, and **this runbook never deletes
+   a package**. If one already exists and is public, **stop**: leave publication
+   disabled (do not set `GHCR_PACKAGES_PRIVATE`, and stop any run that could
+   republish), and state that the owner must decide separately how to proceed —
+   the bootstrap is not continued on top of a public package.
 
 2. **Push an asset-free placeholder to each package.** The
    `org.opencontainers.image.source` label is what links a package to this
@@ -88,9 +91,11 @@ gate is a repository variable that only a human sets.
    done
    ```
 
-3. **Privatize and unlink each package.** In each linked package's settings:
+3. **Keep linked, disable inherited access.** In each linked package's settings:
    set visibility to **Private**, and untick **"Inherit access from source
-   repository"**. Do **not** grant `raidenyn/line-mcp` Actions package access —
+   repository"**. Keep the package linked to this repository — disabling
+   inheritance is the step that matters, and unlinking is never part of this
+   runbook. Do **not** grant `raidenyn/line-mcp` Actions package access —
    this repository is public, so repository-wide Actions access would let fork
    runs read the packages. No package role is granted to the repository token.
 
