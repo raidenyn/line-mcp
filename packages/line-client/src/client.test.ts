@@ -777,6 +777,30 @@ describe('LineClient QR login', () => {
     expect(logs).not.toContain(pinCode);
   });
 
+  it('falls back to the PIN flow when real LINE reports certificate rejection as HTTP 400', async () => {
+    // Real LINE answers verifyCertificate with HTTP 400 carrying the business
+    // envelope ({ code: 10051, data: { code: 2 } }), unlike the mock which
+    // returns the same envelope with HTTP 200.
+    const { fetchFn, calls } = makeLoginFetch(httpErr(400, JSON.stringify({
+      code: 10051,
+      message: 'RESPONSE_ERROR',
+      data: {
+        name: 'SecondaryQrCodeException',
+        message: 'SecondaryQrCodeException',
+        code: 2,
+        alertMessage: 'The verification code you entered is incorrect.',
+      },
+    })));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+    await client.waitForCompletion();
+
+    expect(calls.filter(call => call.url.includes('createPinCode'))).toHaveLength(1);
+    expect(client.getCompletedAuth()?.certificate).toBe('replacement-cert');
+  });
+
   it('fails login instead of entering PIN on a verifyCertificate server failure', async () => {
     const { fetchFn, calls } = makeLoginFetch(httpErr(500));
     const client = new LineClient(null, fetchFn);
