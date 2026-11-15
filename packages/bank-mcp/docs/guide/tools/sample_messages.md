@@ -17,3 +17,5 @@
 **Preset suggestion logic:** A preset is suggested when at least one returned message matches a preset pattern but is not matched by any existing saved template for this chat. This detects coverage gaps — messages that look like bank notifications but have no template yet.
 
 **Avoid:** Don't skip this step before writing templates — message formats vary significantly between banks and change over time. Use `since` whenever you need to capture historical format variations.
+
+**Regex safety:** Both saved-template checks and the built-in preset `detectPresets` scan run isolated in a bounded worker pool (issue #61) with a per-match timeout (default 100 ms, clamped to 10-1000 ms via `BANK_REGEX_TIMEOUT_MS`). A timed-out or invalid pattern fails suggestion generation entirely rather than returning partial `preset_suggestions`, so a malformed pattern never silently hides a coverage gap.

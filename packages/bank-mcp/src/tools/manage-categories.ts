@@ -34,6 +34,7 @@ export function registerManageCategories<P extends Principal>(
           return { content: [{ type: 'text' as const, text: 'category is required for action: upsert' }], isError: true };
         }
         try {
+          await deps.regex.validate(category.pattern, 'is', `category "${category.name}"`);
           deps.categories.upsert(category);
           return { content: [{ type: 'text' as const, text: `Category '${category.name}' saved.` }] };
         } catch (err) {

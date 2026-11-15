@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -10,6 +10,7 @@ import { registerBankResources } from './resources';
 import { TemplateStore } from './template-store';
 import { CategoryStore } from './category-store';
 import { PresetStore } from './preset-store';
+import { RegexExecutor } from './regex-executor';
 import { buildAmountWarnings } from './tools/fetch-transactions';
 
 // ─── Minimal fakes ─────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ let templatesDir: string;
 let presetsDir: string;
 let currentPrincipal: Principal;
 let readerCreations: string[];
+let regex: RegexExecutor;
 
 function makeContext(): RequestContext<Principal> {
   return {
@@ -80,6 +82,7 @@ function makeDeps(messagesByPrincipal: Record<string, Message[]> = {
     templates: new TemplateStore(templatesDir),
     categories: new CategoryStore(':memory:'),
     presets: new PresetStore(presetsDir), // empty dir → no built-in presets
+    regex,
   };
 }
 
@@ -88,8 +91,10 @@ beforeEach(() => {
   presetsDir = mkdtempSync(join(tmpdir(), 'bank-presets-'));
   readerCreations = [];
   currentPrincipal = { subject: 'user-a', scopes: [] };
+  regex = new RegexExecutor();
 });
-afterEach(() => {
+afterEach(async () => {
+  await regex.close();
   rmSync(templatesDir, { recursive: true, force: true });
   rmSync(presetsDir, { recursive: true, force: true });
 });
@@ -206,6 +211,251 @@ describe('registerBankTools', () => {
     ])).not.toContain(
       '1 transaction(s) have an amount with unknown currency; summaries report these amounts separately under unknown_currency and unknown_by_group.',
     );
+  });
+
+  describe('persistence validation', () => {
+    it('rejects an invalid template before persistence', async () => {
+      const server = new FakeServer();
+      const deps = makeDeps();
+      registerBankTools(server as unknown as McpServer, makeContext(), deps);
+      const result = await server.tools.get('manage_templates')!({
+        chatMid: 'chatX', action: 'upsert',
+        template: { name: 'bad', pattern: '([invalid', amount_sign: 'debit' },
+      });
+      expect(result.isError).toBe(true);
+      expect(deps.templates.list('chatX')).toEqual([]);
+    });
+
+    it('rejects an invalid category before persistence', async () => {
+      const server = new FakeServer();
+      const deps = makeDeps();
+      registerBankTools(server as unknown as McpServer, makeContext(), deps);
+      const result = await server.tools.get('manage_categories')!({
+        action: 'upsert', category: { name: 'bad', pattern: '([invalid' },
+      });
+      expect(result.isError).toBe(true);
+      expect(deps.categories.list()).toEqual([]);
+    });
+
+    it('applies no preset writes when any preset template is invalid (all-or-nothing)', async () => {
+      const server = new FakeServer();
+      const deps = makeDeps();
+      registerBankTools(server as unknown as McpServer, makeContext(), deps);
+
+      // A preset with a valid template first, then an invalid one. Validation
+      // must complete before the first write, so neither templates nor
+      // aliases reach the store.
+      writeFileSync(
+        join(presetsDir, 'mixed.json'),
+        JSON.stringify({
+          description: 'mixed',
+          templates: [
+            { name: 'good', pattern: 'SPENT (?<original_currency>THB) (?<original_amount>[\\d.,]+)', amount_sign: 'debit' },
+            { name: 'bad', pattern: '([invalid', amount_sign: 'debit' },
+          ],
+          currency_aliases: { บาท: 'THB' },
+        }),
+      );
+
+      const result = await server.tools.get('manage_templates')!({
+        chatMid: 'chatX', action: 'apply_preset', preset_name: 'mixed',
+      });
+      expect(result.isError).toBe(true);
+      expect(deps.templates.list('chatX')).toEqual([]);
+      expect(deps.templates.listAliases('chatX')).toEqual({});
+    });
+  });
+
+  describe('full-call regex timeout containment', () => {
+    // A message that triggers catastrophic backtracking against (a|aa)+$.
+    const EVIL_MSG = `prefix ${'a'.repeat(40)}!`;
+
+    function makeTimeoutDeps(
+      executor: RegexExecutor,
+      messagesByPrincipal: Record<string, Message[]>,
+    ): BankToolDeps<Principal> {
+      return {
+        createMessageReader: async (p: Principal) => {
+          readerCreations.push(p.subject);
+          return fakeReader(messagesByPrincipal[p.subject] ?? []);
+        },
+        templates: new TemplateStore(templatesDir),
+        categories: new CategoryStore(':memory:'),
+        presets: new PresetStore(presetsDir),
+        regex: executor,
+      };
+    }
+
+    it('contains an inline-template timeout in get_transactions', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        const result = await server.tools.get('get_transactions')!({
+          chatMid: 'chatX',
+          templates: [{ pattern: '(a|aa)+$', amount_sign: 'debit' }],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('get transactions');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
+
+    it('contains a saved-template timeout in get_transactions', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        // First save the evil template using a separate (non-timeout) server so
+        // persistence validation passes — the timeout surface is get_transactions.
+        const saveServer = new FakeServer();
+        const saveDeps = makeDeps({ 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(saveServer as unknown as McpServer, makeContext(), saveDeps);
+        const saved = await saveServer.tools.get('manage_templates')!({
+          chatMid: 'chatX', action: 'upsert',
+          template: { name: 'evil', pattern: '(a|aa)+$', amount_sign: 'debit' },
+        });
+        expect(saved.isError).toBeFalsy();
+        // Now the shared templatesDir holds the evil template; the timeout
+        // deps read from the same dir.
+        const result = await server.tools.get('get_transactions')!({ chatMid: 'chatX' });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('get transactions');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
+
+    it('contains a category timeout after one transaction is parsed', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', `SPENT THB 100.00 at ${'a'.repeat(40)}!`, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        // Save a valid template WITHOUT a merchant capture so categorize
+        // falls back to rawText (which ends in the trailing '!' that defeats
+        // the (a|aa)+$ anchor and forces catastrophic backtracking). Then insert
+        // an evil category directly into the timeout deps' in-memory store —
+        // CategoryStore(':memory:') is not shared across makeDeps calls, so a
+        // direct upsert is the reliable setup. The evil pattern compiles fine;
+        // the timeout fires later inside categorize's regex.test.
+        const saveServer = new FakeServer();
+        const saveDeps = makeDeps({ 'user-a': [textMsg('m1', `SPENT THB 100.00 at ${'a'.repeat(40)}!`, '1000')] });
+        registerBankTools(saveServer as unknown as McpServer, makeContext(), saveDeps);
+        await saveServer.tools.get('manage_templates')!({
+          chatMid: 'chatX', action: 'upsert',
+          template: {
+            name: 'good',
+            pattern: 'SPENT (?<original_currency>THB) (?<original_amount>[\\d.,]+) at [\\w]+!',
+            amount_sign: 'debit',
+          },
+        });
+        deps.categories.upsert({ name: 'Evil', pattern: '(a|aa)+$' });
+        const result = await server.tools.get('get_transactions')!({ chatMid: 'chatX' });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('get transactions');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
+
+    it('contains a merchant-filter timeout in get_transactions', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', `SPENT THB 100.00 at ${'a'.repeat(40)}!`, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        // Save a valid template WITHOUT a merchant capture so filterTransactions
+        // falls back to rawText (which ends in the trailing '!' that defeats
+        // the (a|aa)+$ anchor and forces catastrophic backtracking). No
+        // categories are saved, so categorize completes instantly; the timeout
+        // fires inside filterTransactions when testing the merchants filter.
+        const saveServer = new FakeServer();
+        const saveDeps = makeDeps({ 'user-a': [textMsg('m1', `SPENT THB 100.00 at ${'a'.repeat(40)}!`, '1000')] });
+        registerBankTools(saveServer as unknown as McpServer, makeContext(), saveDeps);
+        await saveServer.tools.get('manage_templates')!({
+          chatMid: 'chatX', action: 'upsert',
+          template: {
+            name: 'good',
+            pattern: 'SPENT (?<original_currency>THB) (?<original_amount>[\\d.,]+) at [\\w]+!',
+            amount_sign: 'debit',
+          },
+        });
+        const result = await server.tools.get('get_transactions')!({
+          chatMid: 'chatX', merchants: ['(a|aa)+$'],
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('get transactions');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
+
+    it('contains a saved-template timeout during sample_messages preset detection', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        // Save an evil template via a non-timeout server; detectPresets will
+        // test it against the message and time out.
+        const saveServer = new FakeServer();
+        const saveDeps = makeDeps({ 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(saveServer as unknown as McpServer, makeContext(), saveDeps);
+        await saveServer.tools.get('manage_templates')!({
+          chatMid: 'chatX', action: 'upsert',
+          template: { name: 'evil', pattern: '(a|aa)+$', amount_sign: 'debit' },
+        });
+        // Write any preset so detectPresets has a preset to consider; the
+        // saved-template test runs first and times out.
+        writeFileSync(
+          join(presetsDir, 'p.json'),
+          JSON.stringify({
+            description: 'p',
+            templates: [{ name: 'p1', pattern: 'SPENT THB (?<original_amount>\\d+)', amount_sign: 'debit' }],
+            currency_aliases: {},
+          }),
+        );
+        const result = await server.tools.get('sample_messages')!({ chatMid: 'chatX', count: 20 });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('sample messages');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
+
+    it('contains a built-in-preset timeout during sample_messages preset detection', async () => {
+      const executor = new RegexExecutor({ timeoutMs: 10 });
+      try {
+        const server = new FakeServer();
+        const deps = makeTimeoutDeps(executor, { 'user-a': [textMsg('m1', EVIL_MSG, '1000')] });
+        registerBankTools(server as unknown as McpServer, makeContext(), deps);
+        // No saved templates → detectPresets skips the saved-template loop and
+        // goes straight to testing the preset's own (evil) template pattern.
+        writeFileSync(
+          join(presetsDir, 'evil.json'),
+          JSON.stringify({
+            description: 'evil preset',
+            templates: [{ name: 'evil1', pattern: '(a|aa)+$', amount_sign: 'debit' }],
+            currency_aliases: {},
+          }),
+        );
+        const result = await server.tools.get('sample_messages')!({ chatMid: 'chatX', count: 20 });
+        expect(result.isError).toBe(true);
+        expect(result.content[0].text).toContain('sample messages');
+        expect(() => JSON.parse(result.content[0].text)).toThrow();
+      } finally {
+        await executor.close();
+      }
+    });
   });
 });
 

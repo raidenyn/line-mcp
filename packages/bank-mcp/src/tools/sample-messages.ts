@@ -55,7 +55,7 @@ export function registerSampleMessages<P extends Principal>(
         });
         const { templates: savedTemplates } = deps.templates.load(chatMid);
         const allPresets = deps.presets.loadAll();
-        const presetSuggestions = detectPresets(textMessages, savedTemplates, allPresets);
+        const presetSuggestions = await detectPresets(deps.regex, textMessages, savedTemplates, allPresets);
 
         let messageText = lines.join('\n');
         if (presetSuggestions.length > 0) {

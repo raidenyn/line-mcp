@@ -65,6 +65,15 @@ describe('composed server — startup order', () => {
       return new OriginalCategoryStore(...args);
     } as unknown as typeof OriginalCategoryStore);
 
+    const OriginalRegexExecutor = bankMcpModule.RegexExecutor;
+    vi.spyOn(bankMcpModule, 'RegexExecutor').mockImplementation(function (
+      this: unknown,
+      ...args: ConstructorParameters<typeof OriginalRegexExecutor>
+    ) {
+      events.push('create-regex-executor');
+      return new OriginalRegexExecutor(...args);
+    } as unknown as typeof OriginalRegexExecutor);
+
     const originalStartSync = lineMcpModule.startSyncLoop;
     vi.spyOn(lineMcpModule, 'startSyncLoop').mockImplementation(
       (...args: Parameters<typeof originalStartSync>) => {
@@ -84,6 +93,7 @@ describe('composed server — startup order', () => {
       'bootstrap-persistence',
       'open-line-cache',
       'open-bank-store',
+      'create-regex-executor',
       'start-sync',
       'listen',
     ]);
@@ -93,6 +103,57 @@ describe('composed server — startup order', () => {
     // must actually exist on disk afterwards.
     expect(fs.existsSync(result.active.lineDbPath)).toBe(true);
     expect(fs.existsSync(result.active.bankDbPath)).toBe(true);
+  });
+
+  it('stop() is idempotent — a second close of the regex executor does not reject', async () => {
+    const createdExecutors: InstanceType<typeof bankMcpModule.RegexExecutor>[] = [];
+    const OriginalRegexExecutor = bankMcpModule.RegexExecutor;
+    vi.spyOn(bankMcpModule, 'RegexExecutor').mockImplementation(function (
+      this: unknown,
+      ...args: ConstructorParameters<typeof OriginalRegexExecutor>
+    ) {
+      const instance = new OriginalRegexExecutor(...args);
+      createdExecutors.push(instance);
+      return instance;
+    } as unknown as typeof OriginalRegexExecutor);
+
+    server = createServer({ dataRoot: tempDataRoot, port: 0 });
+    await server.start();
+    expect(createdExecutors).toHaveLength(1);
+    const executor = createdExecutors[0];
+    const closeSpy = vi.spyOn(executor, 'close');
+
+    await server.stop();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    // Second stop() must not reject — executor close is idempotent.
+    await expect(server.stop()).resolves.toBeUndefined();
+    server = undefined; // prevent afterEach from calling stop() again
+  });
+
+  it('closes database stores when executor shutdown rejects, preserving the error', async () => {
+    const OriginalRegexExecutor = bankMcpModule.RegexExecutor;
+    let executor: InstanceType<typeof OriginalRegexExecutor> | undefined;
+    vi.spyOn(bankMcpModule, 'RegexExecutor').mockImplementation(function (
+      this: unknown,
+      ...args: ConstructorParameters<typeof OriginalRegexExecutor>
+    ) {
+      executor = new OriginalRegexExecutor(...args);
+      return executor;
+    } as unknown as typeof OriginalRegexExecutor);
+    const categoryClose = vi.spyOn(bankMcpModule.CategoryStore.prototype, 'close');
+    const cacheClose = vi.spyOn(lineClientSqliteModule.SqliteMessageCache.prototype, 'close');
+
+    server = createServer({ dataRoot: tempDataRoot, port: 0 });
+    await server.start();
+    expect(executor).toBeDefined();
+
+    const failure = new Error('executor shutdown failed');
+    vi.spyOn(executor!, 'close').mockRejectedValue(failure);
+
+    await expect(server.stop()).rejects.toBe(failure);
+    expect(categoryClose).toHaveBeenCalledTimes(1);
+    expect(cacheClose).toHaveBeenCalledTimes(1);
+    server = undefined; // resources are already closed
   });
 });
 
