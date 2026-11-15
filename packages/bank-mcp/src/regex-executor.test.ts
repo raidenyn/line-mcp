@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Worker } from 'node:worker_threads';
 import {
   RegexExecutor,
@@ -210,12 +210,11 @@ describe('RegexExecutor', () => {
     expect(newWorkers).toHaveLength(0);
 
     deferreds[0].resolve();
-    await new Promise((r) => setTimeout(r, 50));
-    await executor.test('safe', 's', 'safe', 'good');
-
-    const finalThreadIds = new Set(executor.slots.map((s) => s.worker.threadId));
-    const newWorkersAfter = [...finalThreadIds].filter((id) => !initialThreadIds.has(id));
-    expect(newWorkersAfter.length).toBeGreaterThanOrEqual(1);
+    await vi.waitFor(() => {
+      const threadIds = executor.slots.map((s) => s.worker.threadId);
+      expect(threadIds.some((id) => !initialThreadIds.has(id))).toBe(true);
+    });
+    await expect(executor.test('safe', 's', 'safe', 'good')).resolves.toBe(true);
 
     for (const d of deferreds) d.resolve();
     const closePromise = executor.close();
@@ -281,12 +280,19 @@ describe('RegexExecutor', () => {
     await Promise.allSettled(jobs);
   });
 
-  it('degrades on sync workerFactory error, rejecting all work and close', async () => {
+  it('degrades on sync workerFactory error, terminating started workers', async () => {
+    const terminated: Worker[] = [];
     let factoryCalls = 0;
     const factory: WorkerFactory = (source, options) => {
       factoryCalls++;
       if (factoryCalls === 2) throw new Error('simulated construction failure');
-      return new Worker(source, options);
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      worker.terminate = () => {
+        terminated.push(worker);
+        return origTerminate();
+      };
+      return worker;
     };
     const executor = createExecutor(10, factory) as unknown as {
       test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
@@ -294,17 +300,67 @@ describe('RegexExecutor', () => {
       close(): Promise<void>;
     };
 
-    const warm = executor.validate('warm1', 's', 'warm1').catch((e) => e);
+    const warm = executor.validate('warm1', 's', 'warm1').catch((error) => error);
 
     await expect(executor.test('safe', 's', 'safe', 'future'))
       .rejects.toMatchObject({ code: 'worker_failure' });
 
     expect(factoryCalls).toBe(2);
+    expect(terminated).toHaveLength(1);
 
     const closeA = executor.close();
     const closeB = executor.close();
     expect(closeA).toBe(closeB);
     await expect(closeA).rejects.toThrow('simulated construction failure');
     await warm;
+  });
+
+  it('degrades and terminates surviving workers when replacement construction fails', async () => {
+    const terminated: Worker[] = [];
+    let factoryCalls = 0;
+    const factory: WorkerFactory = (source, options) => {
+      factoryCalls++;
+      if (factoryCalls > 2) throw new Error('replacement construction failed');
+      const worker = new Worker(source, options);
+      const origTerminate = worker.terminate.bind(worker);
+      worker.terminate = () => {
+        terminated.push(worker);
+        return origTerminate();
+      };
+      return worker;
+    };
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => { rejections.push(reason); };
+    process.on('unhandledRejection', onRejection);
+    try {
+      const executor = createExecutor(1000, factory) as unknown as {
+        test(pattern: string, flags: string, subject: string, context: string): Promise<boolean>;
+        validate(pattern: string, flags: string, context: string): Promise<void>;
+        close(): Promise<void>;
+        degraded: boolean;
+        slots: Array<{ worker: Worker }>;
+        replace(index: number, worker: Worker): void;
+      };
+
+      await executor.validate('warm1', 's', 'warm1');
+      await executor.validate('warm2', 's', 'warm2');
+      expect(factoryCalls).toBe(2);
+      const workers = executor.slots.map((slot) => slot.worker);
+
+      const blocked = executor.test('(a+)+$', 's', `${'a'.repeat(40)}!`, 'blocked');
+      executor.replace(0, workers[0]);
+
+      await expect(blocked).rejects.toMatchObject({ code: 'worker_failure' });
+      expect(executor.degraded).toBe(true);
+      expect(terminated).toEqual(expect.arrayContaining(workers));
+      await expect(executor.test('safe', 's', 'safe', 'after'))
+        .rejects.toMatchObject({ code: 'worker_failure' });
+      await expect(executor.close()).rejects.toThrow('replacement construction failed');
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onRejection);
+    }
   });
 });

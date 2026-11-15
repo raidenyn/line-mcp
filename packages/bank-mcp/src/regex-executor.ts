@@ -274,7 +274,9 @@ export class RegexExecutor implements RegexExecutorPort {
     void termination.then(
       () => {
         this.retirements.delete(termination);
-        if (slot) slot.replacing = false;
+        // Leave the slot marked replacing once degraded: its worker is already
+        // gone, so close() must not terminate it a second time.
+        if (slot && !this.degraded) slot.replacing = false;
         if (!this.closed && !this.degraded && this.slots[index]?.worker === worker) {
           try {
             this.spawn(index);
@@ -285,7 +287,7 @@ export class RegexExecutor implements RegexExecutorPort {
       },
       (reason) => {
         this.retirements.delete(termination);
-        if (slot) slot.replacing = false;
+        if (slot && !this.degraded) slot.replacing = false;
         this.degrade(reason instanceof Error ? reason : new Error(String(reason)));
       },
     ).catch(() => {});
@@ -305,6 +307,19 @@ export class RegexExecutor implements RegexExecutorPort {
       if (active) {
         slot.active = undefined;
         active.reject(this.failure('worker_failure', active.context, active.pattern, detail));
+      }
+      // Rejecting a job without stopping its worker would leave user-controlled
+      // regex work running past the budget it just lost. Replacements already
+      // in flight are tracked in `retirements`; every other worker is retired
+      // here and awaited by close().
+      // threadId -1 means the worker already exited, e.g. a replacement whose
+      // construction then failed.
+      if (!slot.replacing && slot.worker.threadId !== -1) {
+        slot.replacing = true;
+        slot.worker.removeAllListeners();
+        const termination = slot.worker.terminate();
+        this.retirements.add(termination);
+        void termination.catch(() => {});
       }
     }
   }
@@ -327,7 +342,7 @@ export class RegexExecutor implements RegexExecutorPort {
         if (active) {
           active.reject(this.failure('closed', active.context, active.pattern, 'executor is closed'));
         }
-        if (!slot.replacing) {
+        if (!slot.replacing && slot.worker.threadId !== -1) {
           slot.worker.removeAllListeners();
           terminations.push(slot.worker.terminate());
         }

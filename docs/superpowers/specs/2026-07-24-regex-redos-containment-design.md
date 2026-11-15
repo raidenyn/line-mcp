@@ -177,7 +177,10 @@ The executor distinguishes these failures internally:
 
 A failed replacement construction degrades the executor instead of leaving an
 unhandled rejection: pending and future work fails with `worker_failure`, and
-`close()` reports the construction error once.
+`close()` reports the construction error once. Degradation also retires every
+surviving worker, because rejecting a job clears its timeout; leaving the
+worker alive would let user-controlled regex work keep running past the budget
+it just lost. `close()` awaits those retirements.
 
 MCP-facing errors identify the operation and pattern context where available.
 Timeouts abort the whole tool call. Transaction and summary tools never return
@@ -221,7 +224,8 @@ the same change.
 - Verify queue saturation rejects excess work without creating more workers.
 - Verify worker crashes reject the active job and trigger replacement.
 - Verify a synchronous worker-construction failure during replacement degrades
-  the executor without an unhandled rejection.
+  the executor without an unhandled rejection, terminates every surviving
+  worker, and rejects work that was active at the time.
 - Verify timeout configuration defaulting and bounds.
 - Verify `close()` rejects pending work, terminates workers, and is idempotent.
 
@@ -242,6 +246,8 @@ wall-clock bound, avoiding dependence on an exact scheduler duration.
 - Full-call failure rather than partial transaction, summary, or suggestion
   output.
 - Preservation of matching priority and result ordering.
+- Server `stop()` closes both database stores even when executor shutdown
+  reports a failure, and rethrows that failure.
 
 ### Verification
 
