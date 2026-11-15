@@ -160,3 +160,83 @@ jobs:
           fi
 
           write_outputs
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    environment: ghcr-publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: server
+            image: line-mcp-full
+          - target: line-mcp
+            image: line-mcp
+    steps:
+      - name: Check out the resolved commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      # A tag moved between resolution and checkout would mislabel the image.
+      - name: Verify checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The protected environment's isolated token is the only registry
+      # credential; the workflow token never gets package permission.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_PUBLISH_TOKEN }}
+
+      - name: Extract release metadata
+        id: meta-release
+        if: needs.prepare.outputs.tag != ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' && needs.prepare.outputs.major != '0' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.latest == 'true' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      - name: Extract edge metadata
+        id: meta-edge
+        if: needs.prepare.outputs.tag == ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+          tags: |
+            type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}
+          tags: ${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}

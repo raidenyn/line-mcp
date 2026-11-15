@@ -309,3 +309,84 @@ describe('prepare resolve script', () => {
     expect(prepare.if).toBe("github.repository == 'raidenyn/line-mcp'");
   });
 });
+
+const publish = workflow.jobs.publish as {
+  environment?: string;
+  if?: string;
+  needs?: string | string[];
+  steps: Step[];
+  strategy?: { 'fail-fast'?: boolean; matrix?: { include?: Array<Record<string, string>> } };
+};
+
+describe('publish job', () => {
+  it('gates on prepare, uses the protected environment, and maps both targets', () => {
+    expect(publish.needs).toBe('prepare');
+    expect(publish.environment).toBe('ghcr-publish');
+    expect(publish.if).toBe("needs.prepare.outputs.publish == 'true'");
+    expect(publish.strategy?.matrix?.include).toEqual([
+      { target: 'server', image: 'line-mcp-full' },
+      { target: 'line-mcp', image: 'line-mcp' },
+    ]);
+  });
+
+  it('checks out the resolved ref, verifies the commit, and uses the isolated registry token', () => {
+    const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v4')!;
+    expect(checkout.with).toMatchObject({ ref: '${{ needs.prepare.outputs.ref }}' });
+    const verify = publish.steps.find((step) => step.name === 'Verify checked-out commit')!;
+    expect(verify.run).toContain('git rev-parse HEAD');
+    expect(verify.run).toContain('${{ needs.prepare.outputs.sha }}');
+    const logins = publish.steps.filter((step) => step.uses === 'docker/login-action@v3');
+    expect(logins).toHaveLength(1);
+    expect(logins[0].with).toMatchObject({
+      registry: 'ghcr.io',
+      username: '${{ github.repository_owner }}',
+      password: '${{ secrets.GHCR_PUBLISH_TOKEN }}',
+    });
+    expect(String(logins[0].with?.password)).not.toContain('GITHUB_TOKEN');
+    expect(source).not.toContain('docker.io');
+    expect(source).not.toContain('DOCKERHUB');
+  });
+
+  it('prevents automatic latest and gates every moving tag on the newest release', () => {
+    const release = publish.steps.find((step) => step.id === 'meta-release')!;
+    const edge = publish.steps.find((step) => step.id === 'meta-edge')!;
+    const tags = String(release.with?.tags);
+    expect(release.with?.flavor).toBe('latest=false');
+    expect(edge.with?.flavor).toBe('latest=false');
+    expect(tags).toContain('type=semver,pattern={{version}}');
+    expect(tags).toContain("enable=${{ needs.prepare.outputs.latest == 'true' }}");
+    expect(tags).toContain("needs.prepare.outputs.major != '0'");
+    expect(tags).toContain('type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}');
+    expect(tags).not.toContain('type=sha');
+    expect(String(edge.with?.tags)).toContain(
+      "type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}",
+    );
+    expect(String(edge.with?.tags)).not.toContain('type=sha');
+  });
+
+  it('labels each image with the built commit', () => {
+    for (const id of ['meta-release', 'meta-edge']) {
+      const step = publish.steps.find((candidate) => candidate.id === id)!;
+      expect(String(step.with?.labels)).toContain(
+        'org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}',
+      );
+    }
+  });
+
+  it('builds amd64, pushes, and scopes cache per image', () => {
+    const build = publish.steps.find((step) => step.id === 'build')!;
+    expect(build.uses).toBe('docker/build-push-action@v6');
+    expect(build.with).toMatchObject({
+      context: '.',
+      target: '${{ matrix.target }}',
+      platforms: 'linux/amd64',
+      push: true,
+      provenance: false,
+      sbom: false,
+      'cache-from': 'type=gha,scope=${{ matrix.image }}',
+      'cache-to': 'type=gha,scope=${{ matrix.image }},mode=max',
+      labels: '${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}',
+      tags: '${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}',
+    });
+  });
+});
