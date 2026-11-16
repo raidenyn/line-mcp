@@ -25,6 +25,12 @@ describe('commit message policy', () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('records the message-based merge exemption limitation', () => {
+    // The exemption applies to any message with a merge prefix, including a
+    // handwritten title; commitlint cannot inspect merge ancestry.
+    expect(lint('Merge branch: handwritten title').status).toBe(0);
+  });
+
   it.each([
     'style: reformat files',
     'missing conventional prefix',
