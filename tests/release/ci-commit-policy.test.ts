@@ -19,7 +19,7 @@ describe('CI commit policy job', () => {
   const steps = workflow.jobs['commit-policy']?.steps ?? [];
 
   it('checks out complete PR-head history', () => {
-    const checkout = steps.find((step) => step.uses === 'actions/checkout@v4');
+    const checkout = steps.find((step) => step.uses === 'actions/checkout@v7');
     expect(checkout?.with).toMatchObject({
       'fetch-depth': 0,
       ref: '${{ github.event.pull_request.head.sha || github.sha }}',

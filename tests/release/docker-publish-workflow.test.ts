@@ -470,12 +470,12 @@ describe('publish job', () => {
   });
 
   it('checks out the resolved ref, verifies the commit, and logs in with the workflow token', () => {
-    const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v4')!;
+    const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v7')!;
     expect(checkout.with).toMatchObject({ ref: '${{ needs.prepare.outputs.ref }}' });
     const verify = publish.steps.find((step) => step.name === 'Verify checked-out commit')!;
     expect(verify.run).toContain('git rev-parse HEAD');
     expect(verify.run).toContain('${{ needs.prepare.outputs.sha }}');
-    const logins = publish.steps.filter((step) => step.uses === 'docker/login-action@v3');
+    const logins = publish.steps.filter((step) => step.uses === 'docker/login-action@v4');
     expect(logins).toHaveLength(1);
     expect(logins[0].with).toEqual({
       registry: 'ghcr.io',
@@ -525,7 +525,7 @@ describe('publish job', () => {
   it('publishes a labeled pull request as only pr-<number> and sha-<short>', () => {
     const pr = publish.steps.find((step) => step.id === 'meta-pr')!;
     expect(pr.name).toBe('Metadata (pull request)');
-    expect(pr.uses).toBe('docker/metadata-action@v5');
+    expect(pr.uses).toBe('docker/metadata-action@v6');
     expect(pr.if).toBe("needs.prepare.outputs.pr != ''");
     expect(pr.with).toMatchObject({
       images: 'ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}',
@@ -555,7 +555,7 @@ describe('publish job', () => {
 
   it('builds amd64, pushes, and keeps the layer cache in the registry package', () => {
     const build = publish.steps.find((step) => step.id === 'build')!;
-    expect(build.uses).toBe('docker/build-push-action@v6');
+    expect(build.uses).toBe('docker/build-push-action@v7');
     expect(build.with).toMatchObject({
       context: '.',
       target: '${{ matrix.target }}',
@@ -587,7 +587,7 @@ describe('publish job', () => {
     expect(String(build.with?.['cache-to'])).toContain('mode=max');
     // The login step must precede the build, otherwise cache push and pull
     // would be anonymous.
-    const login = publish.steps.findIndex((step) => step.uses === 'docker/login-action@v3');
+    const login = publish.steps.findIndex((step) => step.uses === 'docker/login-action@v4');
     const buildIndex = publish.steps.findIndex((step) => step.id === 'build');
     expect(login).toBeGreaterThanOrEqual(0);
     expect(login).toBeLessThan(buildIndex);

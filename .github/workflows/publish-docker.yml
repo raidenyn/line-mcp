@@ -213,7 +213,7 @@ jobs:
             image: line-mcp
     steps:
       - name: Check out the resolved commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.ref }}
 
@@ -223,12 +223,12 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "${{ needs.prepare.outputs.sha }}"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # The built-in workflow token carries `packages: write` on this job; the
       # protected environment keeps the owner approval as an abuse control.
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -237,7 +237,7 @@ jobs:
       - name: Extract release metadata
         id: meta-release
         if: needs.prepare.outputs.tag != ''
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           flavor: latest=false
@@ -254,7 +254,7 @@ jobs:
       - name: Extract edge metadata
         id: meta-edge
         if: needs.prepare.outputs.tag == '' && needs.prepare.outputs.pr == ''
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           flavor: latest=false
@@ -270,7 +270,7 @@ jobs:
       - name: Metadata (pull request)
         id: meta-pr
         if: needs.prepare.outputs.pr != ''
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           flavor: latest=false
@@ -283,7 +283,7 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: ${{ matrix.target }}
