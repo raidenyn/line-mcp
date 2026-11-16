@@ -173,7 +173,7 @@ const cases: ResolveCase[] = [
     },
     exit: 0,
     expect: defaults({ publish: 'false' }),
-    stderr: 'fork',
+    stderr: '::warning::fork pull requests cannot publish images',
   },
   {
     name: 'a labeled pull request still requires the private bootstrap',
