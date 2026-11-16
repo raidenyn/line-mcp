@@ -1,38 +1,101 @@
+# Releases are owner-only and main-only. The five stages run in one workflow:
+# `authorize` refuses everyone else before anything happens; `plan` computes the
+# next version and its notes with a semantic-release dry run (no tag); `draft`
+# holds the release as a tagless draft; `images` publishes both images through
+# the reusable Publish Docker workflow; `publish` appends the image links and
+# publishes the draft, which is what creates the git tag.
+#
+# The draft and publish jobs repeat the authorization step because "Re-run
+# failed jobs" does not re-run a job that already succeeded, and those jobs hold
+# `contents: write`. Nothing here pushes a commit, pushes a tag, or publishes to
+# npm: the tag is created only by publishing the draft.
 name: Release
 
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release:
+  authorize:
     runs-on: ubuntu-latest
     steps:
+      - name: Authorize the owner on main
+        id: authorize
+        shell: bash
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REPO" != 'raidenyn/line-mcp' ]; then
+            printf '::error::Release runs only in raidenyn/line-mcp, not %s\n' "$REPO" >&2
+            exit 1
+          fi
+
+          if [ "${ACTOR,,}" != "${OWNER,,}" ]; then
+            printf '::error::only the repository owner can run Release: %s is not %s\n' "$ACTOR" "$OWNER" >&2
+            exit 1
+          fi
+
+          if [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::Release must be dispatched from refs/heads/main, not %s\n' "$REF" >&2
+            exit 1
+          fi
+
+  plan:
+    needs: authorize
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.plan.outputs.released }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      # The planner probes push access with `git push --dry-run`, which needs the
+      # write token of this job. Credentials are not persisted so the probe and
+      # the install cannot reuse them, and the dependency scripts never run.
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: refs/heads/main
+          persist-credentials: false
 
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        shell: bash
+        run: npm ci --ignore-scripts
 
       - name: Verify current main
+        shell: bash
         run: |
+          set -euo pipefail
+
           git fetch origin refs/heads/main:refs/remotes/origin/main --tags
-          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+            printf 'origin/main has moved past this run. Dispatch a new Release run\n' >&2
+            printf '(a re-run keeps the original commit).\n' >&2
+            exit 1
+          fi
 
       - name: Verify baseline tag exists
+        shell: bash
         run: |
+          set -euo pipefail
+
           if ! git rev-parse --verify --quiet refs/tags/v0.1.0 >/dev/null; then
             printf 'v0.1.0 baseline tag is missing. Create it before dispatching releases\n' \
               >&2
@@ -40,34 +103,276 @@ jobs:
             exit 1
           fi
 
-      - name: Record tags at HEAD
-        run: git tag --points-at HEAD --list 'v*' | sort > "$RUNNER_TEMP/release-tags-before"
-
-      - name: Run semantic-release
+      - name: Plan the release
+        id: plan
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: npm run release:plan
 
-      - name: Detect new release tag
-        id: release-tag
+      # semantic-release reports no release when the local branch is behind the
+      # remote, so a no-release result is only trusted when main has not moved.
+      - name: Verify main unchanged
+        if: steps.plan.outputs.released != 'true'
         shell: bash
         run: |
-          git tag --points-at HEAD --list 'v*' | sort > "$RUNNER_TEMP/release-tags-after"
-          mapfile -t new_tags < <(comm -13 "$RUNNER_TEMP/release-tags-before" "$RUNNER_TEMP/release-tags-after")
-          if (( ${#new_tags[@]} > 1 )); then
-            printf 'Expected at most one new release tag, found %s\n' "${#new_tags[@]}" >&2
+          set -euo pipefail
+
+          remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          if ! main_sha=$(git ls-remote "$remote" refs/heads/main | cut -f1); then
+            printf '::error::cannot read refs/heads/main from %s; dispatch a new Release run\n' "$remote" >&2
             exit 1
           fi
-          if (( ${#new_tags[@]} == 1 )); then
-            printf 'tag=%s\n' "${new_tags[0]}" >> "$GITHUB_OUTPUT"
+          head_sha=$(git rev-parse HEAD)
+          if [ "$head_sha" != "$main_sha" ]; then
+            printf '::error::main moved during planning (%s is not %s): dispatch a new Release run (a re-run keeps the original commit)\n' \
+              "$main_sha" "$head_sha" >&2
+            exit 1
           fi
 
-      - name: Dispatch Docker publishing
-        if: steps.release-tag.outputs.tag != ''
+      - name: Upload the release notes
+        if: steps.plan.outputs.released == 'true'
+        uses: actions/upload-artifact@v5
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+
+  draft:
+    needs: plan
+    if: needs.plan.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # No checkout: the tag does not exist yet, so `origin` cannot be queried and
+    # releases are addressed through the API.
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Authorize the owner on main
+        id: authorize
+        shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ steps.release-tag.outputs.tag }}
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
         run: |
-          jq -n --arg tag "$RELEASE_TAG" \
-            '{event_type: "release-published", client_payload: {tag: $tag}}' \
-            | gh api --method POST "repos/${{ github.repository }}/dispatches" --input -
+          set -euo pipefail
+
+          if [ "$REPO" != 'raidenyn/line-mcp' ]; then
+            printf '::error::Release runs only in raidenyn/line-mcp, not %s\n' "$REPO" >&2
+            exit 1
+          fi
+
+          if [ "${ACTOR,,}" != "${OWNER,,}" ]; then
+            printf '::error::only the repository owner can run Release: %s is not %s\n' "$ACTOR" "$OWNER" >&2
+            exit 1
+          fi
+
+          if [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::Release must be dispatched from refs/heads/main, not %s\n' "$REF" >&2
+            exit 1
+          fi
+
+      - name: Download the release notes
+        uses: actions/download-artifact@v5
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}
+
+      - name: Create the draft release
+        shell: bash
+        env:
+          NOTES: ${{ runner.temp }}/release-notes.md
+          SHA: ${{ needs.plan.outputs.sha }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          REMOTE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::unsupported tag %s: expected vX.Y.Z\n' "$TAG" >&2
+            exit 1
+          fi
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '::error::unsupported commit %s: expected a full SHA\n' "$SHA" >&2
+            exit 1
+          fi
+
+          # Every release carrying this tag must be a draft; a published one is
+          # the release itself, and is never replaced.
+          if ! releases=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq '.[] | [.tag_name, (.draft | tostring), (.id | tostring)] | @tsv'); then
+            printf '::error::cannot list releases in %s\n' "$GH_REPO" >&2
+            exit 1
+          fi
+
+          drafts=()
+          published=''
+          while IFS=$'\t' read -r release_tag draft release_id; do
+            [ -n "${release_tag:-}" ] || continue
+            [ "$release_tag" = "$TAG" ] || continue
+            if [ "$draft" = 'true' ]; then
+              drafts+=("$release_id")
+            else
+              published="$release_id"
+            fi
+          done <<< "$releases"
+
+          if [ -n "$published" ]; then
+            printf '::error::%s is already published (release %s); refusing to replace it\n' "$TAG" "$published" >&2
+            exit 1
+          fi
+
+          # A broken tag query must fail closed: an empty result from a failed
+          # `git ls-remote` would otherwise look like "the tag does not exist".
+          if ! existing_tag=$(git ls-remote --tags "$REMOTE" "refs/tags/$TAG"); then
+            printf '::error::cannot read tags from %s; refusing to create a release\n' "$REMOTE" >&2
+            exit 1
+          fi
+          if [ -n "$existing_tag" ]; then
+            printf '::error::git tag %s already exists on %s; refusing to create a release\n' "$TAG" "$REMOTE" >&2
+            exit 1
+          fi
+
+          # Deleting every stale draft keeps `gh release edit <tag>` unambiguous
+          # once the release is published, and a re-run starts from a clean body.
+          for release_id in "${drafts[@]}"; do
+            gh api --method DELETE "repos/$GH_REPO/releases/$release_id"
+          done
+
+          gh release create "$TAG" --draft --target "$SHA" --title "$TAG" --notes-file "$NOTES"
+
+          # The post-create check fails closed too: a broken query must never
+          # make the "draft created no tag" assertion pass unverified.
+          if ! created_tag=$(git ls-remote --tags "$REMOTE" "refs/tags/$TAG"); then
+            printf '::error::cannot verify that drafting created no tag: reading tags from %s failed\n' "$REMOTE" >&2
+            exit 1
+          fi
+          if [ -n "$created_tag" ]; then
+            printf '::error::draft release created git tag %s; a draft must not tag\n' "$TAG" >&2
+            exit 1
+          fi
+
+  images:
+    needs: [plan, draft]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish-docker.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+
+  publish:
+    needs: [plan, draft, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    # No checkout here either: publishing the draft is what creates the tag.
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Authorize the owner on main
+        id: authorize
+        shell: bash
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REPO" != 'raidenyn/line-mcp' ]; then
+            printf '::error::Release runs only in raidenyn/line-mcp, not %s\n' "$REPO" >&2
+            exit 1
+          fi
+
+          if [ "${ACTOR,,}" != "${OWNER,,}" ]; then
+            printf '::error::only the repository owner can run Release: %s is not %s\n' "$ACTOR" "$OWNER" >&2
+            exit 1
+          fi
+
+          if [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::Release must be dispatched from refs/heads/main, not %s\n' "$REF" >&2
+            exit 1
+          fi
+
+      - name: Download the release notes
+        uses: actions/download-artifact@v5
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}
+
+      # The images are private until the owner flips their visibility, so the
+      # digest lookup reads the registry with the workflow token.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the release
+        shell: bash
+        env:
+          NOTES: ${{ runner.temp }}/release-notes.md
+          SHA: ${{ needs.plan.outputs.sha }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          REMOTE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::unsupported tag %s: expected vX.Y.Z\n' "$TAG" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+
+          body=$(mktemp)
+          trap 'rm -f "$body"' EXIT
+
+          # Strip a previous image section so a re-run leaves exactly one.
+          awk '
+            /^## Docker images[[:space:]]*$/ { skip = 1; next }
+            skip && /^## / { skip = 0 }
+            !skip { print }
+          ' "$NOTES" > "$body"
+
+          {
+            printf '\n## Docker images\n\n'
+            for image in ghcr.io/raidenyn/line-mcp-full ghcr.io/raidenyn/line-mcp; do
+              name="${image##*/}"
+              digest=$(docker buildx imagetools inspect "$image:$VERSION" \
+                --format '{{.Manifest.Digest}}')
+              if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                printf '::error::unexpected digest for %s:%s: %s\n' "$image" "$VERSION" "$digest" >&2
+                exit 1
+              fi
+              printf '### `%s:%s`\n\n' "$image" "$VERSION"
+              printf -- '- `docker pull %s:%s`\n' "$image" "$VERSION"
+              printf -- '- Digest: `%s@%s`\n' "$image" "$digest"
+              printf -- '- Package page: https://github.com/raidenyn/line-mcp/pkgs/container/%s\n\n' "$name"
+            done
+          } >> "$body"
+
+          gh release edit "$TAG" --draft=false --target "$SHA" --notes-file "$body"
+
+          # Publishing the draft is the only thing that creates the tag; it must
+          # resolve to the planned commit. An annotated tag reports the tag
+          # object first, so the peeled commit is preferred.
+          tag_sha=$(git ls-remote "$REMOTE" "refs/tags/$TAG^{}" | cut -f1)
+          if [ -z "$tag_sha" ]; then
+            tag_sha=$(git ls-remote "$REMOTE" "refs/tags/$TAG" | cut -f1)
+          fi
+          if [ "$tag_sha" != "$SHA" ]; then
+            printf '::error::tag %s resolves to %s after publishing, not the planned commit %s\n' "$TAG" "${tag_sha:-nothing}" "$SHA" >&2
+            exit 1
+          fi
