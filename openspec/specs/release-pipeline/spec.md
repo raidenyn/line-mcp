@@ -1,4 +1,10 @@
-## ADDED Requirements
+# release-pipeline Specification
+
+## Purpose
+
+Define the owner-only, `main`-only release path: plan the next version and its notes, hold the release as a tagless draft, build and link both images, then publish the draft, which creates the git tag at the planned commit.
+
+## Requirements
 
 ### Requirement: Only the repository owner can run a release
 
