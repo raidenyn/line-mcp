@@ -52,8 +52,8 @@ proprietary LTSM assets. On 2026-11-16 the owner permanently accepted the
 redistribution risk for public container images (see
 `packages/line-client/THIRD_PARTY_NOTICES.md` and
 `packages/line-client/assets/ltsm/provenance.json`). The packages are **public
-once the one-time visibility flip below is complete** — the first push creates
-them private, and an anonymous `docker pull` fails until the owner flips
+once the one-time visibility flip below is complete** — the first publication
+creates them private, and an anonymous `docker pull` fails until the owner flips
 visibility ([First publication: the one-way visibility flip](#first-publication-the-one-way-visibility-flip)).
 After the flip, an anonymous `docker pull` succeeds with no credential and no
 access grant. Public npm distribution remains **not approved**. There is no
@@ -62,13 +62,16 @@ Docker Hub or other registry push.
 ### First publication: the one-way visibility flip
 
 Every GHCR package is created **private**, and the workflow cannot choose
-otherwise. The first push to `main` therefore creates both packages private, and
+otherwise. The first publication therefore creates both packages private, and
 **only the repository owner** flips them public — once, by hand. Nothing here may
 be delegated to an agent, and no approval, personal token, package role, or
 repository variable is involved.
 
-1. Let the first `edge` run finish so both packages exist:
-   `ghcr.io/raidenyn/line-mcp-full:edge` and `ghcr.io/raidenyn/line-mcp:edge`.
+1. Publish once so both packages exist — an untagged `Publish Docker` dispatch
+   from `main` builds `edge` without needing a release:
+   `gh workflow run publish-docker.yml --ref main`, then wait for it to finish, so
+   that `ghcr.io/raidenyn/line-mcp-full:edge` and
+   `ghcr.io/raidenyn/line-mcp:edge` both exist.
 2. Open the personal package settings pages —
    `https://github.com/users/raidenyn/packages/container/line-mcp-full/settings`
    and
@@ -97,11 +100,19 @@ now that the workflow token can push packages.
 
 ### Publication and re-publication
 
+**Merging publishes nothing.** A merge or push to `main` starts no image build, so
+the first publication comes from a release or a manual dispatch, never from a
+merge.
+
 Automatic publication happens when the `Release` workflow's `release-published`
 repository dispatch arrives, and when a GitHub Release is published by a
 maintainer. Both build the source at the release tag (not `main`'s head) and
 publish `X.Y.Z` plus `sha-<short>`; `latest`, `X.Y`, and `X` move only when that
 tag is the newest stable release, and `X` is never published on `0.x`.
+
+An **untagged manual dispatch from `main`** publishes `edge` (only while that
+commit is still `main`'s head) plus `sha-<short>` as a preview build. It never
+creates or moves `latest`.
 
 A **prerelease is skipped**: the run succeeds without pushing and without moving
 any tag.

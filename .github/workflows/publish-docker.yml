@@ -7,8 +7,6 @@
 name: Publish Docker
 
 on:
-  push:
-    branches: [main]
   repository_dispatch:
     types: [release-published]
   release:

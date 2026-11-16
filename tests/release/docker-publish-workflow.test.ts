@@ -15,9 +15,8 @@ const workflow = parse(source) as {
 };
 
 describe('publish workflow', () => {
-  it('runs on main pushes, release dispatch, published releases, labeled pull requests, and manual dispatch', () => {
+  it('runs on release dispatch, published releases, labeled pull requests, and manual dispatch', () => {
     expect(workflow.on).toEqual({
-      push: { branches: ['main'] },
       repository_dispatch: { types: ['release-published'] },
       release: { types: ['published'] },
       pull_request: { types: ['labeled'] },
@@ -31,6 +30,9 @@ describe('publish workflow', () => {
         },
       },
     });
+    // A merge to main publishes nothing: only an explicit release or manual
+    // dispatch may start publication.
+    expect(workflow.on).not.toHaveProperty('push');
     // Only adding a label may publish: a push or edit to a PR never republishes.
     expect(workflow.on).not.toHaveProperty('pull_request_target');
   });
@@ -257,18 +259,6 @@ const cases: ResolveCase[] = [
       short_sha: SHORT_TAG,
       tag: 'v0.2.0',
     }),
-  },
-  {
-    name: 'edge holds when main has moved on',
-    env: { EVENT_NAME: 'push', FAKE_MAIN: 'c'.repeat(40) },
-    exit: 0,
-    expect: defaults({ edge: 'false' }),
-  },
-  {
-    name: 'edge advances when this run still matches main',
-    env: { EVENT_NAME: 'push', FAKE_MAIN: SHA_MAIN },
-    exit: 0,
-    expect: defaults({ edge: 'true' }),
   },
   {
     name: 'untagged manual dispatch from main moves edge',
