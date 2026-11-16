@@ -17,6 +17,8 @@ describe('commit message policy', () => {
     'fix(oauth): reject stale state',
     'perf!: replace the message index',
     'chore: update tooling\n\nBREAKING CHANGE: require Node 24',
+    "Merge branch 'main' into ci/organize-release-workflow",
+    'Merge pull request #98 from raidenyn/ci/organize-release-workflow',
   ])('accepts %s', (message) => {
     const result = lint(message);
     expect(result.status, result.stderr || result.stdout).toBe(0);
@@ -25,7 +27,6 @@ describe('commit message policy', () => {
   it.each([
     'style: reformat files',
     'missing conventional prefix',
-    "Merge branch 'main'",
     'Revert "feat: add release automation"',
     `feat: ${'x'.repeat(100)}`,
   ])('rejects %s', (message) => {
