@@ -99,8 +99,10 @@ gate is a repository variable that only a human sets.
    this repository is public, so repository-wide Actions access would let fork
    runs read the packages. No package role is granted to the repository token.
 
-4. **Create the protected `ghcr-publish` environment.** Restrict it to `main`
-   and `v*` tags, and store the classic personal access token as
+4. **Create the protected `ghcr-publish` environment.** Require an owner
+   approval, and set the deployment-branch policy to allow `main`, `v*` tags,
+   **and pull-request refs** — PR publication is gated by the approval, not by
+   the ref filter. Store the classic personal access token as
    `GHCR_PUBLISH_TOKEN` (scope `write:packages`, which implies `read:packages`).
    The workflow logs in with that environment secret and never with
    `GITHUB_TOKEN`; its permissions stay `contents: read`.
@@ -169,3 +171,25 @@ gh workflow run publish-docker.yml --ref main -f tag=v1.2.3
 
 Readers of the private images need a token with `read:packages` **and** an
 access grant from the maintainer; a valid token alone is not enough.
+
+### Pull-request images
+
+Adding the **`publish-docker`** label to a **same-repository** pull request
+publishes that PR's head commit as **`pr-<number>`** plus `sha-<short>`, for
+both targets, and nothing else. A PR build never creates or moves `latest`,
+`edge`, or a release tag, so a pull request cannot shadow a release.
+
+- **Only the label event acts.** Later pushes to the labeled PR do not
+  republish; remove and re-add the label to publish the new head. Any other
+  label, or any PR activity without `publish-docker`, publishes nothing and
+  succeeds.
+- **Fork pull requests are refused** with a warning before the protected
+  environment is entered, so the registry token is never offered to a fork.
+- **Every PR and release run needs the owner's approval.** Both deploy into
+  the protected `ghcr-publish` environment, so the environment's
+  deployment-branch policy must permit pull-request refs; the approval, not
+  the ref filter, is the trust boundary (a same-repository PR can edit this
+  workflow).
+- **The bootstrap gate still applies.** While `GHCR_PACKAGES_PRIVATE` is not
+  `true`, a labeled PR refuses to publish and the run fails; unlabeled PR
+  activity does not fail.

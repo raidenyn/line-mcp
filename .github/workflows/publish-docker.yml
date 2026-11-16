@@ -11,6 +11,8 @@ on:
     types: [release-published]
   release:
     types: [published]
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       tag:
@@ -43,6 +45,7 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       short_sha: ${{ steps.resolve.outputs.short_sha }}
       major: ${{ steps.resolve.outputs.major }}
+      pr: ${{ steps.resolve.outputs.pr }}
     steps:
       - name: Resolve publication inputs
         id: resolve
@@ -55,6 +58,10 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
           INPUT_TAG: ${{ inputs.tag }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           GHCR_PACKAGES_PRIVATE: ${{ vars.GHCR_PACKAGES_PRIVATE }}
         shell: bash
         run: |
@@ -65,6 +72,7 @@ jobs:
           edge=false
           major=''
           tag=''
+          pr=''
           sha="$SHA"
           short_sha="${SHA:0:7}"
           ref="$SHA"
@@ -75,6 +83,7 @@ jobs:
               printf 'latest=%s\n' "$latest"
               printf 'edge=%s\n' "$edge"
               printf 'tag=%s\n' "$tag"
+              printf 'pr=%s\n' "$pr"
               printf 'sha=%s\n' "$sha"
               printf 'short_sha=%s\n' "$short_sha"
               printf 'major=%s\n' "$major"
@@ -89,11 +98,44 @@ jobs:
             exit 0
           fi
 
+          # Publishing a pull request is an explicit one-shot request: only the
+          # `labeled` event reaches this script, an unlabeled one publishes
+          # nothing, and a fork head is refused before the protected
+          # environment could hand out the registry token.
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            if [ "${PR_LABEL:-}" != 'publish-docker' ]; then
+              publish=false
+              write_outputs
+              exit 0
+            fi
+            if [ "${PR_HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+              publish=false
+              printf '::warning::fork pull requests cannot publish images; only same-repository pull requests are supported\n' >&2
+              write_outputs
+              exit 0
+            fi
+            pr="${PR_NUMBER:-}"
+            sha="${PR_HEAD_SHA:-}"
+            short_sha="${sha:0:7}"
+            ref="$sha"
+            tag=''
+            latest=false
+            edge=false
+            major=''
+          fi
+
           # Never create a package from scratch: the bootstrap makes both
           # packages private (with inherited access disabled) before merge.
           if [ "${GHCR_PACKAGES_PRIVATE:-}" != 'true' ]; then
             printf '::error::GHCR_PACKAGES_PRIVATE is not true; run the GHCR Private-Package Bootstrap in docs/RELEASING.md first\n' >&2
             exit 1
+          fi
+
+          # The label already carries the head commit: no tag lookup, no shared
+          # moving tags, and no edge advancement for a PR build.
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            write_outputs
+            exit 0
           fi
 
           case "$EVENT_NAME" in
@@ -215,7 +257,7 @@ jobs:
 
       - name: Extract edge metadata
         id: meta-edge
-        if: needs.prepare.outputs.tag == ''
+        if: needs.prepare.outputs.tag == '' && needs.prepare.outputs.pr == ''
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
@@ -224,6 +266,21 @@ jobs:
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
           tags: |
             type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      # A PR image is addressed only by its pull request and commit; it never
+      # receives `latest`, `edge`, or a release tag.
+      - name: Metadata (pull request)
+        id: meta-pr
+        if: needs.prepare.outputs.pr != ''
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+          tags: |
+            type=raw,value=pr-${{ needs.prepare.outputs.pr }}
             type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
 
       - name: Build and push
@@ -242,5 +299,5 @@ jobs:
           # these registry cache pushes and pulls authenticated.
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
-          labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}
-          tags: ${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}
+          labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels || steps.meta-pr.outputs.labels }}
+          tags: ${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags || steps.meta-pr.outputs.tags }}

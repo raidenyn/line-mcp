@@ -15,11 +15,12 @@ const workflow = parse(source) as {
 };
 
 describe('publish workflow', () => {
-  it('runs on main pushes, release dispatch, published releases, and manual dispatch', () => {
+  it('runs on main pushes, release dispatch, published releases, labeled pull requests, and manual dispatch', () => {
     expect(workflow.on).toEqual({
       push: { branches: ['main'] },
       repository_dispatch: { types: ['release-published'] },
       release: { types: ['published'] },
+      pull_request: { types: ['labeled'] },
       workflow_dispatch: {
         inputs: {
           tag: {
@@ -30,7 +31,8 @@ describe('publish workflow', () => {
         },
       },
     });
-    expect(workflow.on).not.toHaveProperty('pull_request');
+    // Only adding a label may publish: a push or edit to a PR never republishes.
+    expect(workflow.on).not.toHaveProperty('pull_request_target');
   });
 
   it('queues releases instead of cancelling them and holds contents-only permissions', () => {
@@ -45,6 +47,7 @@ describe('publish workflow', () => {
 
 const SHA_MAIN = 'a'.repeat(40);
 const SHA_TAG = 'b'.repeat(40);
+const SHA_PR = 'e'.repeat(40);
 
 type Step = {
   'continue-on-error'?: boolean;
@@ -74,9 +77,20 @@ type ResolveCase = {
   tags?: string[];
 };
 
-const OUTPUT_KEYS = ['edge', 'latest', 'major', 'publish', 'ref', 'sha', 'short_sha', 'tag'];
+const OUTPUT_KEYS = [
+  'edge',
+  'latest',
+  'major',
+  'pr',
+  'publish',
+  'ref',
+  'sha',
+  'short_sha',
+  'tag',
+];
 const SHORT_TAG = SHA_TAG.slice(0, 7);
 const SHORT_MAIN = SHA_MAIN.slice(0, 7);
+const SHORT_PR = SHA_PR.slice(0, 7);
 
 // Every success case states the complete output map, so an extra or missing
 // key in the emitted outputs cannot slip through.
@@ -84,6 +98,7 @@ const defaults = (overrides: Record<string, string>): Record<string, string> => 
   edge: 'false',
   latest: 'false',
   major: '',
+  pr: '',
   publish: 'true',
   ref: SHA_MAIN,
   sha: SHA_MAIN,
@@ -109,6 +124,70 @@ const cases: ResolveCase[] = [
     },
     exit: 0,
     expect: defaults({ publish: 'false' }),
+  },
+  {
+    name: 'the publish-docker label on a same-repository PR publishes its head',
+    env: {
+      EVENT_NAME: 'pull_request',
+      PR_HEAD_REPO: 'owner/repo',
+      PR_HEAD_SHA: SHA_PR,
+      PR_LABEL: 'publish-docker',
+      PR_NUMBER: '96',
+    },
+    exit: 0,
+    expect: defaults({ pr: '96', ref: SHA_PR, sha: SHA_PR, short_sha: SHORT_PR }),
+  },
+  {
+    name: 'another label on a pull request publishes nothing',
+    env: {
+      EVENT_NAME: 'pull_request',
+      PR_HEAD_REPO: 'owner/repo',
+      PR_HEAD_SHA: SHA_PR,
+      PR_LABEL: 'bug',
+      PR_NUMBER: '96',
+    },
+    exit: 0,
+    expect: defaults({ publish: 'false' }),
+  },
+  {
+    name: 'an unlabeled pull request succeeds even without the private bootstrap variable',
+    env: {
+      EVENT_NAME: 'pull_request',
+      GHCR_PACKAGES_PRIVATE: '',
+      PR_HEAD_REPO: 'owner/repo',
+      PR_HEAD_SHA: SHA_PR,
+      PR_LABEL: 'bug',
+      PR_NUMBER: '96',
+    },
+    exit: 0,
+    expect: defaults({ publish: 'false' }),
+  },
+  {
+    name: 'a fork pull request is refused with a warning',
+    env: {
+      EVENT_NAME: 'pull_request',
+      PR_HEAD_REPO: 'contributor/repo',
+      PR_HEAD_SHA: SHA_PR,
+      PR_LABEL: 'publish-docker',
+      PR_NUMBER: '96',
+    },
+    exit: 0,
+    expect: defaults({ publish: 'false' }),
+    stderr: 'fork',
+  },
+  {
+    name: 'a labeled pull request still requires the private bootstrap',
+    env: {
+      EVENT_NAME: 'pull_request',
+      GHCR_PACKAGES_PRIVATE: '',
+      PR_HEAD_REPO: 'owner/repo',
+      PR_HEAD_SHA: SHA_PR,
+      PR_LABEL: 'publish-docker',
+      PR_NUMBER: '96',
+    },
+    exit: 1,
+    expect: {},
+    stderr: 'GHCR Private-Package Bootstrap',
   },
   {
     name: 'dispatch without a tag fails',
@@ -328,6 +407,10 @@ fi
       GITHUB_SERVER_URL: 'https://github.com',
       INPUT_TAG: '',
       PATH: `${dir}:${process.env.PATH}`,
+      PR_HEAD_REPO: '',
+      PR_HEAD_SHA: '',
+      PR_LABEL: '',
+      PR_NUMBER: '',
       REF: 'refs/heads/main',
       RELEASE_PRERELEASE: 'false',
       RELEASE_TAG: '',
@@ -370,6 +453,7 @@ describe('prepare resolve script', () => {
       edge: '${{ steps.resolve.outputs.edge }}',
       latest: '${{ steps.resolve.outputs.latest }}',
       major: '${{ steps.resolve.outputs.major }}',
+      pr: '${{ steps.resolve.outputs.pr }}',
       publish: '${{ steps.resolve.outputs.publish }}',
       ref: '${{ steps.resolve.outputs.ref }}',
       sha: '${{ steps.resolve.outputs.sha }}',
@@ -383,6 +467,10 @@ describe('prepare resolve script', () => {
       DISPATCH_PAYLOAD: '${{ toJSON(github.event.client_payload) }}',
       DISPATCH_TAG: '${{ github.event.client_payload.tag }}',
       INPUT_TAG: '${{ inputs.tag }}',
+      PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}',
+      PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+      PR_LABEL: '${{ github.event.label.name }}',
+      PR_NUMBER: '${{ github.event.pull_request.number }}',
       RELEASE_PRERELEASE: '${{ github.event.release.prerelease }}',
       RELEASE_TAG: '${{ github.event.release.tag_name }}',
     });
@@ -467,13 +555,32 @@ describe('publish job', () => {
     ]);
 
     // Releases and edge builds share one build step, so exactly one metadata
-    // step may run: the tagged one for a tag, the edge one otherwise.
+    // step may run: the tagged one for a tag, the edge one for a tagless
+    // non-PR run, and the PR one only for a labeled PR.
     expect(release.if).toBe("needs.prepare.outputs.tag != ''");
-    expect(edge.if).toBe("needs.prepare.outputs.tag == ''");
+    expect(edge.if).toBe("needs.prepare.outputs.tag == '' && needs.prepare.outputs.pr == ''");
+  });
+
+  it('publishes a labeled pull request as only pr-<number> and sha-<short>', () => {
+    const pr = publish.steps.find((step) => step.id === 'meta-pr')!;
+    expect(pr.name).toBe('Metadata (pull request)');
+    expect(pr.uses).toBe('docker/metadata-action@v5');
+    expect(pr.if).toBe("needs.prepare.outputs.pr != ''");
+    expect(pr.with).toMatchObject({
+      images: 'ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}',
+      flavor: 'latest=false',
+    });
+    expect(tagLines(pr)).toEqual([
+      'type=raw,value=pr-${{ needs.prepare.outputs.pr }}',
+      'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
+    ]);
+    // A PR image never receives a moving release or edge tag.
+    expect(String(pr.with?.tags)).not.toContain('latest');
+    expect(String(pr.with?.tags)).not.toContain('edge');
   });
 
   it('labels each image with the built commit', () => {
-    for (const id of ['meta-release', 'meta-edge']) {
+    for (const id of ['meta-release', 'meta-edge', 'meta-pr']) {
       const step = publish.steps.find((candidate) => candidate.id === id)!;
       expect(String(step.with?.labels)).toContain(
         'org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}',
@@ -495,8 +602,9 @@ describe('publish job', () => {
         'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache',
       'cache-to':
         'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max',
-      labels: '${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels }}',
-      tags: '${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags }}',
+      labels:
+        '${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels || steps.meta-pr.outputs.labels }}',
+      tags: '${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags || steps.meta-pr.outputs.tags }}',
     });
   });
 
