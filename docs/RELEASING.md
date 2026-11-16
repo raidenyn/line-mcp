@@ -44,7 +44,7 @@ an older head.
 
 | Stage | What it does |
 | ----- | ------------ |
-| `authorize` | Refuses every actor but the repository owner (compared case-insensitively) and every ref but `refs/heads/main`. The `draft` and `publish` jobs repeat it because "re-run failed jobs" does not re-run a job that already succeeded. |
+| `authorize` | Refuses every actor but the repository owner (compared case-insensitively) and every ref but `refs/heads/main`. The `plan`, `draft`, and `publish` jobs repeat it because "re-run failed jobs" does not re-run a job that already succeeded. |
 | `plan` | Runs `npm run release:plan`, a semantic-release dry run that creates no tag. It writes the next `vX.Y.Z`, its notes, and the planned commit. **`No releasable commits` is a successful no-op**: nothing is created. |
 | `draft` | Creates a GitHub **draft** release titled with the tag, targeted at the planned commit, with the generated notes. A draft creates no git tag. A stale draft for the same tag is deleted and replaced, so a retry starts clean; a published release with that tag, or an existing remote tag, fails the run. |
 | `images` | Calls the reusable `Publish Docker` workflow (`.github/workflows/publish-docker.yml`, `workflow_call`) to build both images at the planned commit and push the version tags. |
@@ -63,7 +63,8 @@ draft, and abandoning it leaves no tag behind.
 | --- | --- |
 | `authorize`, `plan` | Fix the cause, then dispatch a new run: run as the owner from `main`, create the missing `v0.1.0` baseline tag, or plan again from the current head. |
 | `draft` | Retryable failures (authorization, API, transient): re-run the same run while `main` is unchanged; a stale draft for the same tag is deleted and replaced automatically. A published release or an existing remote tag for the planned version cannot be replaced: resolve that release or tag first, or dispatch a new run once `main` carries commits that plan a higher version. |
-| `images`, `publish` | Re-run all jobs of the same run while `main` is unchanged; the stale draft is replaced and the images are rebuilt at the planned commit. If `main` has moved, dispatch a new run instead: it plans from the new head and replaces a stale draft for the same tag. |
+| `images`, or `publish` before the release is public | Re-run all jobs of the same run while `main` is unchanged; the stale draft is replaced and the images are rebuilt at the planned commit. If `main` has moved, dispatch a new run instead: it plans from the new head and replaces a stale draft for the same tag. |
+| `publish` after the release is public (for example a failed tag read-back) | Use **Re-run failed jobs**, not all jobs: it re-runs only `publish`, which edits the published release, re-appends exactly one image section, and checks the tag again. A full re-run would stop at `draft` because the release is already published. |
 | Any staleness failure (`origin/main` moved, or `main` changed during planning) | Dispatch a new run. A re-run keeps the original commit and cannot recover. |
 | Tag mismatch after `publish` | Manual fix: the tag was created but resolves to a commit other than the planned one. Inspect the tag and release, then correct the tag by hand. |
 

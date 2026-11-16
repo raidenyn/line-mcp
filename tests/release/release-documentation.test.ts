@@ -30,6 +30,14 @@ describe('release documentation', () => {
     expect(runbook).not.toContain('gh workflow run publish-docker.yml');
   });
 
+  it('documents recovery after the release is already public', () => {
+    const runbook = readFileSync('docs/RELEASING.md', 'utf8');
+    expect(runbook).toContain('after the release is public');
+    expect(runbook).toContain('Re-run failed jobs');
+    // A full re-run would stop at `draft` once the release is published.
+    expect(runbook).toContain('A full re-run would stop at `draft`');
+  });
+
   it('documents anonymous pulls of the public images', () => {
     const readme = readFileSync('README.md', 'utf8');
     expect(readme).toContain('docker pull ghcr.io/raidenyn/line-mcp-full:');

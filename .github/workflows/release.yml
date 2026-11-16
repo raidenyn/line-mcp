@@ -5,9 +5,9 @@
 # the reusable Publish Docker workflow; `publish` appends the image links and
 # publishes the draft, which is what creates the git tag.
 #
-# The draft and publish jobs repeat the authorization step because "Re-run
-# failed jobs" does not re-run a job that already succeeded, and those jobs hold
-# `contents: write`. Nothing here pushes a commit, pushes a tag, or publishes to
+# The plan, draft, and publish jobs repeat the authorization step because
+# "Re-run failed jobs" does not re-run a job that already succeeded, and those
+# jobs hold `contents: write`. Nothing here pushes a commit, pushes a tag, or publishes to
 # npm: the tag is created only by publishing the draft.
 name: Release
 

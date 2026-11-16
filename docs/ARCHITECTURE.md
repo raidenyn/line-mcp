@@ -128,7 +128,7 @@ Both run as the non-root `node` user, expose `/data` as a volume, and healthchec
 
 ## Delivery & publication (`.github/workflows/release.yml`, `.github/workflows/publish-docker.yml`)
 
-`Release` is the only path to a version tag and a GitHub Release. It is manual only (`workflow_dispatch`), owner-only (`github.triggering_actor` compared case-insensitively with `github.repository_owner`), and `main`-only (`refs/heads/main`); `authorize` enforces all three before any job writes, and the `draft`/`publish` jobs repeat it because "re-run failed jobs" skips jobs that already succeeded. There is no push trigger: a merge publishes nothing. Five stages run in order:
+`Release` is the only path to a version tag and a GitHub Release. It is manual only (`workflow_dispatch`), owner-only (`github.triggering_actor` compared case-insensitively with `github.repository_owner`), and `main`-only (`refs/heads/main`); `authorize` enforces all three before any job writes, and the `plan`/`draft`/`publish` jobs repeat it because "re-run failed jobs" skips jobs that already succeeded. There is no push trigger: a merge publishes nothing. Five stages run in order:
 
 - **`authorize`** — owner, `main`, and the `raidenyn/line-mcp` repository, or the run stops.
 - **`plan`** — `npm run release:plan` (a `semantic-release` dry run that creates no tag) resolves the next `vX.Y.Z`, its generated notes, and the planned commit. "No releasable commits" is a successful no-op; later stages are skipped.
