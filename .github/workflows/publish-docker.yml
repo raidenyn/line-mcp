@@ -1,7 +1,9 @@
-# Publishes both runtime targets to GitHub Container Registry.
-# GHCR only: every image bundles LINE's proprietary LTSM assets, and the
-# repository's provenance policy approves Docker images for internal use only.
-# The packages must stay private; do not add a Docker Hub or other public push.
+# Publishes both runtime targets to GitHub Container Registry as public images.
+# GHCR only: every image bundles LINE's proprietary LTSM assets, and the owner
+# accepted that redistribution risk permanently on 2026-11-16 — see
+# packages/line-client/THIRD_PARTY_NOTICES.md. Registry authentication uses the
+# built-in GITHUB_TOKEN under `packages: write`; no personal access token is
+# stored. Do not add a Docker Hub or other registry push.
 name: Publish Docker
 
 on:
@@ -62,7 +64,6 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_LABEL: ${{ github.event.label.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          GHCR_PACKAGES_PRIVATE: ${{ vars.GHCR_PACKAGES_PRIVATE }}
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +102,7 @@ jobs:
           # Publishing a pull request is an explicit one-shot request: only the
           # `labeled` event reaches this script, an unlabeled one publishes
           # nothing, and a fork head is refused before the protected
-          # environment could hand out the registry token.
+          # environment deployment is requested.
           if [ "$EVENT_NAME" = 'pull_request' ]; then
             if [ "${PR_LABEL:-}" != 'publish-docker' ]; then
               publish=false
@@ -122,13 +123,6 @@ jobs:
             latest=false
             edge=false
             major=''
-          fi
-
-          # Never create a package from scratch: the bootstrap makes both
-          # packages private (with inherited access disabled) before merge.
-          if [ "${GHCR_PACKAGES_PRIVATE:-}" != 'true' ]; then
-            printf '::error::GHCR_PACKAGES_PRIVATE is not true; run the GHCR Private-Package Bootstrap in docs/RELEASING.md first\n' >&2
-            exit 1
           fi
 
           # The label already carries the head commit: no tag lookup, no shared
@@ -208,6 +202,9 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.publish == 'true'
     environment: ghcr-publish
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -230,14 +227,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # The protected environment's isolated token is the only registry
-      # credential; the workflow token never gets package permission.
+      # The built-in workflow token carries `packages: write` on this job; the
+      # protected environment keeps the owner approval as an abuse control.
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_PUBLISH_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract release metadata
         id: meta-release
@@ -248,6 +245,7 @@ jobs:
           flavor: latest=false
           labels: |
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
           tags: |
             type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' }}
@@ -264,6 +262,7 @@ jobs:
           flavor: latest=false
           labels: |
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
           tags: |
             type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}
             type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
@@ -279,6 +278,7 @@ jobs:
           flavor: latest=false
           labels: |
             org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
           tags: |
             type=raw,value=pr-${{ needs.prepare.outputs.pr }}
             type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
@@ -293,10 +293,10 @@ jobs:
           push: true
           provenance: false
           sbom: false
-          # The cache holds image layers, so it must live in the same private
-          # package: a GHA cache is restorable by fork pull-request workflows
-          # and would leak the bundled LTSM assets. The GHCR login above makes
-          # these registry cache pushes and pulls authenticated.
+          # The cache holds image layers, so it lives in the same GHCR package as
+          # the image: a GHA cache is restorable by fork pull-request workflows.
+          # The GHCR login above makes these registry cache pushes and pulls
+          # authenticated.
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
           labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels || steps.meta-pr.outputs.labels }}

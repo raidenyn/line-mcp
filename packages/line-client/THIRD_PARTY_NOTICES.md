@@ -26,14 +26,17 @@ Full retrieval, ownership, and hash/size provenance details are recorded in
 
 These two files are proprietary artifacts owned by **LINE Corporation**. No
 license grant permitting redistribution has been obtained or is known to
-exist. Do not edit, decompile, or otherwise transform them.
+exist. The owner's risk acceptance below changes the project's internal
+distribution policy, not that license status. Do not edit, decompile, or
+otherwise transform them.
 
 ## Where these files may be distributed
 
 - **This source repository** — approved, as build-time dependencies of the
-  reverse-engineered client.
-- **Docker images built from this repository** — approved, for running this
-  server internally.
+  reverse-engineered client. The repository is public.
+- **Public container images** — approved, as public packages on GitHub
+  Container Registry (`ghcr.io/raidenyn/line-mcp-full` and
+  `ghcr.io/raidenyn/line-mcp`), so anonymous pulls succeed.
 - **Internal tarballs** (e.g. `npm pack` output installed into a private or
   internal target) — approved, for internal testing and distribution only.
 - **Public npm registry (or any other public package index)** — **not
@@ -41,6 +44,17 @@ exist. Do not edit, decompile, or otherwise transform them.
   blocked pending a legal review of LINE Corporation's redistribution rights.
   No task in this project's modularization effort (issue #75) performs, or is
   authorized to perform, a public `npm publish` of this package.
+
+## Owner risk acceptance (2026-11-16)
+
+The repository owner reviewed the `redistributionStatus` recorded in
+[`assets/ltsm/provenance.json`](assets/ltsm/provenance.json) and permanently
+accepted the risk of publishing **public container images** that bundle these
+two files, so anonymous `docker pull` works. This acceptance covers public
+container images only: public npm publication remains **not approved**, and no
+other public distribution form is approved by it. It is not a license grant
+from LINE Corporation, and the ownership, size, and hash provenance in
+`provenance.json` are unchanged.
 
 ## Everything else in this package
 

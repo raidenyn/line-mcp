@@ -35,13 +35,21 @@ describe('publish workflow', () => {
     expect(workflow.on).not.toHaveProperty('pull_request_target');
   });
 
-  it('queues releases instead of cancelling them and holds contents-only permissions', () => {
+  it('queues releases instead of cancelling them and keeps prepare read-only', () => {
     expect(workflow.permissions).toEqual({ contents: 'read' });
+    expect((workflow.jobs.prepare as { permissions?: Record<string, string> }).permissions).toEqual({
+      contents: 'read',
+    });
     expect(workflow.concurrency).toEqual({
       'cancel-in-progress': false,
       group: 'publish-docker',
       queue: 'max',
     });
+  });
+
+  it('authenticates with the workflow token and no registry secret', () => {
+    expect(source).not.toContain('GHCR_PUBLISH_TOKEN');
+    expect(source).not.toContain('GHCR_PACKAGES_PRIVATE');
   });
 });
 
@@ -115,13 +123,8 @@ const cases: ResolveCase[] = [
     expect: defaults({ publish: 'false' }),
   },
   {
-    name: 'prerelease is skipped before the private-package gate even without the variable',
-    env: {
-      EVENT_NAME: 'release',
-      GHCR_PACKAGES_PRIVATE: '',
-      RELEASE_PRERELEASE: 'true',
-      RELEASE_TAG: 'v1.2.3',
-    },
+    name: 'prerelease is skipped before any tag lookup',
+    env: { EVENT_NAME: 'release', RELEASE_PRERELEASE: 'true', RELEASE_TAG: 'v1.2.3' },
     exit: 0,
     expect: defaults({ publish: 'false' }),
   },
@@ -138,25 +141,12 @@ const cases: ResolveCase[] = [
     expect: defaults({ pr: '96', ref: SHA_PR, sha: SHA_PR, short_sha: SHORT_PR }),
   },
   {
-    name: 'another label on a pull request publishes nothing',
+    name: 'an unlabeled pull request publishes nothing',
     env: {
       EVENT_NAME: 'pull_request',
       PR_HEAD_REPO: 'owner/repo',
       PR_HEAD_SHA: SHA_PR,
-      PR_LABEL: 'bug',
-      PR_NUMBER: '96',
-    },
-    exit: 0,
-    expect: defaults({ publish: 'false' }),
-  },
-  {
-    name: 'an unlabeled pull request succeeds even without the private bootstrap variable',
-    env: {
-      EVENT_NAME: 'pull_request',
-      GHCR_PACKAGES_PRIVATE: '',
-      PR_HEAD_REPO: 'owner/repo',
-      PR_HEAD_SHA: SHA_PR,
-      PR_LABEL: 'bug',
+      PR_LABEL: '',
       PR_NUMBER: '96',
     },
     exit: 0,
@@ -176,32 +166,11 @@ const cases: ResolveCase[] = [
     stderr: '::warning::fork pull requests cannot publish images',
   },
   {
-    name: 'a labeled pull request still requires the private bootstrap',
-    env: {
-      EVENT_NAME: 'pull_request',
-      GHCR_PACKAGES_PRIVATE: '',
-      PR_HEAD_REPO: 'owner/repo',
-      PR_HEAD_SHA: SHA_PR,
-      PR_LABEL: 'publish-docker',
-      PR_NUMBER: '96',
-    },
-    exit: 1,
-    expect: {},
-    stderr: 'GHCR Private-Package Bootstrap',
-  },
-  {
     name: 'dispatch without a tag fails',
     env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: '' },
     exit: 1,
     expect: {},
     stderr: 'carried no tag',
-  },
-  {
-    name: 'publication is refused until the private bootstrap is recorded',
-    env: { EVENT_NAME: 'push', GHCR_PACKAGES_PRIVATE: '' },
-    exit: 1,
-    expect: {},
-    stderr: 'GHCR Private-Package Bootstrap',
   },
   {
     name: 'two-component tag is rejected',
@@ -401,7 +370,6 @@ fi
       DISPATCH_PAYLOAD: '{}',
       DISPATCH_TAG: '',
       FAKE_TAGS: (testCase.tags ?? []).join('\n'),
-      GHCR_PACKAGES_PRIVATE: 'true',
       GITHUB_OUTPUT: outputPath,
       GITHUB_REPOSITORY: 'owner/repo',
       GITHUB_SERVER_URL: 'https://github.com',
@@ -474,6 +442,8 @@ describe('prepare resolve script', () => {
       RELEASE_PRERELEASE: '${{ github.event.release.prerelease }}',
       RELEASE_TAG: '${{ github.event.release.tag_name }}',
     });
+    // The prepare job reads no repository variable: there is no package gate.
+    expect(resolveStep().env).not.toHaveProperty('GHCR_PACKAGES_PRIVATE');
     expect(resolveStep().run).toContain('GITHUB_OUTPUT');
   });
 
@@ -486,6 +456,7 @@ const publish = workflow.jobs.publish as {
   environment?: string;
   if?: string;
   needs?: string | string[];
+  permissions?: Record<string, string>;
   steps: Step[];
   strategy?: { 'fail-fast'?: boolean; matrix?: { include?: Array<Record<string, string>> } };
 };
@@ -501,13 +472,14 @@ describe('publish job', () => {
     expect(publish.needs).toBe('prepare');
     expect(publish.environment).toBe('ghcr-publish');
     expect(publish.if).toBe("needs.prepare.outputs.publish == 'true'");
+    expect(publish.permissions).toEqual({ contents: 'read', packages: 'write' });
     expect(publish.strategy?.matrix?.include).toEqual([
       { target: 'server', image: 'line-mcp-full' },
       { target: 'line-mcp', image: 'line-mcp' },
     ]);
   });
 
-  it('checks out the resolved ref, verifies the commit, and uses the isolated registry token', () => {
+  it('checks out the resolved ref, verifies the commit, and logs in with the workflow token', () => {
     const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v4')!;
     expect(checkout.with).toMatchObject({ ref: '${{ needs.prepare.outputs.ref }}' });
     const verify = publish.steps.find((step) => step.name === 'Verify checked-out commit')!;
@@ -515,12 +487,11 @@ describe('publish job', () => {
     expect(verify.run).toContain('${{ needs.prepare.outputs.sha }}');
     const logins = publish.steps.filter((step) => step.uses === 'docker/login-action@v3');
     expect(logins).toHaveLength(1);
-    expect(logins[0].with).toMatchObject({
+    expect(logins[0].with).toEqual({
       registry: 'ghcr.io',
-      username: '${{ github.repository_owner }}',
-      password: '${{ secrets.GHCR_PUBLISH_TOKEN }}',
+      username: '${{ github.actor }}',
+      password: '${{ secrets.GITHUB_TOKEN }}',
     });
-    expect(String(logins[0].with?.password)).not.toContain('GITHUB_TOKEN');
     expect(source).not.toContain('docker.io');
     expect(source).not.toContain('DOCKERHUB');
   });
@@ -579,16 +550,20 @@ describe('publish job', () => {
     expect(String(pr.with?.tags)).not.toContain('edge');
   });
 
-  it('labels each image with the built commit', () => {
+  it('labels each image with the built commit and a separated licence', () => {
     for (const id of ['meta-release', 'meta-edge', 'meta-pr']) {
       const step = publish.steps.find((candidate) => candidate.id === id)!;
       expect(String(step.with?.labels)).toContain(
         'org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}',
       );
+      // The bundled LINE binaries are not covered by this project's license.
+      expect(String(step.with?.labels)).toContain(
+        'org.opencontainers.image.licenses=NOASSERTION',
+      );
     }
   });
 
-  it('builds amd64, pushes, and keeps the layer cache in the private package', () => {
+  it('builds amd64, pushes, and keeps the layer cache in the registry package', () => {
     const build = publish.steps.find((step) => step.id === 'build')!;
     expect(build.uses).toBe('docker/build-push-action@v6');
     expect(build.with).toMatchObject({
@@ -609,9 +584,8 @@ describe('publish job', () => {
   });
 
   it('never exports layers to a GHA cache that forks could restore', () => {
-    // The images carry LINE's proprietary LTSM assets, and fork pull-request
-    // workflows can restore default-branch GHA caches, so no GHA cache may
-    // ever carry these layers.
+    // A registry cache keeps the layers with the image it belongs to and avoids
+    // a default-branch GHA cache, which fork pull-request workflows can restore.
     expect(source).not.toContain('type=gha');
     expect(source).not.toContain('gha');
     const build = publish.steps.find((step) => step.id === 'build')!;
