@@ -17,15 +17,23 @@ describe('commit message policy', () => {
     'fix(oauth): reject stale state',
     'perf!: replace the message index',
     'chore: update tooling\n\nBREAKING CHANGE: require Node 24',
+    "Merge branch 'main' into ci/organize-release-workflow",
+    'Merge pull request #98 from raidenyn/ci/organize-release-workflow',
+    "Merge remote-tracking branch 'origin/main'",
   ])('accepts %s', (message) => {
     const result = lint(message);
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
+  it('records the message-based merge exemption limitation', () => {
+    // The exemption applies to any message with a merge prefix, including a
+    // handwritten title; commitlint cannot inspect merge ancestry.
+    expect(lint('Merge branch: handwritten title').status).toBe(0);
+  });
+
   it.each([
     'style: reformat files',
     'missing conventional prefix',
-    "Merge branch 'main'",
     'Revert "feat: add release automation"',
     `feat: ${'x'.repeat(100)}`,
   ])('rejects %s', (message) => {
