@@ -62,6 +62,34 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       sha: ${{ steps.plan.outputs.sha }}
     steps:
+      # "Re-run failed jobs" skips a succeeded authorize job, and this job can
+      # write, so it repeats the guard before doing anything else.
+      - name: Authorize the owner on main
+        id: authorize
+        shell: bash
+        env:
+          ACTOR: ${{ github.triggering_actor }}
+          OWNER: ${{ github.repository_owner }}
+          REF: ${{ github.ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REPO" != 'raidenyn/line-mcp' ]; then
+            printf '::error::Release runs only in raidenyn/line-mcp, not %s\n' "$REPO" >&2
+            exit 1
+          fi
+
+          if [ "${ACTOR,,}" != "${OWNER,,}" ]; then
+            printf '::error::only the repository owner can run Release: %s is not %s\n' "$ACTOR" "$OWNER" >&2
+            exit 1
+          fi
+
+          if [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::Release must be dispatched from refs/heads/main, not %s\n' "$REF" >&2
+            exit 1
+          fi
+
       # The planner probes push access with `git push --dry-run`, which needs the
       # write token of this job. Credentials are not persisted so the probe and
       # the install cannot reuse them, and the dependency scripts never run.

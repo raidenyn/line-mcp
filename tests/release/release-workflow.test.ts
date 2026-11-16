@@ -44,6 +44,16 @@ const step = (jobName: string, stepName: string) => {
   return found;
 };
 
+// Every job that can write repeats the authorization guard; `authorize` itself
+// is the original. The list is derived from effective permissions so a newly
+// write-enabled job cannot silently skip the check.
+const guardedJobs = Object.entries(workflow.jobs)
+  .filter(
+    ([name, value]) =>
+      name === 'authorize' || (value.permissions ?? workflow.permissions).contents === 'write',
+  )
+  .map(([name]) => ({ jobName: name, step: job(name).steps?.[0] }));
+
 const runSteps = () =>
   Object.entries(workflow.jobs).flatMap(([jobName, value]) =>
     (value.steps ?? []).flatMap((candidate) =>
@@ -130,6 +140,7 @@ describe('release workflow shape', () => {
 
   it('plans the release after verifying main and the baseline tag', () => {
     expect(job('plan').steps?.map((candidate) => candidate.name ?? candidate.uses)).toEqual([
+      'Authorize the owner on main',
       'actions/checkout@v7',
       'actions/setup-node@v7',
       'Install dependencies',
@@ -198,7 +209,14 @@ describe('release workflow shape', () => {
     }
   });
 
-  it('repeats the same authorization step first in every writing job', () => {
+  it('repeats the same authorization step first in every job that can write', () => {
+    expect(guardedJobs.map(({ jobName }) => jobName)).toEqual([
+      'authorize',
+      'plan',
+      'draft',
+      'publish',
+    ]);
+
     const guard = job('authorize').steps?.[0];
     expect(guard?.id).toBe('authorize');
     expect(guard?.env).toEqual({
@@ -208,12 +226,11 @@ describe('release workflow shape', () => {
       REPO: '${{ github.repository }}',
     });
 
-    for (const name of ['draft', 'publish']) {
-      const first = job(name).steps?.[0];
-      expect(first?.name).toBe('Authorize the owner on main');
-      expect(first?.id).toBe('authorize');
-      expect(first?.run).toBe(guard?.run);
-      expect(first?.env).toEqual(guard?.env);
+    for (const { jobName, step: first } of guardedJobs) {
+      expect(first?.name, jobName).toBe('Authorize the owner on main');
+      expect(first?.id, jobName).toBe('authorize');
+      expect(first?.run, jobName).toBe(guard?.run);
+      expect(first?.env, jobName).toEqual(guard?.env);
     }
   });
 
@@ -293,12 +310,6 @@ describe('release workflow shape', () => {
   });
 });
 
-const authorizeCopies = [
-  { jobName: 'authorize', step: job('authorize').steps?.[0] },
-  { jobName: 'draft', step: job('draft').steps?.[0] },
-  { jobName: 'publish', step: job('publish').steps?.[0] },
-];
-
 type AuthorizeCase = {
   env?: Record<string, string>;
   exit: number;
@@ -356,14 +367,20 @@ const AUTHORIZE_ENV = {
 };
 
 describe('authorize script', () => {
-  it('is present in all three writing jobs', () => {
-    for (const copy of authorizeCopies) {
-      expect(copy.step?.run, copy.jobName).toBe(authorizeCopies[0].step?.run);
+  it('runs as the first step of every job that can write', () => {
+    expect(guardedJobs.map(({ jobName }) => jobName)).toEqual([
+      'authorize',
+      'plan',
+      'draft',
+      'publish',
+    ]);
+    for (const copy of guardedJobs) {
+      expect(copy.step?.run, copy.jobName).toBe(guardedJobs[0].step?.run);
     }
   });
 
   it.each(authorizeCases)('$name', (testCase) => {
-    for (const copy of authorizeCopies) {
+    for (const copy of guardedJobs) {
       const result = runStep(copy.step?.run ?? '', {
         env: { ...AUTHORIZE_ENV, ...testCase.env },
         fakes: {},
@@ -381,7 +398,7 @@ describe('authorize script', () => {
     const messages = authorizeCases
       .filter((testCase) => testCase.exit !== 0)
       .map((testCase) =>
-        runStep(authorizeCopies[0].step?.run ?? '', {
+        runStep(guardedJobs[0].step?.run ?? '', {
           env: { ...AUTHORIZE_ENV, ...testCase.env },
           fakes: {},
         }).stderr.trim(),
