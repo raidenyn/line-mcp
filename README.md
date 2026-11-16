@@ -92,15 +92,11 @@ docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — newest stable
 docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — newest stable release
 ```
 
-`latest` exists only after the first **stable release** is published: an `edge`
-publication and the visibility flip do not create it. Merging to `main` publishes
-nothing. Until a stable release exists, start an untagged `Publish Docker`
-dispatch from `main` to build `edge`, then pull:
-
-```bash
-docker pull ghcr.io/raidenyn/line-mcp-full:edge     # composed — newest main build
-docker pull ghcr.io/raidenyn/line-mcp:edge          # standalone — newest main build
-```
+`latest` exists only after the first **stable release** is published; the
+visibility flip alone does not create it. Merging to `main` publishes nothing:
+release images are built only by the `Release` workflow, which calls the reusable
+`Publish Docker` workflow at the commit it planned, and each release's notes
+carry the pull command, digest, and package page for both images.
 
 A fresh installation pulled **before** the owner completes the flip fails with
 an authorization error; wait for the flip rather than authenticating manually.
@@ -134,7 +130,6 @@ docker run -d --name line-mcp \
 | `X.Y.Z` | One specific release |
 | `X.Y` | Newest release in that minor line — moves only for the globally newest stable tag |
 | `X` | Newest release in that major line — moves only for the globally newest stable tag, and never on `0.x` |
-| `edge` | Newest build from `main`, published by an untagged manual dispatch |
 | `sha-<short>` | Per-commit reference |
 
 `sha-<short>` names the commit an image was built from (not the default-branch head), but it is not byte-for-byte immutable: rebuilding the same commit produces a new digest. Pin a digest for an immutable deployment:
@@ -218,7 +213,7 @@ The repository ships four distinct test surfaces:
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
 - **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
 
-**Docker publication** is a separate workflow, `Publish Docker` (`.github/workflows/publish-docker.yml`). It publishes both images to the public `ghcr.io` packages above, and it never runs on a push or a merge: publication starts only from a `release-published` dispatch, a published GitHub Release, a manual `workflow_dispatch`, or the `publish-docker` pull-request label. An untagged manual dispatch from `main` publishes `edge` (when that commit is still `main`'s head) plus `sha-<short>`; a tagged manual dispatch, a `release-published` dispatch, or a published Release publishes `X.Y.Z` plus `latest`/`X.Y`/`X` when that tag is the newest stable release. A same-repository pull request publishes only when the maintainer adds the `publish-docker` label: that PR head is published as `pr-<number>` plus `sha-<short>`, the `ghcr-publish` deployment needs the owner's approval, and fork PRs are refused. It authenticates with the built-in `GITHUB_TOKEN` under `packages: write` — no personal access token — and never pushes anywhere but `ghcr.io`. The first-publication visibility flip and the rest of the operator steps are in [docs/RELEASING.md](docs/RELEASING.md).
+**Docker publication** is a separate workflow, `Publish Docker` (`.github/workflows/publish-docker.yml`). It never runs on a push, a merge, a tag, or a published Release. Release images are published only by the `Release` workflow (`.github/workflows/release.yml`), which calls it as a reusable workflow (`workflow_call`) at the commit it planned; each release's notes then carry the pull command, digest reference, and package page for both images. The only other entry point is the `publish-docker` label on a same-repository pull request: that PR head is published as `pr-<number>` plus `sha-<short>` and nothing else, the `ghcr-publish` deployment needs the owner's approval, and fork PRs are refused. It authenticates with the built-in `GITHUB_TOKEN` under `packages: write` — no personal access token — and never pushes anywhere but `ghcr.io`. The first-publication visibility flip and the rest of the operator steps are in [docs/RELEASING.md](docs/RELEASING.md).
 
 The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate; it needs real credentials and is a manual pre-release check.
 

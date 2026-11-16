@@ -10,13 +10,24 @@ describe('release documentation', () => {
     expect(guide).toContain('docs/RELEASING.md');
   });
 
-  it('documents bootstrap and normal release operations', () => {
+  it('documents bootstrap and the gated release operations', () => {
     const runbook = readFileSync('docs/RELEASING.md', 'utf8');
     expect(runbook).toContain('v0.1.0');
     expect(runbook).toContain('gh release create');
     expect(runbook).toContain('workflow_dispatch');
     expect(runbook).toContain('No releasable commits');
-    expect(runbook).toContain('release-published');
+    expect(runbook).toContain('draft');
+    expect(runbook).toContain('owner');
+    // The five stages of the Release workflow, in order.
+    expect(runbook).toContain('`authorize`');
+    expect(runbook).toContain('`plan`');
+    expect(runbook).toContain('`draft`');
+    expect(runbook).toContain('`images`');
+    expect(runbook).toContain('`publish`');
+    // The release-triggered dispatch and the manual image re-publication are gone.
+    expect(runbook).not.toContain('release-published');
+    expect(runbook).not.toContain(':edge');
+    expect(runbook).not.toContain('gh workflow run publish-docker.yml');
   });
 
   it('documents anonymous pulls of the public images', () => {
@@ -24,8 +35,10 @@ describe('release documentation', () => {
     expect(readme).toContain('docker pull ghcr.io/raidenyn/line-mcp-full:');
     expect(readme).toContain('docker pull ghcr.io/raidenyn/line-mcp:');
     expect(readme).toContain('@sha256:');
-    expect(readme).toContain('`edge`');
     expect(readme).toContain('`sha-<short>`');
+    expect(readme).toContain('pr-<number>');
+    // The `edge` preview tag no longer exists.
+    expect(readme).not.toContain('`edge`');
     // Public packages need no credential and no access grant.
     expect(readme).not.toContain('docker login ghcr.io');
     expect(readme).not.toContain('must grant access');
@@ -43,15 +56,15 @@ describe('release documentation', () => {
     );
   });
 
-  it('documents publishing, re-publishing, and the one-way visibility flip', () => {
+  it('documents the publication stages and the one-way visibility flip', () => {
     const runbook = readFileSync('docs/RELEASING.md', 'utf8');
     expect(runbook).toContain('## Docker Images');
     expect(runbook).toContain('### First publication: the one-way visibility flip');
     expect(runbook).toContain('GITHUB_TOKEN');
     expect(runbook).toContain('ghcr-publish');
     expect(runbook).toContain('Publish Docker');
+    expect(runbook).toContain('Docker images');
     expect(runbook).toContain('cannot be made private again');
-    expect(runbook).toContain('released');
     // The private-package bootstrap and its personal token are gone.
     expect(runbook).not.toContain('GHCR Private-Package Bootstrap');
     expect(runbook).not.toContain('GHCR_PUBLISH_TOKEN');
@@ -59,6 +72,14 @@ describe('release documentation', () => {
     expect(runbook).not.toContain('Inherit access');
     expect(runbook).not.toContain('read:packages');
     expect(runbook).not.toContain('must stay private');
+  });
+
+  it('documents the pull-request label and its tag allowlist', () => {
+    const runbook = readFileSync('docs/RELEASING.md', 'utf8');
+    expect(runbook).toContain('`publish-docker`');
+    expect(runbook).toContain('`pr-<number>`');
+    expect(runbook).toContain('`sha-<short>`');
+    expect(runbook).toContain('same-repository');
   });
 
   it('points the visibility flip at the personal package settings pages', () => {
@@ -71,11 +92,22 @@ describe('release documentation', () => {
     expect(runbook).not.toContain('unlink each package');
   });
 
-  it('records the publication workflow in the architecture reference', () => {
+  it('documents image tags without the git tag prefix', () => {
+    const runbook = readFileSync('docs/RELEASING.md', 'utf8');
+    // Images are tagged `X.Y.Z`; only the git tag carries the leading `v`.
+    expect(runbook).toContain('ghcr.io/raidenyn/line-mcp-full:X.Y.Z');
+    expect(runbook).toContain('ghcr.io/raidenyn/line-mcp:X.Y.Z');
+    expect(runbook).not.toContain(':vX.Y.Z');
+  });
+
+  it('records the release and publication workflows in the architecture reference', () => {
     const architecture = readFileSync('docs/ARCHITECTURE.md', 'utf8');
+    expect(architecture).toContain('release.yml');
     expect(architecture).toContain('publish-docker.yml');
+    expect(architecture).toContain('workflow_call');
     expect(architecture).toContain('ghcr.io');
     expect(architecture).toContain('GITHUB_TOKEN');
+    expect(architecture).toContain('draft');
     expect(architecture).toContain('public');
     expect(architecture).not.toContain('GHCR_PUBLISH_TOKEN');
     expect(architecture).not.toContain('GHCR_PACKAGES_PRIVATE');
