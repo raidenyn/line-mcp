@@ -164,7 +164,71 @@ docker build --target server    -t line-mcp-full:latest      .
 docker build --target line-mcp  -t line-mcp-standalone:latest .
 ```
 
-Both images build once with Node 24, ship only their own compiled package closure plus production dependencies, run as a non-root `node` user with `/data` as a volume, and expose `GET ${BASE_PATH}/healthz`. To run behind a reverse proxy under a URL prefix, set `BASE_PATH` (e.g. `BASE_PATH=/line-mcp`) and include the same prefix in the `claude mcp add` URL. The composed (`server`) target also honors `BANK_REGEX_TIMEOUT_MS` (per-regex-operation timeout, clamped to 10-1000 ms, default 100); the standalone (`line-mcp`) target has no bank tools and ignores it.
+Both images build once with Node 24, ship only their own compiled package closure plus production dependencies, run as a non-root `node` user with `/data` as a volume, and expose `GET ${BASE_PATH}/healthz`. To run behind a reverse proxy under a URL prefix, set `PUBLIC_URL` (the public origin, e.g. `https://mcp.example.com`), `BASE_PATH` (e.g. `/line-mcp`), and include the same prefix in the `claude mcp add` URL — see [Behind a reverse proxy](#behind-a-reverse-proxy). The composed (`server`) target also honors `BANK_REGEX_TIMEOUT_MS` (per-regex-operation timeout, clamped to 10-1000 ms, default 100); the standalone (`line-mcp`) target has no bank tools and ignores it.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `3000` | Local listen port (the server binds `0.0.0.0`). |
+| `BASE_PATH` | empty | URL prefix every route mounts under (e.g. `/line-mcp`). Include it in the `claude mcp add` URL. |
+| `DATA_DIR` | `./data` (`/data` in Docker) | Persistent data root: the signing secret, LINE credentials and SQLite caches. Use a separate root per server process. |
+| `PUBLIC_URL` | unset → `http://localhost:PORT` | The origin users reach the server at, usually a TLS-terminating reverse proxy (e.g. `https://mcp.example.com`). **Origin only** — put any path in `BASE_PATH`. Setting it makes the OAuth issuer and every advertised endpoint public, so clients that were issued tokens under the old localhost issuer reauthorize once. `https` is expected; a non-loopback `http` origin is accepted with a stderr warning. |
+| `OAUTH_ALLOWED_REDIRECT_URIS` | unset → loopback only | Comma-separated redirect allowlist. Entries must be `https:` URLs; an entry with no path (e.g. `https://client.example.com`) is an **origin** entry, an entry with a path is an **exact URL** entry. Wildcards, userinfo and fragments are rejected at startup. Loopback callbacks (`http(s)://localhost:*`, `http(s)://127.0.0.1:*`) are always allowed. **Warning:** an origin entry authorizes every URL on that origin — any page there that forwards the browser onward can capture an authorization code from a flow an attacker started. Prefer exact callback URLs; the login page shows the destination host. |
+| `TRUST_PROXY` | off | Opt in to Express proxy trust so request-derived values (`req.protocol`, `req.host`, e.g. the import-upload fallback) honor `X-Forwarded-Proto`/`X-Forwarded-Host`. Accepts `true` (case-insensitive), a non-negative hop count, or a comma-separated list of `loopback`/`linklocal`/`uniquelocal`/IP/CIDR entries. It never changes the OAuth issuer, discovery metadata, token claims or the 401 challenge — those only follow `PUBLIC_URL`. Recommend a hop count (e.g. `1`) behind one proxy. |
+| `LINE_API_BASE_URL` | unset | Tests/local development only: point the LINE client at a different gateway. Production leaves it unset. |
+| `BANK_REGEX_TIMEOUT_MS` | `100` | Composed (`server`) target only: per-regex-operation timeout, clamped to 10-1000 ms. |
+
+### Behind a reverse proxy
+
+Example: the container listens on `3000`, the public URL is `https://mcp.example.com`, and the MCP endpoint is `https://mcp.example.com/line-mcp/mcp`.
+
+```bash
+docker run -d --name line-mcp-full \
+  -p 127.0.0.1:3000:3000 \
+  -v line-mcp-data:/data \
+  -e PUBLIC_URL=https://mcp.example.com \
+  -e BASE_PATH=/line-mcp \
+  -e OAUTH_ALLOWED_REDIRECT_URIS=https://client.example.com/oauth/callback \
+  -e TRUST_PROXY=1 \
+  ghcr.io/raidenyn/line-mcp-full:latest
+
+claude mcp add --transport http line https://mcp.example.com/line-mcp/mcp
+```
+
+The proxy must **keep** the `BASE_PATH` prefix (no trailing slash on `proxy_pass`) and must forward the two discovery documents, which live at the origin root, outside `BASE_PATH`:
+
+```nginx
+server {
+  listen 443 ssl;
+  server_name mcp.example.com;
+
+  location /line-mcp/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+  }
+
+  # RFC 8414 authorization-server metadata (origin root, prefix preserved).
+  location = /.well-known/oauth-authorization-server/line-mcp {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+  }
+
+  # RFC 9728 protected-resource metadata (origin root, prefix preserved).
+  location /.well-known/oauth-protected-resource/line-mcp/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+  }
+}
+```
+
+OAuth does not read `Host` or `X-Forwarded-*`: the browser may load `/authorize` through the public host while the client redeems the code at `/token` server to server over a different host, and both work. The only request-derived URL is the import-upload fallback, which is unused as soon as `PUBLIC_URL` is set.
 
 ### Local development
 
@@ -232,4 +296,4 @@ The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate
 - `data/secret` — auto-created on first run; backs all token signatures. Back it up; deleting it invalidates every issued token.
 - `data/auth/*.json` — live LINE credentials, written `0600` beneath a `0700` directory. Keep private and out of version control.
 - `.line-auth.json` — live LINE credentials; keep out of version control (it is in `.gitignore`).
-- The server binds `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost.
+- The server binds `0.0.0.0` — use a firewall or reverse proxy if exposing beyond localhost. Behind a proxy, set `PUBLIC_URL` (and `BASE_PATH` if prefixed) so OAuth advertises the public issuer, restrict `OAUTH_ALLOWED_REDIRECT_URIS` to the exact callbacks your clients use (origin entries are broader than they look), and prefer an https public origin.

@@ -9,6 +9,7 @@ import { FileCredentialStore } from './auth/credential-store';
 import { registerLineTools } from './tools';
 import { registerLineResources } from './resources';
 import { ImportService } from './import-service';
+import { resolveOAuthConfig } from './oauth-config';
 import { createRequestClientFactory } from './request-client';
 import { startSyncLoop } from './sync';
 
@@ -106,6 +107,10 @@ export interface StandaloneOptions {
   basePath?: string;
   /** Overrides the auto-derived public base URL used in import upload links. */
   publicUrl?: string;
+  /** OAuth redirect URI allowlist; defaults to `OAUTH_ALLOWED_REDIRECT_URIS`. */
+  oauthAllowedRedirectUris?: string;
+  /** Express proxy trust; defaults to `TRUST_PROXY`. */
+  trustProxy?: string;
   lineApiBaseUrl?: string;
 }
 
@@ -135,6 +140,16 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
 
   return {
     async start(): Promise<{ port: number }> {
+      // Validate every OAuth-facing variable before ANY side effect (no
+      // migration, DB, secret or worker): a bad value leaves the data root
+      // untouched.
+      const oauth = resolveOAuthConfig({
+        publicUrl: options.publicUrl ?? process.env.PUBLIC_URL,
+        allowedRedirectUris: options.oauthAllowedRedirectUris ?? process.env.OAUTH_ALLOWED_REDIRECT_URIS,
+        trustProxy: options.trustProxy ?? process.env.TRUST_PROXY,
+        port,
+      });
+
       if (hasUnmigratedLegacyDatabase(dataRoot)) {
         throw new Error(
           'Detected a legacy combined database at cache/messages.db with no persistence-current.json pointer. ' +
@@ -155,9 +170,10 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
       // server listens elsewhere; token verification stays self-consistent.
       const authProvider = new LineAuthProvider({
         secret,
-        endpoints: publicEndpointConfig(port, basePath),
+        endpoints: publicEndpointConfig(port, basePath, undefined, oauth.publicOrigin),
         credentialStore,
         authStoreDir,
+        redirectPolicy: oauth.redirectPolicy,
         lineApiBaseUrl: options.lineApiBaseUrl,
       });
 
@@ -172,7 +188,9 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
         basePath,
         cache,
         createRequestClient,
-        publicUrl: options.publicUrl ?? process.env.PUBLIC_URL,
+        // With PUBLIC_URL set the import URL is the same validated origin as
+        // the OAuth issuer and never consults request headers.
+        publicUrl: oauth.explicitPublicUrl ? oauth.publicOrigin : undefined,
       });
 
       const host: McpHost = createMcpHost<LinePrincipal>({
@@ -180,6 +198,7 @@ export function createStandaloneServer(options: StandaloneOptions): StandaloneSe
         version: '1.0.0',
         basePath,
         authProvider,
+        trustProxy: oauth.trustProxy,
         registrations: [
           (server, context) => registerLineTools(server, context, { createRequestClient, importService }),
           (server) => registerLineResources(server),

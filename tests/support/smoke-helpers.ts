@@ -114,7 +114,7 @@ export async function runMessengerAssertions(
 
   const initiate = await client.callTool({ name: 'initiate_import', arguments: {} });
   const initiateText = extractText(initiate);
-  const uploadUrl = (JSON.parse(initiateText).upload_url as string).replace(/^http:\/\/127\.0\.0\.1:\d+/, appOrigin);
+  const uploadUrl = (JSON.parse(initiateText).upload_url as string).replace(/^http:\/\/(?:127\.0\.0\.1|localhost):\d+/, appOrigin);
   const uploadResponse = await fetch(uploadUrl, {
     method: 'POST',
     headers: { 'content-type': 'text/plain' },
