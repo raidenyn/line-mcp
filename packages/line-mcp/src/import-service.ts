@@ -30,7 +30,7 @@ export interface ImportServiceOptions {
   uploadTtlMs?: number;
   /** Uploaded-file lifetime in ms. Default 1 hour. */
   fileTtlMs?: number;
-  /** Overrides the auto-derived `req.protocol://req.get('host')` base for the upload URL. */
+  /** Overrides the auto-derived `req.protocol://req.host` base for the upload URL. */
   publicUrl?: string;
   /** Test seam — defaults to the real export parser from @raidenyn/line-client. */
   parseExportFile?: typeof parseExportFile;
@@ -109,7 +109,7 @@ export class ImportService {
     this.pruneUploads();
     const token = this.randomId();
     this.pendingUploads.set(token, { mid: principal.mid, expires: this.now() + this.uploadTtlMs });
-    const base = this.options.publicUrl?.replace(/\/$/, '') ?? `${req.protocol}://${req.get('host')}`;
+    const base = this.options.publicUrl?.replace(/\/$/, '') ?? `${req.protocol}://${req.host}`;
     const uploadUrl = `${base}${this.options.basePath}/import-upload?token=${token}`;
     return { upload_url: uploadUrl };
   }

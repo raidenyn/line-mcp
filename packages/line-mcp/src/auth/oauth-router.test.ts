@@ -7,6 +7,8 @@ import * as http from 'http';
 import * as crypto from 'crypto';
 import { LineAuthProvider, publicEndpointConfig } from './line-auth-provider';
 import { FileCredentialStore } from './credential-store';
+import { createRedirectPolicy, type RedirectPolicy } from './redirect-policy';
+import { createMcpHost } from '@raidenyn/mcp-runtime';
 
 vi.mock('fs', async importOriginal => {
   const original = await importOriginal<typeof import('fs')>();
@@ -55,20 +57,34 @@ vi.mock('@raidenyn/line-client', async importOriginal => {
 
 const TEST_SECRET = 'oauth-router-test-secret';
 
-function providerFor(port: number, basePath: string, authStoreDir: string, lineApiBaseUrl?: string): LineAuthProvider {
+function providerFor(
+  port: number,
+  basePath: string,
+  authStoreDir: string,
+  lineApiBaseUrl?: string,
+  extra?: { publicUrl?: string; redirectPolicy?: RedirectPolicy },
+): LineAuthProvider {
   return new LineAuthProvider({
     secret: TEST_SECRET,
-    endpoints: publicEndpointConfig(port, basePath),
+    endpoints: publicEndpointConfig(port, basePath, undefined, extra?.publicUrl),
     credentialStore: new FileCredentialStore(authStoreDir),
     authStoreDir,
+    redirectPolicy: extra?.redirectPolicy,
     lineApiBaseUrl,
   });
 }
 
 // Adapter mirroring the old setupOAuthRoutes(app, port, basePath, authStoreDir)
 // signature the router tests were written against.
-function setupOAuthRoutes(app: Express, port: number, basePath: string, authStoreDir: string, lineApiBaseUrl?: string): LineAuthProvider {
-  const provider = providerFor(port, basePath, authStoreDir, lineApiBaseUrl);
+function setupOAuthRoutes(
+  app: Express,
+  port: number,
+  basePath: string,
+  authStoreDir: string,
+  lineApiBaseUrl?: string,
+  extra?: { publicUrl?: string; redirectPolicy?: RedirectPolicy },
+): LineAuthProvider {
+  const provider = providerFor(port, basePath, authStoreDir, lineApiBaseUrl, extra);
   provider.mountRoutes(app);
   return provider;
 }
@@ -159,6 +175,7 @@ const routeParams = () => new URLSearchParams({
 async function withOAuthServer(
   authStorePath: string,
   run: (serverBase: string, provider: LineAuthProvider) => Promise<void>,
+  extra?: { publicUrl?: string; redirectPolicy?: RedirectPolicy },
 ): Promise<void> {
   const app = express();
   app.use(express.json());
@@ -166,7 +183,7 @@ async function withOAuthServer(
   const localServer = http.createServer(app);
   await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
   const port = (localServer.address() as { port: number }).port;
-  const provider = setupOAuthRoutes(app, port, '', authStorePath);
+  const provider = setupOAuthRoutes(app, port, '', authStorePath, undefined, extra);
   try {
     await run(`http://127.0.0.1:${port}`, provider);
   } finally {
@@ -857,5 +874,444 @@ describe('non-root basePath', () => {
       body: JSON.stringify({ grant_type: 'implicit' }),
     });
     expect(unprefixed.status).toBe(404);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// PUBLIC_URL / advertised endpoints
+// ───────────────────────────────────────────────────────────
+
+async function withConfiguredServer(
+  options: { publicUrl?: string; basePath?: string; trustProxy?: boolean },
+  run: (serverBase: string) => Promise<void>,
+): Promise<void> {
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+  if (options.trustProxy !== undefined) app.set('trust proxy', options.trustProxy);
+  const localServer = http.createServer(app);
+  await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+  const port = (localServer.address() as { port: number }).port;
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-public-'));
+  setupOAuthRoutes(app, port, options.basePath ?? '', store, undefined, {
+    publicUrl: options.publicUrl,
+  });
+  try {
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>(resolve => localServer.close(() => resolve()));
+    fs.rmSync(store, { recursive: true, force: true });
+  }
+}
+
+function rawRequest(
+  url: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path: `${target.pathname}${target.search}`,
+      method: options.method ?? 'GET',
+      headers: options.headers ?? {},
+    }, response => {
+      const chunks: Buffer[] = [];
+      response.on('data', chunk => chunks.push(chunk as Buffer));
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }));
+    });
+    request.on('error', reject);
+    if (options.body !== undefined) request.write(options.body);
+    request.end();
+  });
+}
+
+async function obtainCode(serverBase: string): Promise<string> {
+  const authorize = await req(`${serverBase}/authorize?${routeParams()}`);
+  const sid = sessionIdFromQrPage(bodyAsHtml(authorize));
+  const pollBody = await waitForTerminalLogin(serverBase, sid);
+  if (!pollBody.code) throw new Error(`Login did not issue a code: ${pollBody.error}`);
+  return pollBody.code;
+}
+
+describe('PUBLIC_URL', () => {
+  it('advertises the public issuer and every endpoint', async () => {
+    await withConfiguredServer({ publicUrl: 'https://mcp.example.com', basePath: '/line-mcp' }, async serverBase => {
+      const { status, body } = await req(`${serverBase}/.well-known/oauth-authorization-server/line-mcp`);
+      expect(status).toBe(200);
+      const meta = body as Record<string, unknown>;
+      expect(meta.issuer).toBe('https://mcp.example.com/line-mcp');
+      expect(meta.authorization_endpoint).toBe('https://mcp.example.com/line-mcp/authorize');
+      expect(meta.token_endpoint).toBe('https://mcp.example.com/line-mcp/token');
+      expect(meta.registration_endpoint).toBe('https://mcp.example.com/line-mcp/register');
+    });
+  });
+
+  it('advertises the public protected resource', async () => {
+    await withConfiguredServer({ publicUrl: 'https://mcp.example.com', basePath: '/line-mcp' }, async serverBase => {
+      const { status, body } = await req(`${serverBase}/.well-known/oauth-protected-resource/line-mcp/mcp`);
+      expect(status).toBe(200);
+      const meta = body as Record<string, unknown>;
+      expect(meta.resource).toBe('https://mcp.example.com/line-mcp/mcp');
+      expect(meta.authorization_servers).toEqual(['https://mcp.example.com/line-mcp']);
+    });
+  });
+
+  it('points the challenge at the public metadata URL', () => {
+    const header = providerFor(3001, '/line-mcp', authStoreDir, undefined, {
+      publicUrl: 'https://mcp.example.com',
+    }).challenge(stubReq);
+    expect(header).toContain(
+      'resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/line-mcp/mcp"',
+    );
+  });
+
+  it('keeps localhost behavior when PUBLIC_URL is omitted', () => {
+    const header = providerFor(3001, '', authStoreDir).challenge(stubReq);
+    expect(header).toContain('http://localhost:3001/.well-known/oauth-protected-resource/mcp');
+  });
+
+  it('normalizes case and the default port', async () => {
+    await withConfiguredServer({ publicUrl: 'https://MCP.Example.com:443/', basePath: '/line-mcp' }, async serverBase => {
+      const { body } = await req(`${serverBase}/.well-known/oauth-authorization-server/line-mcp`);
+      expect((body as Record<string, unknown>).issuer).toBe('https://mcp.example.com/line-mcp');
+    });
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// redirect_uri policy enforcement
+// ───────────────────────────────────────────────────────────
+
+async function withPolicyServer(
+  policyRaw: string | undefined,
+  run: (serverBase: string, store: string) => Promise<void>,
+): Promise<void> {
+  const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-policy-'));
+  try {
+    await withOAuthServer(store, serverBase => run(serverBase, store), {
+      redirectPolicy: createRedirectPolicy(policyRaw),
+    });
+  } finally {
+    fs.rmSync(store, { recursive: true, force: true });
+  }
+}
+
+function paramsWithRedirect(redirectUri: string): URLSearchParams {
+  const params = new URLSearchParams(routeParams());
+  params.set('redirect_uri', redirectUri);
+  return params;
+}
+
+describe('/authorize redirect policy', () => {
+  const allowlist = 'https://client.example.com/oauth/callback';
+
+  it('accepts an allowed https redirect, starts LINE login, and names the destination', async () => {
+    const { LineClient, __createdClients } = await import('@raidenyn/line-client') as unknown as {
+      LineClient: ReturnType<typeof vi.fn>;
+      __createdClients: unknown[];
+    };
+    LineClient.mockClear();
+    __createdClients.length = 0;
+
+    await withPolicyServer(allowlist, async serverBase => {
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect(allowlist)}`);
+      expect(response.status).toBe(200);
+      const html = bodyAsHtml(response);
+      expect(html).toContain('You will be returned to');
+      expect(html).toContain('client.example.com');
+      expect(__createdClients).toHaveLength(1);
+    });
+  });
+
+  it('rejects a disallowed https redirect without starting LINE login', async () => {
+    const { LineClient } = await import('@raidenyn/line-client') as unknown as {
+      LineClient: ReturnType<typeof vi.fn>;
+    };
+    LineClient.mockClear();
+
+    await withPolicyServer(allowlist, async serverBase => {
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect('https://attacker.example/cb')}`);
+      expect(response.status).toBe(400);
+      expect(bodyAsHtml(response)).toContain('OAUTH_ALLOWED_REDIRECT_URIS');
+      expect(LineClient).not.toHaveBeenCalled();
+    });
+  });
+
+  it('keeps loopback allowed when an allowlist is configured', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect('http://127.0.0.1:53682/callback')}`);
+      expect(response.status).not.toBe(400);
+    });
+  });
+
+  it('still rejects non-http schemes even when loopback-shaped', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect('javascript://localhost/evil')}`);
+      expect(response.status).toBe(400);
+    });
+  });
+
+  it('names both loopback and the allowlist variable in the rejection', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect('https://attacker.example/cb')}`);
+      const html = bodyAsHtml(response);
+      expect(html).toContain('loopback');
+      expect(html).toContain('OAUTH_ALLOWED_REDIRECT_URIS');
+    });
+  });
+
+  it('shows the destination on the account selector', async () => {
+    await withPolicyServer(allowlist, async (serverBase, store) => {
+      fs.writeFileSync(path.join(store, 'u-personal.json'), JSON.stringify({
+        ...sampleAuthData, mid: 'u-personal', certificate: 'personal-cert', displayName: 'Personal LINE',
+      }));
+      fs.writeFileSync(path.join(store, 'u-work.json'), JSON.stringify({
+        ...sampleAuthData, mid: 'u-work', certificate: 'work-cert', displayName: 'Work LINE',
+      }));
+      const response = await req(`${serverBase}/authorize?${paramsWithRedirect(allowlist)}`);
+      expect(response.status).toBe(200);
+      const html = bodyAsHtml(response);
+      expect(html).toContain('You will be returned to');
+      expect(html).toContain('client.example.com');
+    });
+  });
+});
+
+describe('/register redirect policy', () => {
+  const allowlist = 'https://client.example.com';
+
+  const register = (serverBase: string, body: unknown) => req(`${serverBase}/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  it('accepts an allowed URI and echoes it', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const { status, body } = await register(serverBase, {
+        redirect_uris: ['https://client.example.com/cb'],
+      });
+      expect(status).toBe(201);
+      expect((body as Record<string, unknown>).redirect_uris).toEqual(['https://client.example.com/cb']);
+    });
+  });
+
+  it('rejects a disallowed URI with invalid_redirect_uri', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const { status, body } = await register(serverBase, {
+        redirect_uris: ['https://attacker.example/cb'],
+      });
+      expect(status).toBe(400);
+      expect((body as Record<string, unknown>).error).toBe('invalid_redirect_uri');
+      expect((body as Record<string, unknown>).client_id).toBeUndefined();
+    });
+  });
+
+  it('rejects a mixed list as a whole', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const { status } = await register(serverBase, {
+        redirect_uris: ['https://client.example.com/cb', 'https://attacker.example/cb'],
+      });
+      expect(status).toBe(400);
+    });
+  });
+
+  it.each([[{ redirect_uris: 'https://client.example.com/cb' }], [{ redirect_uris: null }], [{ redirect_uris: [123] }]])(
+    'rejects malformed redirect_uris %j',
+    async body => {
+      await withPolicyServer(allowlist, async serverBase => {
+        const response = await register(serverBase, body);
+        expect(response.status).toBe(400);
+        expect((response.body as Record<string, unknown>).error).toBe('invalid_redirect_uri');
+      });
+    },
+  );
+
+  it('still accepts a registration without redirect_uris', async () => {
+    await withPolicyServer(allowlist, async serverBase => {
+      const { status, body } = await register(serverBase, { client_name: 'no-callbacks' });
+      expect(status).toBe(201);
+      expect((body as Record<string, unknown>).client_id).toBeTypeOf('string');
+    });
+  });
+
+  it('rejects an https callback under the default loopback-only policy', async () => {
+    await withPolicyServer(undefined, async serverBase => {
+      const { status } = await register(serverBase, {
+        redirect_uris: ['https://client.example.com/oauth/callback'],
+      });
+      expect(status).toBe(400);
+    });
+  });
+});
+
+describe('/token redirect_uri and client_id checks', () => {
+  const postToken = (body: Record<string, string>) => req(`${base}/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  it('accepts matching redirect_uri and client_id', async () => {
+    const code = await obtainCode(base);
+    const { status } = await postToken({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: 'verifier123',
+      redirect_uri: 'http://localhost:8765/callback',
+      client_id: 'claude-code',
+    });
+    expect(status).toBe(200);
+  });
+
+  it('rejects a differing redirect_uri with invalid_grant', async () => {
+    const code = await obtainCode(base);
+    const { status, body } = await postToken({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: 'verifier123',
+      redirect_uri: 'https://other.example/cb',
+    });
+    expect(status).toBe(400);
+    expect((body as Record<string, string>).error).toBe('invalid_grant');
+  });
+
+  it('rejects a differing client_id with invalid_grant', async () => {
+    const code = await obtainCode(base);
+    const { status, body } = await postToken({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: 'verifier123',
+      client_id: 'someone-else',
+    });
+    expect(status).toBe(400);
+    expect((body as Record<string, string>).error).toBe('invalid_grant');
+  });
+
+  it('accepts a request that omits both', async () => {
+    const code = await obtainCode(base);
+    const { status } = await postToken({
+      grant_type: 'authorization_code',
+      code,
+      code_verifier: 'verifier123',
+    });
+    expect(status).toBe(200);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
+// Host independence / forwarded headers
+// ───────────────────────────────────────────────────────────
+
+describe('Host independence', () => {
+  it.each([false, true])('ignores forwarded headers in metadata (trust proxy: %s)', async trustProxy => {
+    await withConfiguredServer(
+      { publicUrl: 'https://mcp.example.com', basePath: '/line-mcp', trustProxy },
+      async serverBase => {
+        const forwarded = {
+          host: 'internal:3000',
+          'x-forwarded-host': 'evil.example',
+          'x-forwarded-proto': 'http',
+        };
+        for (const path of [
+          '/.well-known/oauth-authorization-server/line-mcp',
+          '/.well-known/oauth-protected-resource/line-mcp/mcp',
+        ]) {
+          const plain = await rawRequest(`${serverBase}${path}`);
+          const withHeaders = await rawRequest(`${serverBase}${path}`, { headers: forwarded });
+          expect(withHeaders.status).toBe(200);
+          expect(withHeaders.body).toBe(plain.body);
+        }
+      },
+    );
+  });
+
+  it('embeds no forwarded or internal host in the authorize page', async () => {
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-forwarded-'));
+    try {
+      await withOAuthServer(store, async serverBase => {
+        const params = new URLSearchParams(routeParams());
+        params.set('redirect_uri', 'https://client.example.com/cb');
+        const response = await rawRequest(`${serverBase}/authorize?${params}`, {
+          headers: {
+            host: 'internal:3000',
+            'x-forwarded-host': 'evil.example',
+            'x-forwarded-proto': 'http',
+          },
+        });
+        expect(response.status).toBe(200);
+        expect(response.body).not.toContain('evil.example');
+        expect(response.body).not.toContain('internal:3000');
+      }, { publicUrl: 'https://mcp.example.com', redirectPolicy: createRedirectPolicy('https://client.example.com') });
+    } finally {
+      fs.rmSync(store, { recursive: true, force: true });
+    }
+  });
+
+  it('redeems a code at /token and calls /mcp through different Host headers', async () => {
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'line-oauth-cross-host-'));
+    const localServer = http.createServer();
+    try {
+      const provider = providerFor(0, '', store);
+      const host = createMcpHost({
+        name: 'cross-host',
+        version: '0.0.0',
+        basePath: '',
+        authProvider: provider,
+        registrations: [],
+      });
+      localServer.on('request', host.app);
+      await new Promise<void>(resolve => localServer.listen(0, '127.0.0.1', resolve));
+      const port = (localServer.address() as { port: number }).port;
+      const origin = `http://127.0.0.1:${port}`;
+
+      const authorize = await rawRequest(`${origin}/authorize?${routeParams()}`, {
+        headers: { host: 'mcp.example.com' },
+      });
+      expect(authorize.status).toBe(200);
+      const sid = sessionIdFromQrPage(authorize.body);
+      const pollBody = await waitForTerminalLogin(origin, sid);
+      expect(pollBody.code).toBeTypeOf('string');
+
+      const tokenResponse = await rawRequest(`${origin}/token`, {
+        method: 'POST',
+        headers: { host: 'internal:3000', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          grant_type: 'authorization_code',
+          code: pollBody.code,
+          code_verifier: 'verifier123',
+        }),
+      });
+      expect(tokenResponse.status).toBe(200);
+      const accessToken = (JSON.parse(tokenResponse.body) as { access_token: string }).access_token;
+
+      const mcpResponse = await rawRequest(`${origin}/mcp`, {
+        method: 'POST',
+        headers: {
+          host: 'third.example',
+          'content-type': 'application/json',
+          authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'cross-host', version: '0.0.0' },
+          },
+        }),
+      });
+      expect(mcpResponse.status).not.toBe(401);
+    } finally {
+      await new Promise<void>(resolve => localServer.close(() => resolve()));
+      fs.rmSync(store, { recursive: true, force: true });
+    }
   });
 });

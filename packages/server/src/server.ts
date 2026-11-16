@@ -9,6 +9,7 @@ import {
   publicEndpointConfig,
   FileCredentialStore,
   ImportService,
+  resolveOAuthConfig,
   startSyncLoop,
   type LinePrincipal,
   type LineToolDeps,
@@ -43,6 +44,10 @@ export interface ServerOptions {
   basePath?: string;
   /** Overrides the auto-derived public base URL used in import upload links. */
   publicUrl?: string;
+  /** OAuth redirect URI allowlist; defaults to `OAUTH_ALLOWED_REDIRECT_URIS`. */
+  oauthAllowedRedirectUris?: string;
+  /** Express proxy trust; defaults to `TRUST_PROXY`. */
+  trustProxy?: string;
   lineApiBaseUrl?: string;
   /** Per-regex-operation timeout in ms (clamped to 10–1000). Defaults to 100. */
   regexTimeoutMs?: number;
@@ -97,6 +102,16 @@ export function createServer(options: ServerOptions): ComposedServer {
 
   return {
     async start(): Promise<StartResult> {
+      // Validate every OAuth-facing variable before ANY side effect (no
+      // migration, database, secret or worker): a bad value leaves the data
+      // root untouched.
+      const oauth = resolveOAuthConfig({
+        publicUrl: options.publicUrl ?? process.env.PUBLIC_URL,
+        allowedRedirectUris: options.oauthAllowedRedirectUris ?? process.env.OAUTH_ALLOWED_REDIRECT_URIS,
+        trustProxy: options.trustProxy ?? process.env.TRUST_PROXY,
+        port,
+      });
+
       // The composed server performs legacy migration before opening either
       // store — bootstrapPersistence() must run BEFORE SqliteMessageCache or
       // CategoryStore ever touch a database file.
@@ -132,9 +147,10 @@ export function createServer(options: ServerOptions): ComposedServer {
       // using `port: 0` do not rely on externally dereferencable metadata.
       const authProvider = new LineAuthProvider({
         secret,
-        endpoints: publicEndpointConfig(port, basePath),
+        endpoints: publicEndpointConfig(port, basePath, undefined, oauth.publicOrigin),
         credentialStore,
         authStoreDir: layout.authDir,
+        redirectPolicy: oauth.redirectPolicy,
         lineApiBaseUrl: options.lineApiBaseUrl,
       });
       for (const { token, authData } of options.testAuth ?? []) {
@@ -155,7 +171,9 @@ export function createServer(options: ServerOptions): ComposedServer {
         basePath,
         cache,
         createRequestClient,
-        publicUrl: options.publicUrl ?? process.env.PUBLIC_URL,
+        // With PUBLIC_URL set the import URL is the same validated origin as
+        // the OAuth issuer and never consults request headers.
+        publicUrl: oauth.explicitPublicUrl ? oauth.publicOrigin : undefined,
       });
 
       const lineToolDeps: LineToolDeps = { createRequestClient, importService };
@@ -172,6 +190,7 @@ export function createServer(options: ServerOptions): ComposedServer {
         version: SERVER_VERSION,
         basePath,
         authProvider,
+        trustProxy: oauth.trustProxy,
         registrations: buildRegistrations({ line: lineToolDeps, bank: bankToolDeps, guideDir: layout.guideDir }),
       });
 
@@ -197,10 +216,13 @@ export function createServer(options: ServerOptions): ComposedServer {
       // explicit dataRoot override.
       syncHandle = startSyncLoop({ credentialStore, cache, createRequestClient }, 24 * 60 * 60 * 1000);
 
+      const publicBase = oauth.explicitPublicUrl
+        ? `${oauth.publicOrigin}${basePath}`
+        : `http://localhost:${port}${basePath}`;
       httpServer = await new Promise<ReturnType<express.Express['listen']>>((resolvePromise) => {
         const s = host.app.listen(port, '0.0.0.0', () => {
-          process.stderr.write(`LINE MCP server listening on http://localhost:${port}${basePath}/mcp\n`);
-          process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line http://localhost:${port}${basePath}/mcp\n`);
+          process.stderr.write(`LINE MCP server listening on ${publicBase}/mcp\n`);
+          process.stderr.write(`Add to Claude Code: claude mcp add --transport http --scope user line ${publicBase}/mcp\n`);
           resolvePromise(s);
         });
       });

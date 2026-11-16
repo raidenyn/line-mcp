@@ -237,3 +237,62 @@ describe('composed server — old volume migration', () => {
     expect(fs.existsSync(dbPath)).toBe(true);
   });
 });
+
+// ─── OAuth-facing configuration ─────────────────────────────────────────────
+//
+// Both variables are validated as the FIRST statement of start(), ahead of
+// bootstrapPersistence, so an invalid value must leave an empty data root
+// empty (no secret, no DB, no migration pointer).
+describe('composed server — OAuth configuration validation', () => {
+  const invalidCases: Array<{ label: string; options: Record<string, string>; pattern: RegExp }> = [
+    { label: 'PUBLIC_URL path', options: { publicUrl: 'https://mcp.example.com/line-mcp' }, pattern: /PUBLIC_URL/ },
+    { label: 'redirect list', options: { oauthAllowedRedirectUris: 'http://a.com/cb' }, pattern: /OAUTH_ALLOWED_REDIRECT_URIS/ },
+    { label: 'TRUST_PROXY', options: { trustProxy: 'yes' }, pattern: /TRUST_PROXY/ },
+  ];
+
+  it.each(invalidCases)('rejects an invalid $label before any side effect', async ({ options, pattern }) => {
+    const dataRoot = mkdtemp('server-bad-oauth-config-');
+    try {
+      const server = createServer({ dataRoot, port: 0, ...options });
+      await expect(server.start()).rejects.toThrow(pattern);
+      expect(fs.readdirSync(dataRoot)).toEqual([]);
+    } finally {
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('passes the normalized PUBLIC_URL origin to ImportService', async () => {
+    const dataRoot = mkdtemp('server-public-url-');
+    const OriginalImportService = lineMcpModule.ImportService;
+    let captured: ConstructorParameters<typeof OriginalImportService>[0] | undefined;
+    vi.spyOn(lineMcpModule, 'ImportService').mockImplementation(function (
+      this: unknown,
+      options: ConstructorParameters<typeof OriginalImportService>[0],
+    ) {
+      captured = options;
+      return new OriginalImportService(options);
+    } as unknown as typeof OriginalImportService);
+
+    let server: ComposedServer | undefined;
+    try {
+      server = createServer({ dataRoot, port: 0, publicUrl: 'https://MCP.Example.com/' });
+      await server.start();
+
+      expect(captured?.publicUrl).toBe('https://mcp.example.com');
+      // `initiate_import` is a thin wrapper over this call; asserting the
+      // options above is what proves server.ts handed over the normalized
+      // origin (never a request header).
+      const service = new OriginalImportService(captured!);
+      const { upload_url } = service.initiate(
+        { provider: 'line', subject: 'u1', mid: 'u1', scopes: ['line'] },
+        { protocol: 'http', host: 'internal:3000' } as Parameters<typeof service.initiate>[1],
+      );
+      expect(upload_url).toMatch(/^https:\/\/mcp\.example\.com\/import-upload\?token=/);
+      expect(upload_url).not.toContain('internal:3000');
+    } finally {
+      await server?.stop().catch(() => {});
+      vi.restoreAllMocks();
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+});

@@ -32,6 +32,19 @@ export {
   publicEndpointConfig,
 } from './auth/line-auth-provider';
 
+export {
+  type RedirectPolicy,
+  createRedirectPolicy,
+} from './auth/redirect-policy';
+
+export {
+  type ResolvedOAuthConfig,
+  type ResolveOAuthConfigInput,
+  resolveOAuthConfig,
+} from './oauth-config';
+
+export { parseTrustProxy, resolvePublicOrigin } from './public-url';
+
 // ─── Messenger tools, resources, import service, sync, standalone (Task 9) ──
 
 export {
