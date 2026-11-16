@@ -51,10 +51,13 @@ Publication is done by the **`Publish Docker`** workflow in
 proprietary LTSM assets. On 2026-11-16 the owner permanently accepted the
 redistribution risk for public container images (see
 `packages/line-client/THIRD_PARTY_NOTICES.md` and
-`packages/line-client/assets/ltsm/provenance.json`), so the packages are
-**public**: an anonymous `docker pull` succeeds with no credential and no access
-grant. Public npm distribution remains **not approved**. There is no Docker Hub
-or other registry push.
+`packages/line-client/assets/ltsm/provenance.json`). The packages are **public
+once the one-time visibility flip below is complete** — the first push creates
+them private, and an anonymous `docker pull` fails until the owner flips
+visibility ([First publication: the one-way visibility flip](#first-publication-the-one-way-visibility-flip)).
+After the flip, an anonymous `docker pull` succeeds with no credential and no
+access grant. Public npm distribution remains **not approved**. There is no
+Docker Hub or other registry push.
 
 ### First publication: the one-way visibility flip
 

@@ -81,16 +81,19 @@ Never run two servers against the same data root on one host. The composed serve
 
 ### Docker (recommended)
 
-Both runtime targets are published to the **public** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, ten tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Both packages are public: pulling needs no authentication and no access grant.
+Both runtime targets are published to the **public** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, ten tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Both packages are public **once the owner has completed the one-time visibility flip** described in [docs/RELEASING.md](docs/RELEASING.md#first-publication-the-one-way-visibility-flip); until then each package is created private by its first push and an anonymous pull fails. After the flip, pulling needs no authentication and no access grant.
 
 #### Pull the published images
 
-The packages are anonymously readable, so there is no login step:
+After the visibility flip, the packages are anonymously readable, so there is no login step:
 
 ```bash
 docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — ten tools
 docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — five messenger tools
 ```
+
+A fresh installation pulled **before** the owner completes the flip fails with
+an authorization error; wait for the flip rather than authenticating manually.
 
 Run each image against **its own** data root:
 
