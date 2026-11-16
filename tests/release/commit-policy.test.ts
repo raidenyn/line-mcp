@@ -19,6 +19,7 @@ describe('commit message policy', () => {
     'chore: update tooling\n\nBREAKING CHANGE: require Node 24',
     "Merge branch 'main' into ci/organize-release-workflow",
     'Merge pull request #98 from raidenyn/ci/organize-release-workflow',
+    "Merge remote-tracking branch 'origin/main'",
   ])('accepts %s', (message) => {
     const result = lint(message);
     expect(result.status, result.stderr || result.stdout).toBe(0);
