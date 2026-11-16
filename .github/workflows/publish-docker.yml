@@ -1,0 +1,301 @@
+# Publishes both runtime targets to GitHub Container Registry as public images.
+# GHCR only: every image bundles LINE's proprietary LTSM assets, and the owner
+# accepted that redistribution risk permanently on 2026-11-16 — see
+# packages/line-client/THIRD_PARTY_NOTICES.md. Registry authentication uses the
+# built-in GITHUB_TOKEN under `packages: write`; no personal access token is
+# stored. Do not add a Docker Hub or other registry push.
+name: Publish Docker
+
+on:
+  repository_dispatch:
+    types: [release-published]
+  release:
+    types: [published]
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Release tag to publish (e.g. v1.2.3). Leave empty to publish edge
+          from the current main commit.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-docker
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    if: github.repository == 'raidenyn/line-mcp'
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      latest: ${{ steps.resolve.outputs.latest }}
+      edge: ${{ steps.resolve.outputs.edge }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+      major: ${{ steps.resolve.outputs.major }}
+      pr: ${{ steps.resolve.outputs.pr }}
+    steps:
+      - name: Resolve publication inputs
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
+          DISPATCH_PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TAG: ${{ inputs.tag }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_LABEL: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          publish=true
+          latest=false
+          edge=false
+          major=''
+          tag=''
+          pr=''
+          sha="$SHA"
+          short_sha="${SHA:0:7}"
+          ref="$SHA"
+
+          write_outputs() {
+            {
+              printf 'publish=%s\n' "$publish"
+              printf 'latest=%s\n' "$latest"
+              printf 'edge=%s\n' "$edge"
+              printf 'tag=%s\n' "$tag"
+              printf 'pr=%s\n' "$pr"
+              printf 'sha=%s\n' "$sha"
+              printf 'short_sha=%s\n' "$short_sha"
+              printf 'major=%s\n' "$major"
+              printf 'ref=%s\n' "$ref"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          # Prereleases are skipped before any tag validation.
+          if [ "$EVENT_NAME" = 'release' ] && [ "$RELEASE_PRERELEASE" = 'true' ]; then
+            publish=false
+            write_outputs
+            exit 0
+          fi
+
+          # Publishing a pull request is an explicit one-shot request: only the
+          # `labeled` event reaches this script, an unlabeled one publishes
+          # nothing, and a fork head is refused before the protected
+          # environment deployment is requested.
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            if [ "${PR_LABEL:-}" != 'publish-docker' ]; then
+              publish=false
+              write_outputs
+              exit 0
+            fi
+            if [ "${PR_HEAD_REPO:-}" != "$GITHUB_REPOSITORY" ]; then
+              publish=false
+              printf '::warning::fork pull requests cannot publish images; only same-repository pull requests are supported\n' >&2
+              write_outputs
+              exit 0
+            fi
+            pr="${PR_NUMBER:-}"
+            sha="${PR_HEAD_SHA:-}"
+            short_sha="${sha:0:7}"
+            ref="$sha"
+            tag=''
+            latest=false
+            edge=false
+            major=''
+          fi
+
+          # The label already carries the head commit: no tag lookup, no shared
+          # moving tags, and no edge advancement for a PR build.
+          if [ "$EVENT_NAME" = 'pull_request' ]; then
+            write_outputs
+            exit 0
+          fi
+
+          case "$EVENT_NAME" in
+            repository_dispatch) tag="$DISPATCH_TAG" ;;
+            release) tag="$RELEASE_TAG" ;;
+            workflow_dispatch) tag="$INPUT_TAG" ;;
+          esac
+
+          if [ "$EVENT_NAME" = 'repository_dispatch' ] && [ -z "$tag" ]; then
+            printf '::error::release-published dispatch carried no tag (payload: %s)\n' "$DISPATCH_PAYLOAD" >&2
+            exit 1
+          fi
+
+          if [ -n "$tag" ] && ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf '::error::unsupported tag %s: expected vX.Y.Z\n' "$tag" >&2
+            exit 1
+          fi
+
+          # Any manual dispatch, tagged or not, must run from main.
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ] && [ "$REF" != 'refs/heads/main' ]; then
+            printf '::error::workflow_dispatch must run from refs/heads/main, got %s\n' "$REF" >&2
+            exit 1
+          fi
+
+          REMOTE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+
+          if [ -n "$tag" ]; then
+            sha=$(git ls-remote "$REMOTE" "refs/tags/$tag^{}" | cut -f1)
+            if [ -z "$sha" ]; then
+              sha=$(git ls-remote "$REMOTE" "refs/tags/$tag" | cut -f1)
+            fi
+            if [ -z "$sha" ]; then
+              printf '::error::cannot resolve a commit for tag %s\n' "$tag" >&2
+              exit 1
+            fi
+            short_sha="${sha:0:7}"
+            major="${tag#v}"
+            major="${major%%.*}"
+
+            listing=$(git ls-remote --tags --refs --sort=-v:refname "$REMOTE" 'v*')
+            newest=$(printf '%s\n' "$listing" \
+              | sed 's#.*refs/tags/##' \
+              | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } \
+              | sort -V \
+              | tail -n1)
+            if [ "$newest" = "$tag" ]; then
+              latest=true
+            fi
+          fi
+
+          # `edge` only advances while this run still matches main's head, so a
+          # queued run or a stale re-run cannot move it backwards.
+          if [ -z "$tag" ]; then
+            head=$(git ls-remote "$REMOTE" refs/heads/main | cut -f1)
+            if [ "$head" = "$sha" ]; then
+              edge=true
+            fi
+          fi
+
+          if [ -n "$tag" ]; then
+            ref="refs/tags/$tag"
+          else
+            ref="$sha"
+          fi
+
+          write_outputs
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    environment: ghcr-publish
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: server
+            image: line-mcp-full
+          - target: line-mcp
+            image: line-mcp
+    steps:
+      - name: Check out the resolved commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+
+      # A tag moved between resolution and checkout would mislabel the image.
+      - name: Verify checked-out commit
+        shell: bash
+        run: test "$(git rev-parse HEAD)" = "${{ needs.prepare.outputs.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # The built-in workflow token carries `packages: write` on this job; the
+      # protected environment keeps the owner approval as an abuse control.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract release metadata
+        id: meta-release
+        if: needs.prepare.outputs.tag != ''
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' }}
+            type=semver,pattern={{major}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' && needs.prepare.outputs.major != '0' }}
+            type=raw,value=latest,enable=${{ needs.prepare.outputs.latest == 'true' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      - name: Extract edge metadata
+        id: meta-edge
+        if: needs.prepare.outputs.tag == '' && needs.prepare.outputs.pr == ''
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
+          tags: |
+            type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      # A PR image is addressed only by its pull request and commit; it never
+      # receives `latest`, `edge`, or a release tag.
+      - name: Metadata (pull request)
+        id: meta-pr
+        if: needs.prepare.outputs.pr != ''
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+            org.opencontainers.image.licenses=NOASSERTION
+          tags: |
+            type=raw,value=pr-${{ needs.prepare.outputs.pr }}
+            type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          # The cache holds image layers, so it lives in the same GHCR package as
+          # the image: a GHA cache is restorable by fork pull-request workflows.
+          # The GHCR login above makes these registry cache pushes and pulls
+          # authenticated.
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
+          labels: ${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels || steps.meta-pr.outputs.labels }}
+          tags: ${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags || steps.meta-pr.outputs.tags }}

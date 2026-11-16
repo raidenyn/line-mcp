@@ -81,6 +81,70 @@ Never run two servers against the same data root on one host. The composed serve
 
 ### Docker (recommended)
 
+Both runtime targets are published to the **public** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, ten tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Both packages are public **once the owner has completed the one-time visibility flip** described in [docs/RELEASING.md](docs/RELEASING.md#first-publication-the-one-way-visibility-flip); until then each package is created private by its first publication and an anonymous pull fails. After the flip, pulling needs no authentication and no access grant.
+
+#### Pull the published images
+
+After the visibility flip, the packages are anonymously readable, so there is no login step:
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — newest stable release
+docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — newest stable release
+```
+
+`latest` exists only after the first **stable release** is published: an `edge`
+publication and the visibility flip do not create it. Merging to `main` publishes
+nothing. Until a stable release exists, start an untagged `Publish Docker`
+dispatch from `main` to build `edge`, then pull:
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full:edge     # composed — newest main build
+docker pull ghcr.io/raidenyn/line-mcp:edge          # standalone — newest main build
+```
+
+A fresh installation pulled **before** the owner completes the flip fails with
+an authorization error; wait for the flip rather than authenticating manually.
+
+Run each image against **its own** data root:
+
+```bash
+# Composed server (ten tools) on host port 3000
+docker run -d --name line-mcp-full \
+  -p 3000:3000 \
+  -v bank-mcp-data:/data \
+  ghcr.io/raidenyn/line-mcp-full:latest
+claude mcp add --transport http --scope user line http://localhost:3000/mcp
+
+# Standalone messenger server (five tools) on host port 3100, its OWN data volume
+docker run -d --name line-mcp \
+  -p 3100:3000 \
+  -v line-mcp-data:/data \
+  ghcr.io/raidenyn/line-mcp:latest
+```
+
+**Never point both containers at the same data root** (see [One process per data root](#one-process-per-data-root)). The composed server owns bank/category data the standalone server knows nothing about, and the standalone server refuses to start against a legacy pre-migration combined database. `bank-mcp-data` belongs to the composed server only; `line-mcp-data` belongs to the standalone server only.
+
+**The images are public, and that cannot be undone.** Both images bundle LINE Corporation's proprietary LTSM assets. On 2026-11-16 the owner permanently accepted that redistribution risk for public container images, so they are published to `ghcr.io` only — there is no Docker Hub or other public mirror. GHCR cannot revert visibility: a public package cannot be made private again, so the change is irreversible. Public npm distribution of `@raidenyn/line-client` remains **not approved**. Provenance and notices: [`packages/line-client/THIRD_PARTY_NOTICES.md`](packages/line-client/THIRD_PARTY_NOTICES.md), [`packages/line-client/assets/ltsm/provenance.json`](packages/line-client/assets/ltsm/provenance.json).
+
+##### Image tags
+
+| Tag | Meaning |
+|-----|---------|
+| `latest` | Newest stable release |
+| `X.Y.Z` | One specific release |
+| `X.Y` | Newest release in that minor line — moves only for the globally newest stable tag |
+| `X` | Newest release in that major line — moves only for the globally newest stable tag, and never on `0.x` |
+| `edge` | Newest build from `main`, published by an untagged manual dispatch |
+| `sha-<short>` | Per-commit reference |
+
+`sha-<short>` names the commit an image was built from (not the default-branch head), but it is not byte-for-byte immutable: rebuilding the same commit produces a new digest. Pin a digest for an immutable deployment:
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full@sha256:<digest>
+```
+
+#### Build or run from a checkout
+
 Two build targets share one multi-stage `Dockerfile`:
 
 ```bash
@@ -154,12 +218,14 @@ The repository ships four distinct test surfaces:
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
 - **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
 
+**Docker publication** is a separate workflow, `Publish Docker` (`.github/workflows/publish-docker.yml`). It publishes both images to the public `ghcr.io` packages above, and it never runs on a push or a merge: publication starts only from a `release-published` dispatch, a published GitHub Release, a manual `workflow_dispatch`, or the `publish-docker` pull-request label. An untagged manual dispatch from `main` publishes `edge` (when that commit is still `main`'s head) plus `sha-<short>`; a tagged manual dispatch, a `release-published` dispatch, or a published Release publishes `X.Y.Z` plus `latest`/`X.Y`/`X` when that tag is the newest stable release. A same-repository pull request publishes only when the maintainer adds the `publish-docker` label: that PR head is published as `pr-<number>` plus `sha-<short>`, the `ghcr-publish` deployment needs the owner's approval, and fork PRs are refused. It authenticates with the built-in `GITHUB_TOKEN` under `packages: write` — no personal access token — and never pushes anywhere but `ghcr.io`. The first-publication visibility flip and the rest of the operator steps are in [docs/RELEASING.md](docs/RELEASING.md).
+
 The **live LINE e2e suite is intentionally excluded** from this PR-blocking gate; it needs real credentials and is a manual pre-release check.
 
 ## Package artifact & provenance policy
 
-- **No public publish.** No package is published to the public npm registry (or any public index). CI and the artifact tests `npm pack`/install for verification only — never `npm publish`. A new public distribution form requires the provenance review described in issue #75.
-- **LTSM assets (`@raidenyn/line-client`).** `assets/ltsm/ltsm.wasm` and `ltsmSandbox.js` are proprietary artifacts copied as-is from the LINE Chrome extension (owned by LINE Corporation) — see `packages/line-client/THIRD_PARTY_NOTICES.md` and `assets/ltsm/provenance.json`. Approved distribution: this repo, Docker images built from it, and internal tarballs. Public publication is **not approved** pending legal review. `line-client` bundles `happy-dom` (via `bundledDependencies`) so a consumer needs no registry access, and it carries **no** `better-sqlite3`.
+- **No public npm publish.** No package is published to the public npm registry (or any public index). CI and the artifact tests `npm pack`/install for verification only — never `npm publish`. A new public distribution form requires the provenance review described in issue #75, except public container images, which the owner accepted on 2026-11-16.
+- **LTSM assets (`@raidenyn/line-client`).** `assets/ltsm/ltsm.wasm` and `ltsmSandbox.js` are proprietary artifacts copied as-is from the LINE Chrome extension (owned by LINE Corporation) — see `packages/line-client/THIRD_PARTY_NOTICES.md` and `assets/ltsm/provenance.json`. Approved distribution: this repository, public Docker images built from it, and internal tarballs. On 2026-11-16 the owner permanently accepted the redistribution risk for **public container images**; public npm publication remains **not approved**. `line-client` bundles `happy-dom` (via `bundledDependencies`) so a consumer needs no registry access, and it carries **no** `better-sqlite3`.
 
 ## Security notes
 

@@ -27,8 +27,9 @@
     "doNotEdit": "Do not edit, decompile, or otherwise transform these files — see packages/line-client/assets/ltsm/README.md."
   },
   "approvedDistributionForms": {
-    "sourceRepository": "Approved — committed to this private/internal git repository as build-time dependencies of the reverse-engineered LINE client.",
-    "dockerImage": "Approved — may be copied into internal Docker images for running this server, per existing Dockerfile practice (see CLAUDE.md).",
+    "sourceRepository": "Approved — committed to this public git repository as build-time dependencies of the reverse-engineered LINE client.",
+    "dockerImage": "Approved — may be copied into Docker images built from this repository for running this server, per existing Dockerfile practice (see CLAUDE.md).",
+    "publicContainerImage": "Approved — the images built from this repository are published as public GitHub Container Registry packages (ghcr.io/raidenyn/line-mcp-full and ghcr.io/raidenyn/line-mcp) and may be pulled anonymously. The repository owner permanently accepted this LTSM redistribution risk on 2026-11-16. This approval covers public container images only; public npm publication remains NOT approved.",
     "internalTarball": "Approved — may be packed (`npm pack`) and installed from a tarball for internal use, testing, or private distribution within organizations that already have a license/right to run the genuine LINE extension (e.g. via `tests/artifacts/line-client-pack.test.ts`, which packs and installs into a temp directory as a supported-standalone-tarball smoke test, not a publish).",
     "publicNpmPublish": "NOT approved. Publishing @raidenyn/line-client (or any package bundling these two files) to the public npm registry, or any other public package index, is explicitly blocked until a legal review of redistribution rights for these LINE Corporation assets has been completed and has granted approval. No task in issue #75 performs or should perform a public `npm publish` of this package."
   },

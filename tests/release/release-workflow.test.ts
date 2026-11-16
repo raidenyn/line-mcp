@@ -32,7 +32,7 @@ describe('release workflow', () => {
   });
 
   it('checks out complete main history and rejects stale HEAD', () => {
-    const checkout = steps.find((step) => step.uses === 'actions/checkout@v4');
+    const checkout = steps.find((step) => step.uses === 'actions/checkout@v7');
     expect(checkout?.with).toMatchObject({ 'fetch-depth': 0, ref: 'refs/heads/main' });
     expect(steps.find((step) => step.name === 'Verify current main')?.run)
       .toContain('refs/remotes/origin/main');

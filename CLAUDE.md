@@ -72,7 +72,11 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 ## Hard rules
 
 - Never edit `packages/line-client/assets/ltsm/*` (proprietary LINE artifacts).
-- Never `npm publish` any package — no public distribution is approved.
+- Never `npm publish` any package — public npm distribution is not approved.
+  Public **container images** are approved: the owner accepted the LINE LTSM
+  redistribution risk permanently on 2026-11-16 (see
+  `packages/line-client/THIRD_PARTY_NOTICES.md`), and the `Publish Docker`
+  workflow publishes them to public GHCR with `GITHUB_TOKEN`.
 - Never run two servers against the same data root.
 
 ## Doc map
