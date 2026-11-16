@@ -16,6 +16,8 @@ import {
   makeWwwAuthenticate,
   type IssuedTokenPair,
 } from './oauth-router';
+import { createRedirectPolicy, type RedirectPolicy } from './redirect-policy';
+import { resolvePublicOrigin } from '../public-url';
 
 // ─── Injected canonical endpoint configuration ──────────────────────────────
 //
@@ -31,18 +33,23 @@ export interface PublicEndpointConfig {
 }
 
 // Build the canonical endpoint configuration from a port + normalized base
-// path, the way the executable derives it today (`http://localhost:PORT<base>`
-// as issuer, `<issuer>/mcp` as the protected resource). Kept here so there is
-// exactly one place that turns a port into the public URLs the whole auth layer
-// keys off.
+// path. Without `publicUrl` the historical `http://localhost:PORT<base>` form
+// is kept (issuer), with `<issuer>/mcp` as the protected resource. With a
+// validated public origin, every advertised URL derives from it instead.
 export function publicEndpointConfig(
   port: number,
   basePath: string,
   requiredScopes: readonly string[] = ['line'],
+  publicUrl?: string,
 ): PublicEndpointConfig {
+  const origin = publicUrl?.trim()
+    // `resolveOAuthConfig` already warned about a non-loopback http origin;
+    // this second pass is idempotent and must not warn again.
+    ? resolvePublicOrigin(publicUrl, port, () => {})
+    : `http://localhost:${port}`;
   return {
-    issuer: new URL(`http://localhost:${port}${basePath}`),
-    resource: new URL(`http://localhost:${port}${basePath}/mcp`),
+    issuer: new URL(`${origin}${basePath}`),
+    resource: new URL(`${origin}${basePath}/mcp`),
     basePath,
     requiredScopes,
   };
@@ -67,6 +74,11 @@ export interface LineAuthProviderOptions {
    */
   authStoreDir: string;
   lineApiBaseUrl?: string;
+  /**
+   * Which client redirect URIs `/authorize` and `/register` accept. Defaults
+   * to loopback-only (the pre-existing behavior).
+   */
+  redirectPolicy?: RedirectPolicy;
   /** Injectable clock (ms since epoch); defaults to `Date.now`. */
   now?: () => number;
   /** Access-token lifetime in seconds. Default 24h. */
@@ -134,6 +146,7 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
       origin: this.options.endpoints.issuer.origin,
       basePath: this.options.endpoints.basePath,
       requiredScopes: this.scopes,
+      redirectPolicy: this.options.redirectPolicy ?? createRedirectPolicy(undefined),
       authStoreDir: this.options.authStoreDir,
       credentialStore: this.options.credentialStore,
       lineApiBaseUrl: this.options.lineApiBaseUrl,

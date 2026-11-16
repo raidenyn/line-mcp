@@ -522,11 +522,13 @@ export interface StartApplicationOptions {
   lineApiBaseUrl: string;
   basePath?: string;
   publicUrl?: string;
+  /** Extra environment variables merged into the child process (tests opt into new config here). */
+  extraEnv?: Record<string, string>;
 }
 
 export async function startApplication(options: StartApplicationOptions): Promise<RunningApp> {
   const basePath = options.basePath ?? '/';
-  const publicUrl = options.publicUrl ?? `http://127.0.0.1:${options.port}`;
+  const publicUrl = options.publicUrl ?? `http://localhost:${options.port}`;
   const entry = options.target === 'composed'
     ? path.join(options.projectRoot, 'packages/server/dist/cli.js')
     : path.join(options.projectRoot, 'packages/line-mcp/dist/cli.js');
@@ -539,6 +541,7 @@ export async function startApplication(options: StartApplicationOptions): Promis
   env.BASE_PATH = basePath;
   env.PUBLIC_URL = publicUrl;
   env.LINE_API_BASE_URL = options.lineApiBaseUrl;
+  Object.assign(env, options.extraEnv ?? {});
 
   const child = await spawnManagedNode({
     label: `app-${options.target}`,

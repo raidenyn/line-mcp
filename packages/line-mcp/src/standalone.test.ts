@@ -219,3 +219,61 @@ describe('createStandaloneServer — in-process start/stop', () => {
     }
   });
 });
+
+describe('createStandaloneServer — OAuth configuration validation', () => {
+  const invalidCases: Array<{ label: string; options: Record<string, string>; pattern: RegExp }> = [
+    { label: 'PUBLIC_URL path', options: { publicUrl: 'https://mcp.example.com/line-mcp' }, pattern: /PUBLIC_URL/ },
+    { label: 'redirect list', options: { oauthAllowedRedirectUris: 'http://a.com/cb' }, pattern: /OAUTH_ALLOWED_REDIRECT_URIS/ },
+    { label: 'TRUST_PROXY', options: { trustProxy: 'yes' }, pattern: /TRUST_PROXY/ },
+  ];
+
+  it.each(invalidCases)('rejects an invalid $label before creating anything', async ({ options, pattern }) => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-bad-config-'));
+    try {
+      const server = createStandaloneServer({ dataRoot: tmpDataDir, port: 0, ...options });
+      await expect(server.start()).rejects.toThrow(pattern);
+      expect(fs.readdirSync(tmpDataDir)).toEqual([]);
+    } finally {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('treats blank values as unset and starts normally', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-blank-config-'));
+    try {
+      const server = createStandaloneServer({
+        dataRoot: tmpDataDir,
+        port: 0,
+        publicUrl: '',
+        oauthAllowedRedirectUris: ' , ',
+        trustProxy: '',
+      });
+      await expect(server.start()).resolves.toMatchObject({ port: expect.any(Number) });
+      await server.stop();
+    } finally {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('warns once on real stderr for a non-loopback http PUBLIC_URL', async () => {
+    const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-http-warning-'));
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+      writes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    try {
+      const server = createStandaloneServer({
+        dataRoot: tmpDataDir,
+        port: 0,
+        publicUrl: 'http://192.168.1.10:3000',
+      });
+      await server.start();
+      await server.stop();
+      expect(writes.filter(message => message.includes('PUBLIC_URL'))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
+});

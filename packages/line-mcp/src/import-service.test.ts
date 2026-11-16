@@ -82,10 +82,10 @@ async function listen(app: Express): Promise<{ url: string; close: () => Promise
   };
 }
 
-function makeFakeExpressRequest(): Parameters<ImportService['initiate']>[1] {
+function makeFakeExpressRequest(overrides: { protocol?: string; host?: string } = {}): Parameters<ImportService['initiate']>[1] {
   return {
-    protocol: 'http',
-    get: (name: string) => (name === 'host' ? '127.0.0.1:9999' : undefined),
+    protocol: overrides.protocol ?? 'http',
+    host: overrides.host ?? '127.0.0.1:9999',
   } as Parameters<ImportService['initiate']>[1];
 }
 
@@ -101,6 +101,24 @@ describe('ImportService — canonical upload URLs', () => {
   it('prefers an explicit publicUrl override, stripping a trailing slash', () => {
     const { service } = makeService({ basePath: '/line-mcp', publicUrl: 'https://public.example.com/' });
     const { upload_url } = service.initiate(principal('u1'), makeFakeExpressRequest());
+    expect(upload_url).toBe('https://public.example.com/line-mcp/import-upload?token=id-1');
+  });
+
+  it('uses req.host so a trusted forwarded host is honored', () => {
+    const { service } = makeService({ basePath: '/line-mcp' });
+    const { upload_url } = service.initiate(
+      principal('u1'),
+      makeFakeExpressRequest({ protocol: 'https', host: 'mcp.example.com' }),
+    );
+    expect(upload_url).toBe('https://mcp.example.com/line-mcp/import-upload?token=id-1');
+  });
+
+  it('keeps the explicit publicUrl ahead of any request-derived value', () => {
+    const { service } = makeService({ basePath: '/line-mcp', publicUrl: 'https://public.example.com' });
+    const { upload_url } = service.initiate(
+      principal('u1'),
+      makeFakeExpressRequest({ protocol: 'https', host: 'mcp.example.com' }),
+    );
     expect(upload_url).toBe('https://public.example.com/line-mcp/import-upload?token=id-1');
   });
 });

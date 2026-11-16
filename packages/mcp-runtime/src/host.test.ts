@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import * as http from 'http';
 import type { AddressInfo } from 'net';
 import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import {
@@ -268,5 +269,71 @@ describe('createMcpHost — per-request lifecycle', () => {
     expect(resp.status).toBe(200);
     expect(await resp.json()).toEqual({ ok: true });
     await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+});
+
+// ── trust proxy ─────────────────────────────────────────────────────────────
+
+describe('createMcpHost — trust proxy', () => {
+  const authProvider: AuthProvider<TestPrincipal> = {
+    mountRoutes: () => {},
+    authenticate: async () => null,
+    challenge: () => '',
+  };
+
+  async function probe(trustProxy?: boolean | number | string): Promise<{ protocol: string; host: string }> {
+    const host = createMcpHost<TestPrincipal>({
+      name: 'probe',
+      version: '0.0.0',
+      basePath: '',
+      authProvider,
+      registrations: [],
+      ...(trustProxy === undefined ? {} : { trustProxy }),
+    });
+    host.app.get('/_probe', (req: ExpressRequest, res: ExpressResponse) => {
+      res.json({ protocol: req.protocol, host: req.host });
+    });
+    const server = host.app.listen(0, '127.0.0.1');
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const request = http.request({
+          hostname: '127.0.0.1',
+          port,
+          path: '/_probe',
+          headers: {
+            host: `127.0.0.1:${port}`,
+            'x-forwarded-proto': 'https',
+            'x-forwarded-host': 'mcp.example.com',
+          },
+        }, response => {
+          let data = '';
+          response.on('data', chunk => { data += chunk; });
+          response.on('end', () => resolve(data));
+        });
+        request.on('error', reject);
+        request.end();
+      });
+      return JSON.parse(body) as { protocol: string; host: string };
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }
+
+  it('honors X-Forwarded-Proto and X-Forwarded-Host when trusted', async () => {
+    expect(await probe(true)).toEqual({ protocol: 'https', host: 'mcp.example.com' });
+  });
+
+  it('ignores forwarded headers by default', async () => {
+    const result = await probe();
+    expect(result.protocol).toBe('http');
+    expect(result.host).toMatch(/^127\.0\.0\.1:\d+$/);
+  });
+
+  it('ignores forwarded headers when explicitly false', async () => {
+    const result = await probe(false);
+    expect(result.protocol).toBe('http');
+    expect(result.host).toMatch(/^127\.0\.0\.1:\d+$/);
   });
 });

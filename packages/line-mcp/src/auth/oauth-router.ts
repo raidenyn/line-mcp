@@ -9,6 +9,7 @@ import {
   loadStoredAuthRecord,
   maskMid,
 } from './credential-store';
+import type { RedirectPolicy } from './redirect-policy';
 
 // ─── Issued token pair ──────────────────────────────────────────────────────
 
@@ -27,6 +28,8 @@ export interface OAuthRouterDeps {
   origin: string;
   basePath: string;
   requiredScopes: readonly string[];
+  /** Which client redirect URIs `/authorize` and `/register` accept. */
+  redirectPolicy: RedirectPolicy;
   authStoreDir: string;
   credentialStore: CredentialStore;
   lineApiBaseUrl?: string;
@@ -79,21 +82,6 @@ interface AccountSelectionSession {
 
 // ─── OAuth helpers ────────────────────────────────────────────────────────────
 
-// Loopback redirect URIs allowed per RFC 8252 §7.3 — any path is valid on loopback.
-// The scheme MUST be http(s): a `//localhost` authority parses under any scheme, so
-// checking only hostname would let `javascript:`/`data:`/`file:` URIs through and the
-// authorize page would then navigate the browser to attacker-controlled JavaScript
-// (reflected-XSS / token-exfiltration vector).
-function isLoopbackRedirectUri(uri: string): boolean {
-  try {
-    const u = new URL(uri);
-    return (u.protocol === 'http:' || u.protocol === 'https:') &&
-           (u.hostname === 'localhost' || u.hostname === '127.0.0.1');
-  } catch {
-    return false;
-  }
-}
-
 function s256(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
@@ -108,10 +96,16 @@ function escapeHtml(value: string): string {
   })[char]!);
 }
 
+function redirectDestinationNotice(redirectUri: string): string {
+  const host = new URL(redirectUri).host;
+  return `<p class="hint">You will be returned to <strong>${escapeHtml(host)}</strong> after login.</p>`;
+}
+
 function accountSelectorHtml(
   basePath: string,
   selectionSession: string,
   choices: Array<{ id: string; label: string }>,
+  redirectUri: string,
 ): string {
   const options = choices.map(({ id, label }, index) => `
     <label>
@@ -122,6 +116,7 @@ function accountSelectorHtml(
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Select LINE account</title></head><body>
 <h1>Select LINE account</h1>
+${redirectDestinationNotice(redirectUri)}
 <form method="post" action="${escapeHtml(basePath)}/authorize/select">
 <input type="hidden" name="selection_session" value="${escapeHtml(selectionSession)}">
 ${options}
@@ -152,6 +147,7 @@ function authorizePageHtml(qrDataUrl: string, sid: string, state: string, redire
 </head>
 <body>
 <h1>LINE Login</h1>
+${redirectDestinationNotice(redirectUri)}
 <p id="status">Scan the QR code below with your LINE mobile app</p>
 <img id="qr" src="${qrDataUrl}" alt="LINE QR code">
 <div id="pin-box">
@@ -200,7 +196,7 @@ poll();
 }
 
 export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
-  const { base, basePath, requiredScopes, authStoreDir, credentialStore } = deps;
+  const { base, basePath, requiredScopes, redirectPolicy, authStoreDir, credentialStore } = deps;
 
   // Ephemeral, login-flow-only state (never persisted, unlike StoredAuthRecord).
   const loginSessions = new Map<string, LoginSession>();
@@ -314,6 +310,18 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
   // RFC 7591 Dynamic Client Registration
   app.post(`${basePath}/register`, (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+    if (body.redirect_uris !== undefined) {
+      const redirectUris = body.redirect_uris;
+      const valid = Array.isArray(redirectUris) &&
+        redirectUris.every(uri => typeof uri === 'string' && redirectPolicy.isAllowed(uri));
+      if (!valid) {
+        res.status(400).json({
+          error: 'invalid_redirect_uri',
+          error_description: 'redirect_uris must be an array of allowed absolute https URLs (loopback is always allowed)',
+        });
+        return;
+      }
+    }
     const client_id = crypto.randomBytes(16).toString('hex');
     res.status(201).json({
       client_id,
@@ -334,8 +342,11 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
       res.status(400).send('Missing required OAuth parameters');
       return;
     }
-    if (!isLoopbackRedirectUri(redirect_uri)) {
-      res.status(400).send('redirect_uri must be a loopback (http://localhost:*/callback or http://127.0.0.1:*/callback)');
+    if (!redirectPolicy.isAllowed(redirect_uri)) {
+      res.status(400).send(
+        'redirect_uri must be a loopback (http://localhost:*/callback or http://127.0.0.1:*/callback) ' +
+        'or match OAUTH_ALLOWED_REDIRECT_URIS',
+      );
       return;
     }
     if (code_challenge_method && code_challenge_method !== 'S256') {
@@ -368,7 +379,7 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
         choices: new Map(choices.map(choice => [choice.id, choice.mid])),
         expiresAt: now + 600_000,
       });
-      res.type('html').send(accountSelectorHtml(basePath, selectionSession, choices));
+      res.type('html').send(accountSelectorHtml(basePath, selectionSession, choices, authorizationRequest.redirectUri));
       return;
     }
 
@@ -435,6 +446,15 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
       const pending = pendingCodes.get(code);
       if (!pending || pending.expiresAt < Date.now()) {
         res.status(400).json({ error: 'invalid_grant', error_description: 'Code expired or not found' });
+        return;
+      }
+      if ((body.redirect_uri !== undefined && body.redirect_uri !== pending.redirectUri) ||
+          (body.client_id !== undefined && body.client_id !== pending.clientId)) {
+        pendingCodes.delete(code);
+        res.status(400).json({
+          error: 'invalid_grant',
+          error_description: 'redirect_uri or client_id does not match the authorization request',
+        });
         return;
       }
       if (s256(code_verifier) !== pending.codeChallenge) {

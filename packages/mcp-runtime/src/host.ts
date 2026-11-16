@@ -76,6 +76,12 @@ export interface McpHostOptions<P extends Principal> {
   readonly authProvider: AuthProvider<P>;
   readonly registrations: readonly Registration<P>[];
   /**
+   * Applied as Express `trust proxy` before any route is mounted. Only
+   * request-derived values (`req.protocol`, `req.host`) honor
+   * `X-Forwarded-*`; the OAuth issuer never does.
+   */
+  readonly trustProxy?: boolean | number | string;
+  /**
    * Test seam — defaults to the real `McpServer` constructor. NOT for injecting
    * auth secrets/credentials; those belong entirely to the `AuthProvider`.
    */
@@ -106,9 +112,11 @@ export function createMcpHost<P extends Principal>(options: McpHostOptions<P>): 
     registrations,
     serverFactory = defaultServerFactory,
     transportFactory = defaultTransportFactory,
+    trustProxy,
   } = options;
 
   const app = express();
+  if (trustProxy !== undefined) app.set('trust proxy', trustProxy);
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
 
