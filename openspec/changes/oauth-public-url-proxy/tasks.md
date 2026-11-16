@@ -41,5 +41,5 @@
 
 - [x] 7.1 Run the pre-PR gate: `npm run lint && npm run build && npm run test:unit && npm run test:smoke`
 - [x] 7.2 Push `feat/oauth-public-url-proxy`, open a PR titled `feat(oauth): support public https URL behind a reverse proxy` (not marked breaking) saying `Fixes #51`, superseding #76, with a note that clients reauthorize once when `PUBLIC_URL` is first set
-- [ ] 7.3 With the user's confirmation, apply the `publish-docker` label so the `pr-<N>` and `sha-` GHCR tags are published; report the tags
+- [x] 7.3 With the user's confirmation, apply the `publish-docker` label so the `pr-<N>` and `sha-` GHCR tags are published; report the tags
 - [ ] 7.4 With the user's confirmation, comment on and close PR #76 as superseded
