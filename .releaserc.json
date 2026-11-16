@@ -18,15 +18,6 @@
         ]
       }
     ],
-    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
-    [
-      "@semantic-release/github",
-      {
-        "failComment": false,
-        "failTitle": false,
-        "releasedLabels": false,
-        "successComment": false
-      }
-    ]
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }]
   ]
 }

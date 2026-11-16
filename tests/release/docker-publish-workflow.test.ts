@@ -15,12 +15,9 @@ const workflow = parse(source) as {
 };
 
 describe('publish workflow', () => {
-  it('runs on release dispatch, published releases, labeled pull requests, and manual dispatch', () => {
+  it('is callable by Release and runs only when a pull request is labeled', () => {
     expect(workflow.on).toEqual({
-      repository_dispatch: { types: ['release-published'] },
-      release: { types: ['published'] },
-      pull_request: { types: ['labeled'] },
-      workflow_dispatch: {
+      workflow_call: {
         inputs: {
           tag: {
             description: expect.any(String),
@@ -29,12 +26,26 @@ describe('publish workflow', () => {
           },
         },
       },
+      pull_request: { types: ['labeled'] },
     });
-    // A merge to main publishes nothing: only an explicit release or manual
-    // dispatch may start publication.
+    // A merge to main publishes nothing, and only adding a label may publish:
+    // a push, an edit, or another label never republishes.
     expect(workflow.on).not.toHaveProperty('push');
-    // Only adding a label may publish: a push or edit to a PR never republishes.
     expect(workflow.on).not.toHaveProperty('pull_request_target');
+  });
+
+  it('retains none of the retired triggers, previews, or registry secrets', () => {
+    for (const retired of [
+      'repository_dispatch',
+      'workflow_dispatch:',
+      'release:',
+      'edge',
+      'prerelease',
+      'GHCR_PUBLISH_TOKEN',
+      'type=gha',
+    ]) {
+      expect(source).not.toContain(retired);
+    }
   });
 
   it('queues releases instead of cancelling them and keeps prepare read-only', () => {
@@ -50,14 +61,16 @@ describe('publish workflow', () => {
   });
 
   it('authenticates with the workflow token and no registry secret', () => {
-    expect(source).not.toContain('GHCR_PUBLISH_TOKEN');
     expect(source).not.toContain('GHCR_PACKAGES_PRIVATE');
+    expect(source).toContain('password: ${{ secrets.GITHUB_TOKEN }}');
   });
 });
 
 const SHA_MAIN = 'a'.repeat(40);
-const SHA_TAG = 'b'.repeat(40);
 const SHA_PR = 'e'.repeat(40);
+const SHORT_MAIN = SHA_MAIN.slice(0, 7);
+const SHORT_PR = SHA_PR.slice(0, 7);
+const RELEASE_WORKFLOW_REF = 'owner/repo/.github/workflows/release.yml@refs/heads/main';
 
 type Step = {
   'continue-on-error'?: boolean;
@@ -87,49 +100,25 @@ type ResolveCase = {
   tags?: string[];
 };
 
-const OUTPUT_KEYS = [
-  'edge',
-  'latest',
-  'major',
-  'pr',
-  'publish',
-  'ref',
-  'sha',
-  'short_sha',
-  'tag',
-];
-const SHORT_TAG = SHA_TAG.slice(0, 7);
-const SHORT_MAIN = SHA_MAIN.slice(0, 7);
-const SHORT_PR = SHA_PR.slice(0, 7);
+const OUTPUT_KEYS = ['latest', 'major', 'pr', 'publish', 'ref', 'sha', 'short_sha', 'tag'];
 
-// Every success case states the complete output map, so an extra or missing
-// key in the emitted outputs cannot slip through.
-const defaults = (overrides: Record<string, string>): Record<string, string> => ({
-  edge: 'false',
-  latest: 'false',
-  major: '',
+// A successful release call builds the commit the caller planned (the tag does
+// not exist yet) and defaults to the newest stable release.
+const release = (overrides: Record<string, string>): Record<string, string> => ({
+  latest: 'true',
+  major: '1',
   pr: '',
   publish: 'true',
   ref: SHA_MAIN,
   sha: SHA_MAIN,
   short_sha: SHORT_MAIN,
-  tag: '',
+  tag: 'v1.2.3',
   ...overrides,
 });
 
+// Every success case states the complete output map, so an extra or missing
+// key in the emitted outputs cannot slip through.
 const cases: ResolveCase[] = [
-  {
-    name: 'prerelease with a malformed tag is skipped, not rejected',
-    env: { EVENT_NAME: 'release', RELEASE_PRERELEASE: 'true', RELEASE_TAG: 'v1.2.3-rc.1' },
-    exit: 0,
-    expect: defaults({ publish: 'false' }),
-  },
-  {
-    name: 'prerelease is skipped before any tag lookup',
-    env: { EVENT_NAME: 'release', RELEASE_PRERELEASE: 'true', RELEASE_TAG: 'v1.2.3' },
-    exit: 0,
-    expect: defaults({ publish: 'false' }),
-  },
   {
     name: 'the publish-docker label on a same-repository PR publishes its head',
     env: {
@@ -140,7 +129,16 @@ const cases: ResolveCase[] = [
       PR_NUMBER: '96',
     },
     exit: 0,
-    expect: defaults({ pr: '96', ref: SHA_PR, sha: SHA_PR, short_sha: SHORT_PR }),
+    expect: {
+      latest: 'false',
+      major: '',
+      pr: '96',
+      publish: 'true',
+      ref: SHA_PR,
+      sha: SHA_PR,
+      short_sha: SHORT_PR,
+      tag: '',
+    },
   },
   {
     name: 'an unlabeled pull request publishes nothing',
@@ -152,7 +150,16 @@ const cases: ResolveCase[] = [
       PR_NUMBER: '96',
     },
     exit: 0,
-    expect: defaults({ publish: 'false' }),
+    expect: {
+      latest: 'false',
+      major: '',
+      pr: '',
+      publish: 'false',
+      ref: SHA_MAIN,
+      sha: SHA_MAIN,
+      short_sha: SHORT_MAIN,
+      tag: '',
+    },
   },
   {
     name: 'a fork pull request is refused with a warning',
@@ -164,154 +171,105 @@ const cases: ResolveCase[] = [
       PR_NUMBER: '96',
     },
     exit: 0,
-    expect: defaults({ publish: 'false' }),
+    expect: {
+      latest: 'false',
+      major: '',
+      pr: '',
+      publish: 'false',
+      ref: SHA_MAIN,
+      sha: SHA_MAIN,
+      short_sha: SHORT_MAIN,
+      tag: '',
+    },
     stderr: '::warning::fork pull requests cannot publish images',
   },
   {
-    name: 'dispatch without a tag fails',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: '' },
+    name: 'the Release caller publishes the planned commit',
+    tags: ['v1.0.0', 'v1.1.0', 'v1.2.0'],
+    exit: 0,
+    expect: release({}),
+  },
+  {
+    name: 'an older release leaves the moving tags alone',
+    tags: ['v1.3.0', 'v1.4.2'],
+    exit: 0,
+    expect: release({ latest: 'false' }),
+  },
+  {
+    name: 'a release candidate cannot outrank the release being published',
+    tags: ['v1.2.0', 'v1.2.3-rc.1'],
+    exit: 0,
+    expect: release({}),
+  },
+  {
+    name: 'zero major is parsed and reported',
+    env: { TAG: 'v0.2.0' },
+    tags: ['v0.1.0'],
+    exit: 0,
+    expect: release({ major: '0', tag: 'v0.2.0' }),
+  },
+  {
+    name: 'a caller other than release.yml is refused',
+    env: { WORKFLOW_REF: 'owner/repo/.github/workflows/other.yml@refs/heads/main' },
     exit: 1,
     expect: {},
-    stderr: 'carried no tag',
+    stderr: '::error::Publish Docker may be called only by',
   },
   {
-    name: 'two-component tag is rejected',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2' },
+    name: 'release.yml from a ref other than main is refused',
+    env: { WORKFLOW_REF: 'owner/repo/.github/workflows/release.yml@refs/heads/feature' },
     exit: 1,
     expect: {},
+    stderr: '::error::Publish Docker may be called only by',
   },
   {
-    name: 'tagged manual dispatch off main is rejected',
-    env: { EVENT_NAME: 'workflow_dispatch', REF: 'refs/heads/x', INPUT_TAG: 'v1.2.3' },
+    name: 'a plain workflow_dispatch carries no caller and is refused',
+    env: { WORKFLOW_REF: '' },
     exit: 1,
     expect: {},
+    stderr: '::error::Publish Docker may be called only by',
   },
   {
-    name: 'untagged manual dispatch off main is rejected',
-    env: { EVENT_NAME: 'workflow_dispatch', REF: 'refs/heads/x', INPUT_TAG: '' },
+    name: 'a caller event other than the dispatch is refused',
+    env: { EVENT_NAME: 'release' },
     exit: 1,
     expect: {},
+    stderr: '::error::Publish Docker runs only as part of',
   },
   {
-    name: 'annotated tag resolves the peeled commit',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '1' },
-    tags: ['v1.2.3'],
-    exit: 0,
-    expect: defaults({
-      latest: 'true',
-      major: '1',
-      ref: 'refs/tags/v1.2.3',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.2.3',
-    }),
-  },
-  {
-    name: 'lightweight tag falls back to the direct ref',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_ANNOTATED: '0' },
-    exit: 0,
-    expect: defaults({
-      major: '1',
-      ref: 'refs/tags/v1.2.3',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.2.3',
-    }),
-  },
-  {
-    name: 'a newer release tag makes this release not newest',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3' },
-    tags: ['v1.2.3', 'v1.3.0'],
-    exit: 0,
-    expect: defaults({
-      latest: 'false',
-      major: '1',
-      ref: 'refs/tags/v1.2.3',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.2.3',
-    }),
-  },
-  {
-    name: 'a release candidate cannot outrank its stable release',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.3.0' },
-    tags: ['v1.3.0', 'v1.3.0-rc.1'],
-    exit: 0,
-    expect: defaults({
-      latest: 'true',
-      major: '1',
-      ref: 'refs/tags/v1.3.0',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.3.0',
-    }),
-  },
-  {
-    name: 'zero major is parsed but never published as a bare major tag',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v0.2.0' },
-    tags: ['v0.2.0'],
-    exit: 0,
-    expect: defaults({
-      latest: 'true',
-      major: '0',
-      ref: 'refs/tags/v0.2.0',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v0.2.0',
-    }),
-  },
-  {
-    name: 'untagged manual dispatch from main moves edge',
-    env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: SHA_MAIN },
-    exit: 0,
-    expect: defaults({ edge: 'true', ref: SHA_MAIN }),
-  },
-  {
-    name: 'untagged manual dispatch at a stale head does not move edge',
-    env: { EVENT_NAME: 'workflow_dispatch', FAKE_MAIN: 'c'.repeat(40) },
-    exit: 0,
-    expect: defaults({ edge: 'false' }),
-  },
-  {
-    name: 'release event publishes the release tag',
-    env: { EVENT_NAME: 'release', FAKE_ANNOTATED: '0', RELEASE_TAG: 'v1.2.3' },
-    tags: ['v1.2.3'],
-    exit: 0,
-    expect: defaults({
-      latest: 'true',
-      major: '1',
-      ref: 'refs/tags/v1.2.3',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.2.3',
-    }),
-  },
-  {
-    name: 'tagged manual dispatch from main publishes the tag',
-    env: { EVENT_NAME: 'workflow_dispatch', FAKE_ANNOTATED: '0', INPUT_TAG: 'v1.2.3' },
-    tags: ['v1.2.3'],
-    exit: 0,
-    expect: defaults({
-      latest: 'true',
-      major: '1',
-      ref: 'refs/tags/v1.2.3',
-      sha: SHA_TAG,
-      short_sha: SHORT_TAG,
-      tag: 'v1.2.3',
-    }),
-  },
-  {
-    name: 'a tag missing from the remote fails',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_TAG_MISSING: '1' },
+    name: 'a release dispatch is refused',
+    env: { EVENT_NAME: 'repository_dispatch' },
     exit: 1,
     expect: {},
-    stderr: 'cannot resolve',
+    stderr: '::error::Publish Docker runs only as part of',
+  },
+  {
+    name: 'a call from a branch other than main is refused',
+    env: { REF: 'refs/heads/feature' },
+    exit: 1,
+    expect: {},
+    stderr: '::error::Release must call Publish Docker from refs/heads/main',
+  },
+  {
+    name: 'a call without a tag is refused',
+    env: { TAG: '' },
+    exit: 1,
+    expect: {},
+    stderr: '::error::unsupported tag',
+  },
+  {
+    name: 'a malformed tag is refused',
+    env: { TAG: 'v1.2' },
+    exit: 1,
+    expect: {},
+    stderr: '::error::unsupported tag',
   },
   {
     name: 'a failed tag listing fails instead of silently defaulting latest',
-    env: { EVENT_NAME: 'repository_dispatch', DISPATCH_TAG: 'v1.2.3', FAKE_TAGS_FAIL: '1' },
+    env: { FAKE_TAGS_FAIL: '1' },
     exit: 1,
     expect: {},
+    stderr: '::error::cannot list release tags',
   },
 ];
 
@@ -322,30 +280,16 @@ function runResolve(testCase: ResolveCase) {
     fakeGit,
     `#!/usr/bin/env bash
 set -euo pipefail
-args="$*"
-if [[ "$args" == *refs/heads/main* && "$args" != *--tags* ]]; then
-  printf '%s\trefs/heads/main\n' "\${FAKE_MAIN:-${SHA_MAIN}}"
-elif [[ "$args" == *--tags* ]]; then
+if [[ "$*" == *--tags* ]]; then
   if [ "\${FAKE_TAGS_FAIL:-0}" = 1 ]; then
     exit 1
   fi
   while IFS= read -r tag; do
     [ -n "$tag" ] || continue
-    printf '%s\trefs/tags/%s\n' "${SHA_TAG}" "$tag"
+    printf '%s\trefs/tags/%s\n' "${SHA_MAIN}" "$tag"
   done <<< "\${FAKE_TAGS:-}"
-elif [[ "$args" == *'^{}'* ]]; then
-  if [ "\${FAKE_ANNOTATED:-1}" = 1 ] && [ "\${FAKE_TAG_MISSING:-0}" != 1 ]; then
-    printf '%s\trefs/tags/peeled^{}\n' "${SHA_TAG}"
-  fi
-elif [[ "$args" == *refs/tags/* ]]; then
-  if [ "\${FAKE_TAG_MISSING:-0}" != 1 ]; then
-    if [ "\${FAKE_ANNOTATED:-1}" = 1 ]; then
-      printf '%s\trefs/tags/tag\n' "dddddddddddddddddddddddddddddddddddddddd"
-    else
-      printf '%s\trefs/tags/tag\n' "${SHA_TAG}"
-    fi
-  fi
 else
+  printf 'unexpected git invocation: %s\\n' "$*" >&2
   exit 1
 fi
 `,
@@ -357,22 +301,20 @@ fi
     encoding: 'utf8',
     env: {
       ...process.env,
-      DISPATCH_PAYLOAD: '{}',
-      DISPATCH_TAG: '',
+      EVENT_NAME: 'workflow_dispatch',
       FAKE_TAGS: (testCase.tags ?? []).join('\n'),
       GITHUB_OUTPUT: outputPath,
       GITHUB_REPOSITORY: 'owner/repo',
       GITHUB_SERVER_URL: 'https://github.com',
-      INPUT_TAG: '',
       PATH: `${dir}:${process.env.PATH}`,
       PR_HEAD_REPO: '',
       PR_HEAD_SHA: '',
       PR_LABEL: '',
       PR_NUMBER: '',
       REF: 'refs/heads/main',
-      RELEASE_PRERELEASE: 'false',
-      RELEASE_TAG: '',
       SHA: SHA_MAIN,
+      TAG: 'v1.2.3',
+      WORKFLOW_REF: RELEASE_WORKFLOW_REF,
       ...testCase.env,
     },
   });
@@ -402,13 +344,13 @@ describe('prepare resolve script', () => {
     } else {
       // A failed resolve must not hand partial outputs to the publish job.
       expect(output).toBe('');
+      expect(stderr).not.toBe('');
     }
   });
 
   it('exposes every output the publish job consumes', () => {
     expect(Object.keys(prepare.outputs).sort()).toEqual(OUTPUT_KEYS);
     expect(prepare.outputs).toEqual({
-      edge: '${{ steps.resolve.outputs.edge }}',
       latest: '${{ steps.resolve.outputs.latest }}',
       major: '${{ steps.resolve.outputs.major }}',
       pr: '${{ steps.resolve.outputs.pr }}',
@@ -420,17 +362,17 @@ describe('prepare resolve script', () => {
     });
   });
 
-  it('feeds the event payload through the environment', () => {
+  it('feeds the caller and pull-request context through the environment', () => {
     expect(resolveStep().env).toMatchObject({
-      DISPATCH_PAYLOAD: '${{ toJSON(github.event.client_payload) }}',
-      DISPATCH_TAG: '${{ github.event.client_payload.tag }}',
-      INPUT_TAG: '${{ inputs.tag }}',
+      EVENT_NAME: '${{ github.event_name }}',
+      REF: '${{ github.ref }}',
+      SHA: '${{ github.sha }}',
+      TAG: '${{ inputs.tag }}',
+      WORKFLOW_REF: '${{ github.workflow_ref }}',
       PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}',
       PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
       PR_LABEL: '${{ github.event.label.name }}',
       PR_NUMBER: '${{ github.event.pull_request.number }}',
-      RELEASE_PRERELEASE: '${{ github.event.release.prerelease }}',
-      RELEASE_TAG: '${{ github.event.release.tag_name }}',
     });
     // The prepare job reads no repository variable: there is no package gate.
     expect(resolveStep().env).not.toHaveProperty('GHCR_PACKAGES_PRIVATE');
@@ -457,6 +399,15 @@ const tagLines = (step: Step) =>
     .map((line) => line.trim())
     .filter(Boolean);
 
+const allowlistStep = () => publish.steps.find((step) => step.name === 'Assert tag allowlist')!;
+
+function runAllowlist(pr: string, tags: string[]) {
+  return spawnSync('bash', ['-c', allowlistStep().run!], {
+    encoding: 'utf8',
+    env: { ...process.env, PR: pr, TAGS: tags.join('\n') },
+  });
+}
+
 describe('publish job', () => {
   it('gates on prepare, uses the protected environment, and maps both targets', () => {
     expect(publish.needs).toBe('prepare');
@@ -469,7 +420,7 @@ describe('publish job', () => {
     ]);
   });
 
-  it('checks out the resolved ref, verifies the commit, and logs in with the workflow token', () => {
+  it('checks out the resolved commit, verifies it, and logs in with the workflow token', () => {
     const checkout = publish.steps.find((step) => step.uses === 'actions/checkout@v7')!;
     expect(checkout.with).toMatchObject({ ref: '${{ needs.prepare.outputs.ref }}' });
     const verify = publish.steps.find((step) => step.name === 'Verify checked-out commit')!;
@@ -487,61 +438,44 @@ describe('publish job', () => {
   });
 
   it('prevents automatic latest and gates every moving tag on the newest release', () => {
-    const release = publish.steps.find((step) => step.id === 'meta-release')!;
-    const edge = publish.steps.find((step) => step.id === 'meta-edge')!;
-    const tags = String(release.with?.tags);
-    expect(release.with?.flavor).toBe('latest=false');
-    expect(edge.with?.flavor).toBe('latest=false');
-    expect(tags).toContain('type=semver,pattern={{version}}');
-    expect(tags).toContain("enable=${{ needs.prepare.outputs.latest == 'true' }}");
-    expect(tags).toContain("needs.prepare.outputs.major != '0'");
-    expect(tags).toContain('type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}');
-    expect(tags).not.toContain('type=sha');
-    expect(String(edge.with?.tags)).toContain(
-      "type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}",
-    );
-    expect(String(edge.with?.tags)).not.toContain('type=sha');
-
+    const step = publish.steps.find((candidate) => candidate.id === 'meta-release')!;
+    expect(step.name).toBe('Extract release metadata');
+    expect(step.uses).toBe('docker/metadata-action@v6');
+    expect(step.if).toBe("needs.prepare.outputs.tag != ''");
+    expect(step.with).toMatchObject({
+      images: 'ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}',
+      flavor: 'latest=false',
+    });
+    expect(String(step.with?.tags)).not.toContain('type=sha');
     // Each complete line, so a dropped or weakened gate cannot pass unnoticed.
-    expect(tagLines(release)).toEqual([
+    expect(tagLines(step)).toEqual([
       'type=semver,pattern={{version}},value=${{ needs.prepare.outputs.tag }}',
       "type=semver,pattern={{major}}.{{minor}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' }}",
       "type=semver,pattern={{major}},value=${{ needs.prepare.outputs.tag }},enable=${{ needs.prepare.outputs.latest == 'true' && needs.prepare.outputs.major != '0' }}",
       "type=raw,value=latest,enable=${{ needs.prepare.outputs.latest == 'true' }}",
       'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
     ]);
-    expect(tagLines(edge)).toEqual([
-      "type=raw,value=edge,enable=${{ needs.prepare.outputs.edge == 'true' }}",
-      'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
-    ]);
-
-    // Releases and edge builds share one build step, so exactly one metadata
-    // step may run: the tagged one for a tag, the edge one for a tagless
-    // non-PR run, and the PR one only for a labeled PR.
-    expect(release.if).toBe("needs.prepare.outputs.tag != ''");
-    expect(edge.if).toBe("needs.prepare.outputs.tag == '' && needs.prepare.outputs.pr == ''");
   });
 
   it('publishes a labeled pull request as only pr-<number> and sha-<short>', () => {
-    const pr = publish.steps.find((step) => step.id === 'meta-pr')!;
-    expect(pr.name).toBe('Metadata (pull request)');
-    expect(pr.uses).toBe('docker/metadata-action@v6');
-    expect(pr.if).toBe("needs.prepare.outputs.pr != ''");
-    expect(pr.with).toMatchObject({
+    const step = publish.steps.find((candidate) => candidate.id === 'meta-pr')!;
+    expect(step.name).toBe('Metadata (pull request)');
+    expect(step.uses).toBe('docker/metadata-action@v6');
+    expect(step.if).toBe("needs.prepare.outputs.pr != ''");
+    expect(step.with).toMatchObject({
       images: 'ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}',
       flavor: 'latest=false',
     });
-    expect(tagLines(pr)).toEqual([
+    expect(tagLines(step)).toEqual([
       'type=raw,value=pr-${{ needs.prepare.outputs.pr }}',
       'type=raw,value=sha-${{ needs.prepare.outputs.short_sha }}',
     ]);
-    // A PR image never receives a moving release or edge tag.
-    expect(String(pr.with?.tags)).not.toContain('latest');
-    expect(String(pr.with?.tags)).not.toContain('edge');
+    // A PR image never receives a moving release tag.
+    expect(String(step.with?.tags)).not.toContain('latest');
   });
 
   it('labels each image with the built commit and a separated licence', () => {
-    for (const id of ['meta-release', 'meta-edge', 'meta-pr']) {
+    for (const id of ['meta-release', 'meta-pr']) {
       const step = publish.steps.find((candidate) => candidate.id === id)!;
       expect(String(step.with?.labels)).toContain(
         'org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}',
@@ -553,7 +487,7 @@ describe('publish job', () => {
     }
   });
 
-  it('builds amd64, pushes, and keeps the layer cache in the registry package', () => {
+  it('builds only from the metadata step that ran', () => {
     const build = publish.steps.find((step) => step.id === 'build')!;
     expect(build.uses).toBe('docker/build-push-action@v7');
     expect(build.with).toMatchObject({
@@ -567,17 +501,31 @@ describe('publish job', () => {
         'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache',
       'cache-to':
         'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max',
-      labels:
-        '${{ steps.meta-release.outputs.labels || steps.meta-edge.outputs.labels || steps.meta-pr.outputs.labels }}',
-      tags: '${{ steps.meta-release.outputs.tags || steps.meta-edge.outputs.tags || steps.meta-pr.outputs.tags }}',
+      labels: '${{ steps.meta-release.outputs.labels || steps.meta-pr.outputs.labels }}',
+      tags: '${{ steps.meta-release.outputs.tags || steps.meta-pr.outputs.tags }}',
     });
+  });
+
+  it('asserts the push tag allowlist after metadata and before the build', () => {
+    const step = allowlistStep();
+    expect(step.run).toContain('TAGS');
+    expect(step.env).toMatchObject({
+      PR: '${{ needs.prepare.outputs.pr }}',
+      TAGS: '${{ steps.meta-release.outputs.tags || steps.meta-pr.outputs.tags }}',
+    });
+    const lastMetadata = Math.max(
+      publish.steps.findIndex((candidate) => candidate.id === 'meta-release'),
+      publish.steps.findIndex((candidate) => candidate.id === 'meta-pr'),
+    );
+    const allowlistIndex = publish.steps.indexOf(step);
+    const buildIndex = publish.steps.findIndex((candidate) => candidate.id === 'build');
+    expect(allowlistIndex).toBeGreaterThan(lastMetadata);
+    expect(allowlistIndex).toBeLessThan(buildIndex);
   });
 
   it('never exports layers to a GHA cache that forks could restore', () => {
     // A registry cache keeps the layers with the image it belongs to and avoids
     // a default-branch GHA cache, which fork pull-request workflows can restore.
-    expect(source).not.toContain('type=gha');
-    expect(source).not.toContain('gha');
     const build = publish.steps.find((step) => step.id === 'build')!;
     for (const key of ['cache-from', 'cache-to']) {
       const value = String(build.with?.[key]);
@@ -591,5 +539,99 @@ describe('publish job', () => {
     const buildIndex = publish.steps.findIndex((step) => step.id === 'build');
     expect(login).toBeGreaterThanOrEqual(0);
     expect(login).toBeLessThan(buildIndex);
+  });
+});
+
+type AllowlistCase = {
+  exit: number;
+  name: string;
+  pr: string;
+  tags: string[];
+};
+
+const image = 'ghcr.io/owner/line-mcp-full';
+
+const allowlistCases: AllowlistCase[] = [
+  {
+    name: 'a pull request may push pr-<number> and sha-<short>',
+    pr: '96',
+    tags: [`${image}:pr-96`, `${image}:sha-abc1234`],
+    exit: 0,
+  },
+  {
+    name: 'one forbidden tag fails the whole pull-request build',
+    pr: '96',
+    tags: [`${image}:pr-96`, `${image}:latest`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push latest',
+    pr: '96',
+    tags: [`${image}:latest`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push a patch version',
+    pr: '96',
+    tags: [`${image}:1.2.3`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push a minor version',
+    pr: '96',
+    tags: [`${image}:1.2`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push a bare major version',
+    pr: '96',
+    tags: [`${image}:1`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push the retired preview tag',
+    pr: '96',
+    tags: [`${image}:edge`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push a non-numeric pr tag',
+    pr: '96',
+    tags: [`${image}:pr-x`],
+    exit: 1,
+  },
+  {
+    name: 'a pull request may not push an uppercase short sha',
+    pr: '96',
+    tags: [`${image}:sha-ABC1234`],
+    exit: 1,
+  },
+  {
+    name: 'a release may not push a pull-request tag',
+    pr: '',
+    tags: [`${image}:pr-96`],
+    exit: 1,
+  },
+  {
+    name: 'a release may push its version tags',
+    pr: '',
+    tags: [
+      `${image}:1.2.3`,
+      `${image}:1.2`,
+      `${image}:1`,
+      `${image}:latest`,
+      `${image}:sha-abc1234`,
+    ],
+    exit: 0,
+  },
+];
+
+describe('assert tag allowlist script', () => {
+  it.each(allowlistCases)('$name', (testCase) => {
+    const result = runAllowlist(testCase.pr, testCase.tags);
+    expect(result.status).toBe(testCase.exit);
+    if (testCase.exit !== 0) {
+      expect(result.stderr).toContain('::error::');
+    }
   });
 });
