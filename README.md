@@ -88,8 +88,17 @@ Both runtime targets are published to the **public** GitHub Container Registry a
 After the visibility flip, the packages are anonymously readable, so there is no login step:
 
 ```bash
-docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — ten tools
-docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — five messenger tools
+docker pull ghcr.io/raidenyn/line-mcp-full:latest   # composed — newest stable release
+docker pull ghcr.io/raidenyn/line-mcp:latest        # standalone — newest stable release
+```
+
+`latest` exists only after the first **stable release** is published: the first
+`edge` push and the visibility flip do not create it. Until then, pull the
+main-branch build instead:
+
+```bash
+docker pull ghcr.io/raidenyn/line-mcp-full:edge     # composed — newest main build
+docker pull ghcr.io/raidenyn/line-mcp:edge          # standalone — newest main build
 ```
 
 A fresh installation pulled **before** the owner completes the flip fails with
