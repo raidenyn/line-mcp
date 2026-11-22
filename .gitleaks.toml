@@ -1,12 +1,13 @@
 # Secret-scan configuration for the LINE MCP repository.
 #
-# Extends the gitleaks default rules. The allowlist covers the only tracked
-# test fixture that trips a default rule: the fixed synthetic signing secret
-# used by the token-codec unit tests. It is line-scoped, so a real credential
-# added elsewhere in that file still fails the scan.
+# Extends the gitleaks default rules. The allowlist covers the fixed synthetic
+# signing secret used by the token-codec unit tests. It is line-scoped, so a
+# real credential added elsewhere in that file still fails the scan.
 #
-# Findings in removed files (for example the `specs/raw/` captures deleted in
-# be9d868) live only in history; the CI scan covers the pull-request range.
+# The CI scan covers the pull-request or push commit range, so findings in
+# files that were removed before that range are outside it. The one-time
+# full-history scan required by issue #100 was run, and its results were
+# reported privately to the owner.
 
 [extend]
 useDefault = true

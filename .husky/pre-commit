@@ -7,4 +7,4 @@ if ! command -v gitleaks >/dev/null 2>&1; then
   exit 0
 fi
 
-gitleaks protect --staged --redact --config .gitleaks.toml
+gitleaks git --staged --pre-commit --redact --config .gitleaks.toml
