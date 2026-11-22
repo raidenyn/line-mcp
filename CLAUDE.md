@@ -16,6 +16,9 @@ npm run clean        # tsc -b --clean
 npm start            # composed server: node packages/server/dist/cli.js (HTTP MCP on localhost:3000)
 node packages/line-mcp/dist/cli.js                       # standalone messenger server
 npm run lint         # eslint .
+npm run verify       # pre-PR gate: lint, one tsc -b, unit/architecture/release/smoke
+npm run verify:changed # inner loop: changed/untracked .ts lint + affected tests
+npm run verify:all   # verify + Docker smoke + packed line-client artifact check
 npm run test:unit    # in-process unit / contract / migration + import-boundary tests
 npm run test:smoke   # local LINE mock + compiled CLIs (no credentials, no Docker)
 npm run test:e2e     # live LINE e2e (requires .line-auth.json; manual, pre-release only)
@@ -51,14 +54,26 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 
 **Pre-PR gate (mandatory)**
 
-- Always, before creating any PR:
-  `npm run lint && npm run build && npm run test:unit && npm run test:smoke`
-  and `npx openspec validate --all --strict`
-- Touched `Dockerfile` or `docker-compose.yml` → also
-  `npx vitest run tests/docker/docker-smoke.test.ts`
-- Touched line-client packaging, vendoring, or `assets` → also
-  `npx vitest run tests/artifacts/line-client-pack.test.ts`
+- Always, before creating or updating any PR: `npm run verify` — lint, one
+  `tsc -b`, then the unit/architecture/release suites and the mock-backed
+  smoke suite. It never triggers a second build. Also run
+  `npx openspec validate --all --strict`.
+- Touched `Dockerfile` or `docker-compose.yml`, or line-client packaging,
+  vendoring, or `assets` → run `npm run verify:all` instead: it adds the Docker
+  smoke and the packed-artifact checks.
 - The live e2e suite is manual-only; never required for a PR.
+
+**Verification ladder** — run the cheapest rung that covers the change.
+
+| Rung | Command | When | Measured wall time |
+| --- | --- | --- | --- |
+| 0 | `npm run verify:changed` | Every edit: lint changed/untracked `.ts` files, then only the tests affected by the diff vs `origin/main` | ~8 s with changes; ~0.3 s with no changes |
+| 1 | `npm run verify` | Before opening or updating a PR | ~40–65 s (warm cache) |
+| 2 | `npm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Docker rung requires a daemon; pack rung ~35 s |
+| 3 | `npm run test:e2e` | Manual, pre-release only (needs `.line-auth.json`) | not measured |
+
+Measured on a 4-core Linux container with a warm `node_modules`. CI keeps the
+existing verbose jobs (`check`, `smoke`, `docker`, `pack-line-client`).
 
 **Code review**
 

@@ -6,12 +6,18 @@
   "workspaces": [
     "packages/*"
   ],
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "test:unit": "vitest run packages tests/architecture tests/release",
     "test:smoke": "npm run build && vitest run tests/smoke",
     "test:e2e": "vitest run tests/e2e.test.ts",
+    "verify": "npm run lint && npm run build && vitest run --reporter=dot packages tests/architecture tests/release tests/smoke",
+    "verify:changed": "node scripts/verify-changed.mjs",
+    "verify:all": "npm run verify && npx vitest run tests/docker/docker-smoke.test.ts && npx vitest run tests/artifacts/line-client-pack.test.ts",
     "lint": "eslint .",
     "start": "node packages/server/dist/cli.js",
     "commitlint": "commitlint",
