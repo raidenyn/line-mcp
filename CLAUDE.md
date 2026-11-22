@@ -65,6 +65,20 @@ real LINE authorization headers, so only point it at a trusted endpoint.
   comments anchored to the relevant lines of that PR; report in chat only
   when there is no PR.
 
+**Agent permissions**
+
+- The committed policy is `.claude/settings.json`. It allows the lint, build,
+  unit and smoke commands plus read-only git/openspec inspection; asks before
+  `git push`, PR merge/create, `docker push` and the live e2e suite; and denies
+  reads of LINE auth/runtime files (`.line-auth.json`, `.line-mcp-tokens.json`,
+  `data/`, `.env*`), edits under `packages/line-client/assets/ltsm/`,
+  `npm publish` and force pushes.
+- Personal overrides belong in the untracked `.claude/settings.local.json`;
+  never commit it. It is covered by `.gitignore`.
+- Secret scanning runs in CI over every pull-request range and, when
+  `gitleaks` is installed, on staged changes through the Husky `pre-commit`
+  hook. The hook skips with a warning when the binary is absent.
+
 ## Code style
 
 `npm run lint` must pass. Match the conventions of the file you are editing.
