@@ -8,7 +8,7 @@ The opt-in TRUST_PROXY setting, which request-derived values may honor forwarded
 
 ### Requirement: Opt-in proxy trust
 
-The server MUST honor `X-Forwarded-Proto` and `X-Forwarded-Host` only when `TRUST_PROXY` is set to a truthy value: `true` (case-insensitive), a non-negative integer hop count, or a comma-separated list of `loopback`, `linklocal`, `uniquelocal`, IP addresses or CIDR ranges. When `TRUST_PROXY` is unset, blank, `false` (case-insensitive) or `0`, forwarded headers MUST be ignored. Any other value MUST abort start-up with an error naming `TRUST_PROXY`, raised by the server's own validation rather than by Express.
+The server MUST honor `X-Forwarded-Proto` and `X-Forwarded-Host` only when `TRUST_PROXY` is set to a truthy value: `true` (case-insensitive), a non-negative integer hop count, or a comma-separated list of `loopback`, `linklocal`, `uniquelocal`, IP addresses or CIDR ranges. When `TRUST_PROXY` is unset, blank, `false` (case-insensitive) or `0`, forwarded headers MUST be ignored.
 
 #### Scenario: Off by default
 
@@ -20,15 +20,21 @@ The server MUST honor `X-Forwarded-Proto` and `X-Forwarded-Host` only when `TRUS
 - **WHEN** `TRUST_PROXY=true`, `PUBLIC_URL` is unset, and a request carries `X-Forwarded-Proto: https` and `X-Forwarded-Host: mcp.example.com`
 - **THEN** `req.protocol` is `https` and `req.host` is `mcp.example.com` (verified through a real Express request)
 
-#### Scenario: Invalid value fails start-up
-
-- **WHEN** `TRUST_PROXY` is `-3`, `1.5`, `yes` or `10.0.0.0/99`
-- **THEN** start-up fails with an error naming `TRUST_PROXY`
-
 #### Scenario: Case-insensitive booleans
 
 - **WHEN** `TRUST_PROXY=TRUE`
 - **THEN** it behaves as `true`
+
+### Requirement: Invalid TRUST_PROXY values fail start-up
+
+A `TRUST_PROXY` value that is neither a trusted value nor an off value listed
+under opt-in proxy trust MUST abort start-up with an error naming
+`TRUST_PROXY`, raised by the server's own validation rather than by Express.
+
+#### Scenario: Invalid value fails start-up
+
+- **WHEN** `TRUST_PROXY` is `-3`, `1.5`, `yes` or `10.0.0.0/99`
+- **THEN** start-up fails with an error naming `TRUST_PROXY`
 
 ### Requirement: PUBLIC_URL takes precedence over forwarded headers
 
