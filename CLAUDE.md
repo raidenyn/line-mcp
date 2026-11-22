@@ -67,13 +67,16 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 
 | Rung | Command | When | Measured wall time |
 | --- | --- | --- | --- |
-| 0 | `npm run verify:changed` | Every edit: lint changed/untracked `.ts` files, then only the tests affected by the diff vs `origin/main` | ~8 s with changes; ~0.3 s with no changes |
+| 0 | `npm run verify:changed` | Every edit: lint changed/untracked JS/TS files, then only the tests affected by the diff vs `origin/main` | ~8 s with changes; ~0.3 s with no changes |
 | 1 | `npm run verify` | Before opening or updating a PR | ~40–65 s (warm cache) |
-| 2 | `npm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Docker rung requires a daemon; pack rung ~35 s |
+| 2 | `npm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Always rebuilds both images (fails without a daemon), then runs the smoke and pack checks; pack rung ~35 s |
 | 3 | `npm run test:e2e` | Manual, pre-release only (needs `.line-auth.json`) | not measured |
 
-Measured on a 4-core Linux container with a warm `node_modules`. CI keeps the
-existing verbose jobs (`check`, `smoke`, `docker`, `pack-line-client`).
+`verify:changed` only covers tests inside the changed package: workspace
+packages import each other from compiled `dist`, so a change to exported package
+code needs `verify` to reach dependent packages' tests. Measured on a 4-core
+Linux container with a warm `node_modules`. CI keeps the existing verbose jobs
+(`check`, `smoke`, `docker`, `pack-line-client`).
 
 **Code review**
 

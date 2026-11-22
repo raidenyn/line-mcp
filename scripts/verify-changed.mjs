@@ -6,11 +6,12 @@ import { pathToFileURL } from 'node:url';
 // The fast rung is restricted to the in-process suites: smoke, Docker and
 // packaging need a build or a daemon and belong to `verify` / `verify:all`.
 const UNIT_PATHS = ['packages', 'tests/architecture', 'tests/release'];
+// Everything `eslint .` lints, so a changed script is checked by the inner loop.
+const LINTABLE = /\.(?:c|m)?[jt]s$/;
 
 /**
- * Pick the TypeScript files to lint from `git diff --name-only` output plus
- * untracked paths. Deleted files are already excluded by the caller's
- * `--diff-filter`; keeping this pure lets the selection be unit-tested.
+ * Pick the JS/TS files to lint from NUL-delimited `git` output. Keeping this
+ * pure lets the selection be unit-tested; callers drop deleted files.
  *
  * @param {string} trackedOutput
  * @param {string} untrackedOutput
@@ -18,11 +19,19 @@ const UNIT_PATHS = ['packages', 'tests/architecture', 'tests/release'];
  */
 export function selectLintTargets(trackedOutput, untrackedOutput) {
   const targets = new Set();
-  for (const line of `${trackedOutput}\n${untrackedOutput}`.split('\n')) {
-    const file = line.trim();
-    if (file.endsWith('.ts')) targets.add(file);
+  for (const file of `${trackedOutput}\0${untrackedOutput}`.split('\0')) {
+    if (LINTABLE.test(file)) targets.add(file);
   }
   return [...targets];
+}
+
+/**
+ * @param {string} trackedOutput
+ * @param {string} untrackedOutput
+ * @returns {boolean}
+ */
+export function hasChangedFiles(trackedOutput, untrackedOutput) {
+  return `${trackedOutput}\0${untrackedOutput}`.split('\0').some((file) => file.length > 0);
 }
 
 function git(args) {
@@ -31,13 +40,22 @@ function git(args) {
   return result.stdout;
 }
 
-function resolveBase() {
+/**
+ * Find the commit the diff is measured against. `origin/main` is preferred; a
+ * checkout without main history falls back to HEAD, which the caller warns
+ * about because it ignores committed branch work. `runGit` is injectable for
+ * the unit test.
+ *
+ * @param {(args: string[]) => string | null} [runGit]
+ * @returns {{ base: string, ref: string, fallback: boolean } | null}
+ */
+export function resolveBase(runGit = git) {
   for (const ref of ['origin/main', 'main']) {
-    const base = git(['merge-base', ref, 'HEAD']);
-    if (base?.trim()) return base.trim();
+    const base = runGit(['merge-base', ref, 'HEAD']);
+    if (base?.trim()) return { base: base.trim(), ref, fallback: false };
   }
-  // A checkout without main history still gets an inner loop against HEAD.
-  return git(['rev-parse', 'HEAD'])?.trim() || null;
+  const head = runGit(['rev-parse', 'HEAD'])?.trim();
+  return head ? { base: head, ref: 'HEAD', fallback: true } : null;
 }
 
 function run(command, args) {
@@ -46,28 +64,50 @@ function run(command, args) {
 }
 
 function main() {
-  const base = resolveBase();
-  if (!base) {
+  const resolved = resolveBase();
+  if (!resolved) {
     console.error('verify:changed: cannot resolve a git base commit');
     process.exit(1);
   }
+  if (resolved.fallback) {
+    console.error(
+      `verify:changed: warning: no origin/main or main ref; comparing against ${resolved.ref}`,
+    );
+  }
 
-  const tracked = git(['diff', '--name-only', '--diff-filter=ACMR', base, '--']);
-  const untracked = git(['ls-files', '--others', '--exclude-standard', '--']);
+  // `-z` keeps non-ASCII and unusual names intact instead of quoting them.
+  const tracked = git(['diff', '--name-only', '-z', resolved.base, '--']);
+  const untracked = git(['ls-files', '--others', '--exclude-standard', '-z', '--']);
   if (tracked === null || untracked === null) {
     console.error('verify:changed: git could not list changed files');
     process.exit(1);
   }
 
-  const lintTargets = selectLintTargets(tracked, untracked).filter((file) => existsSync(file));
-  if (lintTargets.length === 0) {
-    console.log('verify:changed: no changed TypeScript files');
+  if (!hasChangedFiles(tracked, untracked)) {
+    console.log('verify:changed: no changed files');
     return;
   }
 
-  console.log(`verify:changed: linting ${lintTargets.length} changed TypeScript file(s)`);
-  const lintStatus = run('npx', ['--no-install', 'eslint', ...lintTargets]);
-  if (lintStatus !== 0) process.exit(lintStatus);
+  const lintTargets = selectLintTargets(tracked, untracked).filter((file) => existsSync(file));
+  if (lintTargets.length > 0) {
+    console.log(`verify:changed: linting ${lintTargets.length} changed file(s)`);
+    const lintStatus = run('npx', ['--no-install', 'eslint', ...lintTargets]);
+    if (lintStatus !== 0) process.exit(lintStatus);
+
+    // Workspace packages resolve each other through compiled dist, so Vitest's
+    // import graph cannot reach tests in other packages from a src change.
+    const packageSources = lintTargets.filter(
+      (file) => /^packages\/[^/]+\/src\//.test(file) && !/\.test\.[cm]?[jt]s$/.test(file),
+    );
+    if (packageSources.length > 0) {
+      console.error(
+        'verify:changed: note: package sources changed; other packages consume compiled dist, ' +
+          'so run `npm run verify` before the PR to cover cross-package tests',
+      );
+    }
+  } else {
+    console.log('verify:changed: no changed lintable files');
+  }
 
   process.exit(
     run('npx', [
@@ -75,7 +115,7 @@ function main() {
       'vitest',
       'run',
       '--changed',
-      base,
+      resolved.base,
       '--reporter=dot',
       '--passWithNoTests',
       ...UNIT_PATHS,

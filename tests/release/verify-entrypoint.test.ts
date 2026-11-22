@@ -3,7 +3,7 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 // Plain ESM without declarations: the inner-loop helper is a script, not part
 // of the TypeScript build.
-import { selectLintTargets } from '../../scripts/verify-changed.mjs';
+import { hasChangedFiles, resolveBase, selectLintTargets } from '../../scripts/verify-changed.mjs';
 
 type PackageJson = {
   engines?: Record<string, string>;
@@ -21,6 +21,8 @@ describe('verification entrypoints', () => {
   it('runs lint, exactly one build, and the in-process suites in verify', () => {
     expect(scripts.verify).toContain('npm run lint');
     expect(scripts.verify.match(/npm run build/g)).toHaveLength(1);
+    // The single build must go through the npm script, not an inline second one.
+    expect(scripts.verify).not.toContain('tsc -b');
 
     const tests = scripts.verify.slice(scripts.verify.indexOf('vitest run'));
     expect(tests).toContain('--reporter=dot');
@@ -35,8 +37,12 @@ describe('verification entrypoints', () => {
 
   it('adds the docker and packaging rungs only in verify:all', () => {
     expect(scripts['verify:all']).toContain('npm run verify');
+    // The smoke test skips itself without a daemon, so the rung must build first.
+    expect(scripts['verify:all']).toContain('docker build --target server');
+    expect(scripts['verify:all']).toContain('docker build --target line-mcp');
     expect(scripts['verify:all']).toContain('tests/docker/docker-smoke.test.ts');
     expect(scripts['verify:all']).toContain('tests/artifacts/line-client-pack.test.ts');
+    expect(scripts['verify:all'].match(/--reporter=dot/g)).toHaveLength(2);
   });
 
   it('keeps the changed-file logic in a script, not a shell one-liner', () => {
@@ -65,12 +71,8 @@ describe('verification entrypoints', () => {
   it('documents the verification ladder and its measured rungs', () => {
     const guide = readFileSync('CLAUDE.md', 'utf8');
     expect(guide).toContain('Verification ladder');
-    for (const command of [
-      'npm run verify:changed',
-      'npm run verify',
-      'npm run verify:all',
-      'npm run test:e2e',
-    ]) {
+    expect(guide).toMatch(/npm run verify(?![:\w])/);
+    for (const command of ['npm run verify:changed', 'npm run verify:all', 'npm run test:e2e']) {
       expect(guide).toContain(command);
     }
     expect(guide).toContain('Measured');
@@ -78,16 +80,36 @@ describe('verification entrypoints', () => {
 });
 
 describe('verify:changed selection', () => {
-  it('lints only TypeScript files, including untracked ones, once each', () => {
+  it('lints changed JS/TS files, including untracked ones, once each', () => {
     expect(
       selectLintTargets(
-        'packages/a/src/x.ts\nREADME.md\npackages/a/src/x.ts\n',
-        'tests/new.test.ts\nnotes.md\n',
+        'packages/a/src/x.ts\0README.md\0packages/a/src/x.ts\0',
+        'scripts/tool.mjs\0tests/new.test.ts\0notes.md\0',
       ),
-    ).toEqual(['packages/a/src/x.ts', 'tests/new.test.ts']);
+    ).toEqual(['packages/a/src/x.ts', 'scripts/tool.mjs', 'tests/new.test.ts']);
   });
 
   it('returns no targets when nothing changed', () => {
-    expect(selectLintTargets('', '\n')).toEqual([]);
+    expect(selectLintTargets('', '\0')).toEqual([]);
+  });
+
+  it('distinguishes an empty diff from a changed file', () => {
+    expect(hasChangedFiles('', '')).toBe(false);
+    expect(hasChangedFiles('\0', '\0')).toBe(false);
+    expect(hasChangedFiles('README.md\0', '')).toBe(true);
+  });
+
+  it('resolves origin/main first and falls back to HEAD with a warning flag', () => {
+    expect(
+      resolveBase((args: string[]) =>
+        args[0] === 'merge-base' && args[1] === 'origin/main' ? 'abc\n' : null,
+      ),
+    ).toEqual({ base: 'abc', ref: 'origin/main', fallback: false });
+
+    expect(
+      resolveBase((args: string[]) => (args[0] === 'rev-parse' ? 'def\n' : null)),
+    ).toEqual({ base: 'def', ref: 'HEAD', fallback: true });
+
+    expect(resolveBase(() => null)).toBeNull();
   });
 });
