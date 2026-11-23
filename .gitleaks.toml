@@ -1,0 +1,20 @@
+# Secret-scan configuration for the LINE MCP repository.
+#
+# Extends the gitleaks default rules. The allowlist covers the fixed synthetic
+# signing secret used by the token-codec unit tests. It is line-scoped, so a
+# real credential added elsewhere in that file still fails the scan.
+#
+# The CI scan covers the pull-request or push commit range, so findings in
+# files that were removed before that range are outside it. The one-time
+# full-history scan required by issue #100 was run, and its results were
+# reported privately to the owner.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Token-codec unit test: only the line declaring the fixed synthetic SECRET used to sign in-process test tokens is allowed; it is not a credential."
+condition = "AND"
+regexTarget = "line"
+paths = ['''^packages/mcp-runtime/src/token-codec\.test\.ts$''']
+regexes = ['''const SECRET = 'test-secret-0123456789';''']

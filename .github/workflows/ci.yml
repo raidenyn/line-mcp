@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   # Conventional Commits gate: validates PR commit messages (range), the
   # squash-merge PR title, and (on push to main) the new commits — including
@@ -51,6 +54,54 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # gitleaks scans the pull-request / push range, so the checkout
+          # needs the history behind both endpoints.
+          fetch-depth: 0
+
+      - name: Secret scan (gitleaks, changed commits)
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          GITLEAKS_VERSION: 8.30.1
+          # Pinned release asset digest, not the release's checksums file (which
+          # comes from the same mutable release and so cannot prove integrity).
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          arch="linux_x64"
+          asset="gitleaks_${GITLEAKS_VERSION}_${arch}.tar.gz"
+          release="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -sSfLO "${release}/${asset}"
+          echo "${GITLEAKS_SHA256}  ${asset}" | sha256sum -c -
+          tar -xzf "${asset}" -C "$RUNNER_TEMP" gitleaks
+          rm -f "${asset}"
+
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base_sha="$PR_BASE_SHA"
+            head_sha="$PR_HEAD_SHA"
+          else
+            base_sha="$PUSH_BEFORE_SHA"
+            head_sha="$PUSH_HEAD_SHA"
+          fi
+          if [ -z "$base_sha" ] || [ "$base_sha" = "0000000000000000000000000000000000000000" ]; then
+            # Initial push: scan the pushed commit only, never all of history.
+            log_opts="-1 ${head_sha}"
+          elif git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+            log_opts="${base_sha}..${head_sha}"
+          else
+            echo "::error::gitleaks base commit ${base_sha} is not in the checkout"
+            exit 1
+          fi
+
+          "$RUNNER_TEMP/gitleaks" git \
+            --config .gitleaks.toml \
+            --redact \
+            --log-opts="$log_opts" \
+            --verbose
 
       - uses: actions/setup-node@v7
         with:
