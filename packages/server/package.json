@@ -18,7 +18,7 @@
   ],
   "type": "commonjs",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@raidenyn/bank-mcp": "^0.1.0",
     "@raidenyn/line-client": "^0.1.0",
     "@raidenyn/line-client-sqlite": "^0.1.0",
