@@ -16,7 +16,7 @@ npm run clean        # tsc -b --clean
 npm start            # composed server: node packages/server/dist/cli.js (HTTP MCP on localhost:3000)
 node packages/line-mcp/dist/cli.js                       # standalone messenger server
 npm run lint         # eslint .
-npm run verify       # pre-PR gate: lint, one tsc -b, unit/architecture/release/smoke
+npm run verify       # pre-PR gate: lint, one tsc -b, strict OpenSpec validation, unit/architecture/release/smoke
 npm run verify:changed # inner loop: changed/untracked .ts lint + affected tests
 npm run verify:all   # verify + Docker smoke + packed line-client artifact check
 npm run test:unit    # in-process unit / contract / migration + import-boundary tests
@@ -55,9 +55,8 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 **Pre-PR gate (mandatory)**
 
 - Always, before creating or updating any PR: `npm run verify` — lint, one
-  `tsc -b`, then the unit/architecture/release suites and the mock-backed
-  smoke suite. It never triggers a second build. Also run
-  `npx openspec validate --all --strict`.
+  `tsc -b`, strict OpenSpec validation, then the unit/architecture/release
+  suites and the mock-backed smoke suite. It never triggers a second build.
 - Touched `Dockerfile` or `docker-compose.yml`, or line-client packaging,
   vendoring, or `assets` → run `npm run verify:all` instead: it adds the Docker
   smoke and the packed-artifact checks.

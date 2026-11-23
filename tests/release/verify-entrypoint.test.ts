@@ -23,6 +23,8 @@ describe('verification entrypoints', () => {
     expect(scripts.verify.match(/npm run build/g)).toHaveLength(1);
     // The single build must go through the npm script, not an inline second one.
     expect(scripts.verify).not.toContain('tsc -b');
+    // #118 made strict OpenSpec validation part of the pre-PR gate.
+    expect(scripts.verify).toContain('npx openspec validate --all --strict');
 
     const tests = scripts.verify.slice(scripts.verify.indexOf('vitest run'));
     expect(tests).toContain('--reporter=dot');
