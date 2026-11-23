@@ -1,0 +1,10 @@
+#!/bin/sh
+# Secret scanning for staged changes. Contributors without gitleaks are never
+# blocked; CI runs the same scan over every pull-request range.
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not installed; skipping staged secret scan" >&2
+  exit 0
+fi
+
+gitleaks git --staged --pre-commit --redact --config .gitleaks.toml

@@ -7,7 +7,9 @@ npm packages and semantic-release never commits version or changelog files.
 ## Commit Policy
 
 Commits and PR titles use `type(scope?): subject`. The Husky `commit-msg` hook
-provides local feedback, and CI validates every PR commit plus its title.
+provides local feedback, and CI validates every PR commit plus its title. The
+Husky `pre-commit` hook also scans staged changes with gitleaks when the binary
+is installed, and CI repeats that scan over every PR range.
 The three merge-subject prefixes (`Merge branch`, `Merge pull request`,
 `Merge remote-tracking branch`) are exempt wherever commitlint runs, including
 the PR title check. That is a message-based heuristic: a handwritten message or

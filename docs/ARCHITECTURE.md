@@ -161,6 +161,7 @@ Both run as the non-root `node` user, expose `/data` as a volume, and healthchec
 
 ## Tests
 
+- `tests/release/*` — documentation and repository-policy contracts: the release runbook, the public-image notices, the committed agent permission policy, and the secret-scanning wiring (`.claude/settings.json`, `.gitleaks.toml`, the Husky `pre-commit` hook, and the `check` job).
 - `packages/**/*.test.ts` — unit / contract / migration tests co-located with each package. Run by `npm run test:unit` alongside `tests/architecture`. Includes the issue #61 regex-containment regressions in `@raidenyn/bank-mcp`: `regex-executor.test.ts` exercises per-operation timeout, worker-pool bounds, and idempotent close; the co-located transaction-parser/preset-store/register-tools suites cover the routed call sites; `packages/server/src/startup.test.ts` asserts the executor is constructed between the bank store and the sync loop and that its close is idempotent across repeated `stop()` calls; `packages/server/src/cli.test.ts` covers `resolveRegexTimeoutMs` parsing (unset → `undefined`, non-numeric → `NaN`, otherwise the parsed number — the executor does the clamping).
 - `tests/architecture/import-boundaries.test.ts` — enforces the package dependency graph above.
 - `tests/release/openspec-tasks.test.ts` — requires a `Verify:` line on every unchecked task in every non-archived OpenSpec change.
