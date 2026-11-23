@@ -40,11 +40,11 @@
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.62.1",
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.11",
     "yaml": "2.9.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@raidenyn/line-client": "^0.1.0",
     "@raidenyn/line-client-sqlite": "^0.1.0",
     "@raidenyn/mcp-runtime": "^0.1.0",
