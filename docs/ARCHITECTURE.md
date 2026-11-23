@@ -1,7 +1,7 @@
 # LINE MCP Server — Architecture Reference
 
 > This is the deep architecture reference for this repository;
-> `CLAUDE.md` is the operational entry point for agents.
+> `AGENTS.md` is the operational entry point for agents; `CLAUDE.md` imports it.
 >
 > **Maintenance rule:** any PR that changes packages, tools, guides,
 > auth, persistence, or Docker must update this file in the same PR.
