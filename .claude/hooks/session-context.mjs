@@ -17,6 +17,9 @@ export const MAX_LINES = 30;
 const STATUS_LINES = 8;
 const DIFF_FILES = 6;
 const OPENSPEC_LINES = 6;
+// All probes together stay well inside the 20 s hook timeout of both hosts;
+// a killed hook would lose the whole block, not just the slow probe.
+const BUDGET_MS = 12_000;
 
 /**
  * Run a command and return trimmed stdout, or null on any failure.
@@ -24,10 +27,11 @@ const OPENSPEC_LINES = 6;
  * @param {string} command
  * @param {string[]} args
  * @param {string} cwd
- * @param {number} [timeout]
+ * @param {number} timeout
  * @returns {string | null}
  */
-function capture(command, args, cwd, timeout = 3_000) {
+function capture(command, args, cwd, timeout) {
+  if (timeout <= 0) return null;
   try {
     const result = spawnSync(command, args, {
       cwd,
@@ -61,7 +65,9 @@ function capture(command, args, cwd, timeout = 3_000) {
  * @returns {Probes}
  */
 export function gather(root = REPO_ROOT) {
-  const git = (...args) => capture('git', args, root);
+  const deadline = Date.now() + BUDGET_MS;
+  const within = (ms) => Math.min(ms, deadline - Date.now());
+  const git = (...args) => capture('git', args, root, within(3_000));
   const branch = git('branch', '--show-current') || null;
   const head = git('rev-parse', '--short', 'HEAD');
   const status = git('status', '--short');
@@ -72,15 +78,15 @@ export function gather(root = REPO_ROOT) {
     const base = git('merge-base', ref, 'HEAD');
     if (base) {
       baseRef = ref;
-      diffStat = git('diff', '--stat=100', base);
+      diffStat = git('diff', '--stat=100', '--stat-graph-width=10', base);
       break;
     }
   }
 
   const localOpenspec = resolve(root, 'node_modules/.bin/openspec');
   const openspec = existsSync(localOpenspec)
-    ? capture(localOpenspec, ['list'], root, 8_000)
-    : capture('openspec', ['list'], root, 8_000);
+    ? capture(localOpenspec, ['list'], root, within(6_000))
+    : capture('openspec', ['list'], root, within(6_000));
 
   let ci = null;
   if (branch) {
@@ -88,7 +94,7 @@ export function gather(root = REPO_ROOT) {
       'gh',
       ['run', 'list', '--branch', branch, '--limit', '1', '--json', 'workflowName,status,conclusion,createdAt,headSha,url'],
       root,
-      5_000,
+      within(5_000),
     );
     ci = summarizeRun(json);
   }

@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 // Plain ESM without declarations: the hook is a script, not part of the
@@ -21,6 +22,22 @@ describe('lint-on-edit target selection', () => {
     expect(lintTarget({ cwd: ROOT, tool_input: { file_path: 'scripts/x.mts' } }, ROOT)).toBe('scripts/x.mts');
     // OpenCode's edit tools name the file `path`.
     expect(lintTarget({ cwd: ROOT, tool_input: { path: 'tests/a.test.ts' } }, ROOT)).toBe('tests/a.test.ts');
+  });
+
+  it('resolves a checkout reached through a symlink', () => {
+    const link = join(mkdtempSync(join(tmpdir(), 'lint-hook-')), 'repo');
+    try {
+      symlinkSync(ROOT, link);
+      expect(lintTarget({ tool_input: { file_path: join(link, 'packages/server/src/cli.ts') } }, link)).toBe(
+        'packages/server/src/cli.ts',
+      );
+      // The script's root is the real path; the payload may use the link.
+      expect(lintTarget({ cwd: link, tool_input: { file_path: 'packages/new-file.ts' } }, ROOT)).toBe(
+        'packages/new-file.ts',
+      );
+    } finally {
+      rmSync(resolve(link, '..'), { recursive: true, force: true });
+    }
   });
 
   it('skips other files, dist, node_modules, LTSM assets and paths outside the repository', () => {
@@ -90,8 +107,21 @@ describe('lint-on-edit hook script', () => {
     expect(result.status).toBe(2);
     expect(result.stderr).toMatch(/fixture\.ts:3:7 .*unused.*\(@typescript-eslint\/no-unused-vars\)/);
     expect(result.stderr.trim().split('\n').length).toBeLessThanOrEqual(MAX_LINES);
-    // `prefer-const` is auto-fixable, so --fix rewrote the file.
+    // `prefer-const` is auto-fixable, so --fix rewrote the file and says so.
     expect(readFileSync(file, 'utf8')).toContain('const fixable = 1;');
+    expect(result.stderr).toMatch(/ESLint --fix rewrote .*fixture\.ts; re-read it/);
+  });
+
+  it('exits 0 and reports a --fix rewrite as PostToolUse additionalContext', () => {
+    dir = mkdtempSync(join(ROOT, 'tests/harness/.fixture-'));
+    const file = join(dir, 'fixable.ts');
+    writeFileSync(file, 'let fixable = 1;\nexport const used = fixable;\n');
+    const result = runHook({ cwd: ROOT, tool_input: { file_path: file } });
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    const output = JSON.parse(result.stdout);
+    expect(output.hookSpecificOutput.hookEventName).toBe('PostToolUse');
+    expect(output.hookSpecificOutput.additionalContext).toMatch(/ESLint --fix rewrote .*fixable\.ts/);
   });
 
   it('exits 0 for a clean file', () => {
@@ -101,5 +131,6 @@ describe('lint-on-edit hook script', () => {
     const result = runHook({ cwd: ROOT, tool_input: { file_path: file } });
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
+    expect(result.stdout).toBe('');
   });
 });

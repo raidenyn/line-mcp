@@ -9,9 +9,14 @@
 //   - once per session, .claude/hooks/session-context.mjs is run and its
 //     output appended to the system prompt (Claude Code adds SessionStart
 //     stdout to the context).
-// Checked against OpenCode 2.3.2 (plugin API 2.0.14): the edit tools are
-// `write` and `edit` with a repository-relative `path`; `execute.after` may
-// replace `result`; the session `context` hook may push to `system`.
+// Checked against OpenCode 2.3.2 (plugin API @opencode/plugin 2.0.14): the edit
+// tools are `write` and `edit` with a `path` relative to the session directory,
+// and `patch` (alias `apply_patch`, used for GPT models) with `patchText`;
+// `execute.after` may replace `result`; the session `context` hook may push to
+// `system`, which is rebuilt for every request. The hand-written `Ctx` types
+// below mirror dist/promise/tool.d.ts and dist/promise/session.d.ts of that
+// package. Child (subagent) sessions get no context block, matching Claude
+// Code, whose SessionStart does not fire for subagents.
 // No import from @opencode/plugin: `Plugin.define` is the identity function,
 // and keeping the file dependency-free lets Vitest import it.
 // Every hook is guarded and degrades to a no-op; nothing here throws into
@@ -85,19 +90,29 @@ interface ToolResult {
   metadata?: unknown;
 }
 
-/** Copy of a tool result with `text` appended to what the model reads. */
+/**
+ * Copy of a tool result with `text` appended to what the model reads. A result
+ * without content is read from `output`, so that is kept as the first part.
+ */
 export function appendText(result: ToolResult | undefined, text: string): ToolResult {
   const part: TextContent = { type: 'text', text };
   const base = result ?? {};
   const content = base.content;
-  if (typeof content === 'string') return { ...base, content: `${content}\n\n${text}` };
-  return { ...base, content: [...(Array.isArray(content) ? content : []), part] };
+  if (typeof content === 'string' && content.length > 0) return { ...base, content: `${content}\n\n${text}` };
+  if (Array.isArray(content) && content.length > 0) return { ...base, content: [...content, part] };
+  const output = base.output;
+  if (output === undefined || output === null || output === '') return { ...base, content: [part] };
+  const original = typeof output === 'string' ? output : JSON.stringify(output);
+  return { ...base, content: [{ type: 'text', text: original }, part] };
 }
 
 interface Ctx {
   location?: { directory?: string };
   tool: { hook: (name: 'execute.after', cb: (event: AfterEvent) => Promise<void> | void) => Promise<unknown> };
-  session: { hook: (name: 'context', cb: (event: ContextEvent) => Promise<void> | void) => Promise<unknown> };
+  session: {
+    hook: (name: 'context', cb: (event: ContextEvent) => Promise<void> | void) => Promise<unknown>;
+    get?: (input: { sessionID: string }) => Promise<{ parentID?: string | null } | undefined>;
+  };
 }
 
 interface AfterEvent {
@@ -110,6 +125,27 @@ interface AfterEvent {
 interface ContextEvent {
   sessionID: string;
   system: Array<{ type: 'text'; text: string }>;
+}
+
+/** `hookSpecificOutput.additionalContext` from a hook's JSON stdout, if any. */
+export function additionalContext(stdout: string): string | null {
+  if (!stdout.trim()) return null;
+  try {
+    const text = JSON.parse(stdout)?.hookSpecificOutput?.additionalContext;
+    return typeof text === 'string' && text.trim() ? text.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** True for a subagent session; unknown counts as a top-level session. */
+async function isChild(ctx: Ctx, sessionID: string): Promise<boolean> {
+  try {
+    const info = await ctx.session.get?.({ sessionID });
+    return typeof info?.parentID === 'string' && info.parentID.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export function createPlugin(root = REPO_ROOT, run: HookRunner = runHook(root)) {
@@ -127,6 +163,10 @@ export function createPlugin(root = REPO_ROOT, run: HookRunner = runHook(root)) 
             for (const file of editedPaths(event.tool, event.input)) {
               const res = await run(LINT_HOOK, { cwd, tool_input: { file_path: file } }, LINT_TIMEOUT_MS);
               if (res.code === 2 && res.stderr.trim()) feedback.push(res.stderr.trim());
+              else if (res.code === 0) {
+                const note = additionalContext(res.stdout);
+                if (note) feedback.push(note);
+              }
             }
             if (feedback.length > 0) event.result = appendText(event.result, feedback.join('\n'));
           } catch {
@@ -143,9 +183,13 @@ export function createPlugin(root = REPO_ROOT, run: HookRunner = runHook(root)) 
             let pending = contexts.get(event.sessionID);
             if (!pending) {
               if (contexts.size >= MAX_SESSIONS) contexts.clear();
-              pending = run(CONTEXT_HOOK, { cwd, hook_event_name: 'SessionStart' }, CONTEXT_TIMEOUT_MS).then(
-                (res) => (res.code === 0 ? res.stdout.trim() : ''),
-                () => '',
+              pending = isChild(ctx, event.sessionID).then((child) =>
+                child
+                  ? ''
+                  : run(CONTEXT_HOOK, { cwd, hook_event_name: 'SessionStart' }, CONTEXT_TIMEOUT_MS).then(
+                      (res) => (res.code === 0 ? res.stdout.trim() : ''),
+                      () => '',
+                    ),
               );
               contexts.set(event.sessionID, pending);
             }

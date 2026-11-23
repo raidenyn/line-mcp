@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import plugin from '../../.opencode/plugin/line-mcp-harness';
 import {
+  additionalContext,
   appendText,
   createPlugin,
   editedPaths,
@@ -14,14 +15,17 @@ import {
 type Callback = (event: unknown) => Promise<void> | void;
 type Ctx = Parameters<ReturnType<typeof createPlugin>['setup']>[0];
 
-function fakeContext() {
+function fakeContext(parents: Record<string, string> = {}) {
   const hooks: Record<string, Callback> = {};
   return {
     hooks,
     ctx: {
       location: { directory: '/repo' },
       tool: { hook: async (name: string, cb: Callback) => void (hooks[`tool.${name}`] = cb) },
-      session: { hook: async (name: string, cb: Callback) => void (hooks[`session.${name}`] = cb) },
+      session: {
+        hook: async (name: string, cb: Callback) => void (hooks[`session.${name}`] = cb),
+        get: async ({ sessionID }: { sessionID: string }) => ({ id: sessionID, parentID: parents[sessionID] }),
+      },
     },
   };
 }
@@ -58,6 +62,47 @@ describe('OpenCode harness plugin', () => {
     });
     expect(appendText({ content: 'ok', metadata: { a: 1 } }, 'lint')).toEqual({ content: 'ok\n\nlint', metadata: { a: 1 } });
     expect(appendText(undefined, 'lint')).toEqual({ content: [{ type: 'text', text: 'lint' }] });
+  });
+
+  it('keeps an output-only tool result readable when appending', () => {
+    // A result without content is read from `output`; keep it as the first part.
+    expect(appendText({ output: 'Edited a.ts (1 replacement)', metadata: {} }, 'lint')).toEqual({
+      output: 'Edited a.ts (1 replacement)',
+      metadata: {},
+      content: [
+        { type: 'text', text: 'Edited a.ts (1 replacement)' },
+        { type: 'text', text: 'lint' },
+      ],
+    });
+    expect(appendText({ output: { ok: true }, content: [] }, 'lint').content).toEqual([
+      { type: 'text', text: '{"ok":true}' },
+      { type: 'text', text: 'lint' },
+    ]);
+  });
+
+  it('reads additionalContext from hook JSON output', () => {
+    expect(
+      additionalContext('{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"rewrote a.ts"}}\n'),
+    ).toBe('rewrote a.ts');
+    expect(additionalContext('')).toBeNull();
+    expect(additionalContext('plain text')).toBeNull();
+    expect(additionalContext('{}')).toBeNull();
+  });
+
+  it('appends a --fix rewrite note from a clean lint run', async () => {
+    const run = async (): Promise<HookRun> => ({
+      code: 0,
+      stdout: '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"ESLint --fix rewrote a.ts"}}\n',
+      stderr: '',
+    });
+    const { ctx, hooks } = fakeContext();
+    await createPlugin('/repo', run).setup(ctx as unknown as Ctx);
+    const event = { tool: 'write', input: { path: 'a.ts' }, status: 'completed', result: { content: [{ type: 'text', text: 'Wrote' }] } };
+    await hooks['tool.execute.after'](event);
+    expect(event.result.content).toEqual([
+      { type: 'text', text: 'Wrote' },
+      { type: 'text', text: 'ESLint --fix rewrote a.ts' },
+    ]);
   });
 
   it('feeds lint errors back into the edit tool result with the Claude payload shape', async () => {
@@ -105,6 +150,20 @@ describe('OpenCode harness plugin', () => {
     expect(runs).toBe(1);
     await hooks['session.context']({ sessionID: 's2', system: [] });
     expect(runs).toBe(2);
+  });
+
+  it('gives subagent (child) sessions no context block, like Claude Code', async () => {
+    let runs = 0;
+    const run = async (): Promise<HookRun> => {
+      runs += 1;
+      return { code: 0, stdout: '# Session context (line-mcp)\n', stderr: '' };
+    };
+    const { ctx, hooks } = fakeContext({ child: 'parent' });
+    await createPlugin('/repo', run).setup(ctx as unknown as Ctx);
+    const event = { sessionID: 'child', system: [] as unknown[] };
+    await hooks['session.context'](event);
+    expect(event.system).toEqual([]);
+    expect(runs).toBe(0);
   });
 
   it('never throws into OpenCode when a hook script fails', async () => {

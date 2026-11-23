@@ -5,12 +5,14 @@
 //   { "cwd": "...", "tool_input": { "file_path": "..." } }
 // For a TypeScript file inside the repository it runs `eslint --fix` on that
 // one file. Errors that remain are printed on stderr (at most MAX_LINES) and
-// the script exits 2, which both hosts feed back to the agent. Everything else
+// the script exits 2, which both hosts feed back to the agent. When --fix
+// changed the file, a one-line note says so (on exit 0 as PostToolUse JSON
+// `additionalContext` on stdout). Everything else
 // (other files, a missing or crashing ESLint, a timeout) exits 0 silently, so
 // the hook never blocks work it cannot judge.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
@@ -19,6 +21,26 @@ const TIMEOUT_MS = 20_000;
 const LINTABLE = /\.(?:c|m)?ts$/;
 const EXCLUDED_SEGMENTS = new Set(['dist', 'node_modules', '.git']);
 const EXCLUDED_PREFIX = 'packages/line-client/assets/ltsm/';
+
+/**
+ * Canonical path, so a checkout reached through a symlink (or macOS
+ * /tmp -> /private/tmp) still compares equal to the script's own location.
+ * A file that does not exist yet keeps its name under its real parent.
+ *
+ * @param {string} path absolute path
+ * @returns {string}
+ */
+function canonical(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return path;
+    }
+  }
+}
 
 /**
  * Return the repository-relative path to lint, or null when the payload does
@@ -33,8 +55,8 @@ export function lintTarget(payload, root = REPO_ROOT) {
   const file = input?.file_path ?? input?.filePath ?? input?.path;
   if (typeof file !== 'string' || file.length === 0 || !LINTABLE.test(file)) return null;
   const cwd = /** @type {any} */ (payload)?.cwd;
-  const absolute = resolve(typeof cwd === 'string' && cwd ? cwd : root, file);
-  const rel = relative(root, absolute);
+  const absolute = canonical(resolve(typeof cwd === 'string' && cwd ? cwd : root, file));
+  const rel = relative(canonical(root), absolute);
   if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
   const posix = rel.split(sep).join('/');
   if (posix.startsWith(EXCLUDED_PREFIX)) return null;
@@ -79,19 +101,53 @@ export function formatErrors(json, file, maxLines = MAX_LINES) {
 /**
  * @param {string} file repository-relative path
  * @param {string} [root]
- * @returns {string[]} feedback lines, empty when clean or when ESLint could not judge
+ * @returns {{ errors: string[], fixed: boolean }} remaining errors (empty when
+ *   clean or when ESLint could not judge) and whether --fix rewrote the file
  */
 export function lintFile(file, root = REPO_ROOT) {
-  if (!existsSync(resolve(root, file))) return [];
-  const result = spawnSync(
-    'npx',
-    ['--no-install', 'eslint', '--fix', '--format', 'json', '--', file],
-    { cwd: root, encoding: 'utf8', timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
-  );
+  const path = resolve(root, file);
+  if (!existsSync(path)) return { errors: [], fixed: false };
+  const before = readFileSync(path, 'utf8');
+  // The local binary avoids npx start-up and lets the timeout kill ESLint
+  // itself rather than an npx parent that leaves it holding the pipe.
+  const local = resolve(root, 'node_modules/.bin/eslint');
+  const [command, prefix] = existsSync(local) ? [local, []] : ['npx', ['--no-install', 'eslint']];
+  const result = spawnSync(command, [...prefix, '--fix', '--format', 'json', '--', file], {
+    cwd: root,
+    encoding: 'utf8',
+    timeout: TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  let fixed;
+  try {
+    fixed = readFileSync(path, 'utf8') !== before;
+  } catch {
+    fixed = false;
+  }
   // 0 = clean, 1 = errors remain; 2, a signal or a timeout means ESLint itself
   // failed, which is not the agent's edit to fix.
-  if (result.status !== 1) return [];
-  return formatErrors(result.stdout ?? '', file);
+  if (result.status !== 1) return { errors: [], fixed };
+  return { errors: formatErrors(result.stdout ?? '', file), fixed };
+}
+
+/**
+ * PostToolUse JSON output that hands `fixedNote` to the agent on exit 0.
+ *
+ * @param {string} file
+ */
+export function fixedOutput(file) {
+  return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: fixedNote(file) } };
+}
+
+/**
+ * The note shown when --fix changed the file, so the agent re-reads it
+ * before its next exact-match edit.
+ *
+ * @param {string} file
+ * @returns {string}
+ */
+export function fixedNote(file) {
+  return `ESLint --fix rewrote ${file}; re-read it before editing it again.`;
 }
 
 function main() {
@@ -103,8 +159,14 @@ function main() {
   }
   const file = lintTarget(payload);
   if (!file) return 0;
-  const lines = lintFile(file);
-  if (lines.length === 0) return 0;
+  const { errors, fixed } = lintFile(file);
+  if (errors.length === 0) {
+    // Claude Code passes `additionalContext` to the model; the OpenCode plugin
+    // reads the same JSON.
+    if (fixed) process.stdout.write(`${JSON.stringify(fixedOutput(file))}\n`);
+    return 0;
+  }
+  const lines = fixed ? [...errors.slice(0, MAX_LINES - 1), fixedNote(file)] : errors;
   process.stderr.write(`${lines.join('\n')}\n`);
   return 2;
 }
