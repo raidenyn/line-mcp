@@ -272,7 +272,7 @@ The repository ships four distinct test surfaces:
 
 `.github/workflows/ci.yml` runs four parallel jobs on pull requests and pushes to `main`:
 
-- **check** — `npm ci` → lint → `tsc -b` → unit/contract/migration tests → import-boundary test → `npm ls --all`.
+- **check** — `npm ci` → lint → `tsc -b` → unit/contract/migration tests → `openspec validate --all --strict` → import-boundary test → `npm ls --all`.
 - **smoke** — `npm ci` → `npm run test:smoke`: builds the workspace once, then runs both compiled CLI targets against the strict local LINE mock. No credentials, no Docker.
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
 - **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.

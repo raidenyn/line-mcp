@@ -53,6 +53,7 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 
 - Always, before creating any PR:
   `npm run lint && npm run build && npm run test:unit && npm run test:smoke`
+  and `npx openspec validate --all --strict`
 - Touched `Dockerfile` or `docker-compose.yml` → also
   `npx vitest run tests/docker/docker-smoke.test.ts`
 - Touched line-client packaging, vendoring, or `assets` → also
@@ -103,8 +104,13 @@ real LINE authorization headers, so only point it at a trusted endpoint.
 - `docs/ARCHITECTURE.md` — packages, guides, auth, persistence, Docker, test
   details. **Update it in the same PR as any structural change.**
 - `specs/*.md` — reverse-engineered LINE protocol reference.
-- `docs/superpowers/specs/` + `docs/superpowers/plans/` — design docs and
-  implementation plans; new designs go here.
+- `openspec/specs/` — behavioral source of truth, validated in CI with
+  `npx openspec validate --all --strict`.
+- `openspec/changes/` — active designs and implementation plans; new designs go
+  here. Keep each change's `handoff.md` current before ending a session
+  (template: `openspec/templates/handoff.md`).
+- `docs/superpowers/specs/` + `docs/superpowers/plans/` — frozen archive; do
+  not add new designs here.
 - `packages/line-client/THIRD_PARTY_NOTICES.md` — LTSM distribution policy.
 - `docs/RELEASING.md` — commit enforcement, version policy, release workflow,
   and the one-time `v0.1.0` bootstrap runbook.

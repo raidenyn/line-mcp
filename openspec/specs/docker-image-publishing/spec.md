@@ -95,16 +95,24 @@ or when the tag is not `vX.Y.Z`.
 - **THEN** the workflow fails before any image push
 - **AND** no tag is created or moved
 
-### Requirement: Release tag scheme
+### Requirement: Release publishes version and commit tags
 
 A release `vX.Y.Z` MUST publish the tag `X.Y.Z` and `sha-<short>` to both
-images, and MUST publish `X.Y`, `latest`, and `X` only when that version is the
+images.
+
+#### Scenario: A release publishes its version tag
+
+- **WHEN** release `v1.4.2` is published
+- **THEN** `1.4.2` and `sha-<short>` resolve to the same digest for both images
+
+### Requirement: Moving tags follow the newest stable release
+
+A release MUST publish `X.Y`, `latest`, and `X` only when that version is the
 newest stable release. Newness MUST be judged against the remote's stable tags
 together with the version being released, because its own tag does not yet
 exist. `X` MUST NOT be published while the major version is `0`. `latest`,
 `X.Y`, and `X` MUST NOT move backwards. The newest-tag comparison MUST ignore
-prerelease suffixes. A release build MUST fail before any image push if any of
-its computed tags starts with `pr-`.
+prerelease suffixes.
 
 #### Scenario: Release tags are complete for the newest release
 
@@ -130,6 +138,11 @@ its computed tags starts with `pr-`.
 - **THEN** both images gain `1.3.0` and `sha-<short>`
 - **AND** `latest`, `1.4`, `1.3`, and `1` are unchanged
 
+### Requirement: A release build never pushes a pull-request tag
+
+A release build MUST fail before any image push if any of its computed tags
+starts with `pr-`.
+
 #### Scenario: A release build never pushes a pull-request tag
 
 - **WHEN** a release build's computed tags include a tag starting with `pr-`
@@ -154,11 +167,7 @@ immutable deployment pin.
 The workflow MUST NOT publish for ordinary `pull_request` activity. It MAY
 publish a pull request only when the `publish-docker` label is added, the pull
 request's head repository is this repository, and the owner approves the
-environment deployment. Fork-origin pull requests MUST be refused. A
-pull-request build MUST push only the tags `pr-<number>` and `sha-<short>`, and
-MUST verify before pushing that every tag matches
-`^(pr-[0-9]+|sha-[0-9a-f]{7})$`. It MUST NOT create or move `latest`, `X.Y`,
-`X`, `X.Y.Z`, or any other tag.
+environment deployment. Fork-origin pull requests MUST be refused.
 
 #### Scenario: A labeled same-repository PR publishes test images
 
@@ -177,6 +186,13 @@ MUST verify before pushing that every tag matches
 - **WHEN** the `publish-docker` label is added to a pull request whose head
   repository is a fork
 - **THEN** the workflow does not publish and reports that forks are unsupported
+
+### Requirement: Pull-request builds push only pull-request tags
+
+A pull-request build MUST push only the tags `pr-<number>` and `sha-<short>`,
+and MUST verify before pushing that every tag matches
+`^(pr-[0-9]+|sha-[0-9a-f]{7})$`. It MUST NOT create or move `latest`, `X.Y`,
+`X`, `X.Y.Z`, or any other tag.
 
 #### Scenario: A tag outside the allowlist fails the build
 
@@ -252,22 +268,33 @@ document `edge`.
   digest-pinning example, and the irreversible-visibility warning
 - **AND** `pr-<number>` described as a test-only tag, and no mention of `edge`
 
-### Requirement: Documented first-publication and release runbook
+### Requirement: Documented first-publication and visibility runbook
 
-`docs/RELEASING.md` MUST document that the first image publication is the
-first `Release` run (or labeled pull-request build, if that comes first) after
-the pipeline lands (the first push creates private packages; only the owner
-changes visibility to public, irreversibly),
-anonymous verification, the owner approval required for every deployment, that
-release images are published only through `Release`, and that the
-`publish-docker` label publishes only `pr-<number>` and `sha-<short>` tags.
-`docs/ARCHITECTURE.md` MUST
-describe the release pipeline, the reusable publication workflow, and its
-`GITHUB_TOKEN` authentication.
+`docs/RELEASING.md` MUST document that the first image publication is the first
+`Release` run (or labeled pull-request build, if that comes first) after the
+pipeline lands, that the first push creates private packages, that only the
+owner changes visibility to public and that this is irreversible, and how to
+verify anonymous pulls.
+
+#### Scenario: A maintainer performs the first publication
+
+- **WHEN** a maintainer follows the first-publication section of the runbook
+- **THEN** they can run the first publication, have the owner flip both packages
+  to public, and verify an anonymous pull
+- **AND** the runbook states that public visibility cannot be undone
+
+### Requirement: Documented release and pull-request publication operations
+
+`docs/RELEASING.md` MUST document the owner approval required for every
+deployment, that release images are published only through `Release`, and that
+the `publish-docker` label publishes only `pr-<number>` and `sha-<short>` tags.
+`docs/ARCHITECTURE.md` MUST describe the release pipeline, the reusable
+publication workflow, and its `GITHUB_TOKEN` authentication.
 
 #### Scenario: A maintainer can publish deliberately
 
 - **WHEN** a maintainer follows the runbook
-- **THEN** they can run a release, publish a labeled PR image, approve either
-  deployment, make both packages public once, and know that public visibility
-  cannot be undone
+- **THEN** they can run a release, publish a labeled PR image, and approve
+  either deployment
+- **AND** they know that release images come only from `Release` and that the
+  label publishes only the two PR tags

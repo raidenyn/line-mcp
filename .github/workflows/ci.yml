@@ -48,8 +48,8 @@ jobs:
         run: git show -s --format=%B "${{ github.sha }}" | npm run commitlint
 
   # Deterministic, merge-blocking gate: lint, composite build, the full
-  # unit/contract/migration suite, the package import-boundary test, and a
-  # dependency-closure check. Requires no LINE credentials and no Docker.
+  # unit/contract/migration suite, strict OpenSpec validation, the package
+  # import-boundary test, and a dependency-closure check. Requires no LINE credentials and no Docker.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -118,6 +118,9 @@ jobs:
 
       - name: Unit / contract / migration tests
         run: npm run test:unit
+
+      - name: Validate OpenSpec specs (strict)
+        run: npx openspec validate --all --strict
 
       - name: Package import-boundary test
         run: npx vitest run tests/architecture/import-boundaries.test.ts
