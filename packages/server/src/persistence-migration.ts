@@ -119,7 +119,6 @@ function updateReportWithRecovery(
     dir,
     `.migration-report.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
   );
-  let writeErr: unknown;
   try {
     const fd = fs.openSync(tmp, 'wx', 0o600);
     try {
@@ -129,10 +128,9 @@ function updateReportWithRecovery(
     }
     fs.renameSync(tmp, reportPath);
   } catch (err) {
-    writeErr = err;
     try { fs.unlinkSync(tmp); } catch { /* best-effort cleanup */ }
+    throw err;
   }
-  if (writeErr !== undefined) throw writeErr;
 }
 
 // Explicit-mapping recovery for rows quarantined by bootstrapPersistence.

@@ -39,7 +39,10 @@ export function loadTemplates(
     throw error;
   }
 
-  const raw = JSON.parse(contents);
+  const raw = JSON.parse(contents) as {
+    currency_aliases?: Record<string, string>;
+    templates?: NamedTemplate[];
+  };
   const rawAliases: Record<string, string> = raw.currency_aliases ?? {};
   const rawTemplates: NamedTemplate[] = raw.templates ?? [];
   const migrated = rawTemplates.map((t) => {

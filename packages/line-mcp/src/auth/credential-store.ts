@@ -203,14 +203,17 @@ export interface CredentialStore {
 export class FileCredentialStore implements CredentialStore {
   constructor(private readonly authStoreDir: string) {}
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async load(mid: string): Promise<Readonly<AuthData> | null> {
     return loadAuthFromDisk(mid, this.authStoreDir);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async list(): Promise<readonly StoredAuthRecord[]> {
     return listStoredAuthRecords(this.authStoreDir);
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async saveAtomic(snapshot: Readonly<AuthData>, displayName?: string): Promise<void> {
     persistAuthData(snapshot, displayName, this.authStoreDir);
   }

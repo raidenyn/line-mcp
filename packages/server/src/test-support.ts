@@ -30,16 +30,16 @@ export function fakeLineApi(): LineApiClient {
   return {
     isAuthenticated: () => true,
     getCompletedAuth: () => null,
-    getProfileDisplayName: async () => 'Test User',
-    waitForPin: async () => null,
-    waitForCompletion: async () => {},
-    login: async () => ({ qrUrl: 'https://example.test/qr' }),
-    listChats: async () => [],
-    getMessages: async () => [],
-    getMessagesInRange: async () => [],
-    getImageBuffer: async () => {
-      throw new Error('fakeLineApi: getImageBuffer is not exercised by this test fixture');
-    },
+    getProfileDisplayName: () => Promise.resolve('Test User'),
+    waitForPin: () => Promise.resolve(null),
+    waitForCompletion: () => Promise.resolve(),
+    login: () => Promise.resolve({ qrUrl: 'https://example.test/qr' }),
+    listChats: () => Promise.resolve([]),
+    getMessages: () => Promise.resolve([]),
+    getMessagesInRange: () => Promise.resolve([]),
+    getImageBuffer: () => Promise.reject(
+      new Error('fakeLineApi: getImageBuffer is not exercised by this test fixture'),
+    ),
   };
 }
 
@@ -51,9 +51,9 @@ export function fakeLineApi(): LineApiClient {
  * in production.
  */
 export function fakeCreateRequestClient(cache: MessageCache) {
-  return async (principal: LinePrincipal): Promise<RequestLineClient> => {
+  return (principal: LinePrincipal): Promise<RequestLineClient> => {
     const api = fakeLineApi();
-    return { api, messages: withMessageCache(api, cache, principal.mid) };
+    return Promise.resolve({ api, messages: withMessageCache(api, cache, principal.mid) });
   };
 }
 

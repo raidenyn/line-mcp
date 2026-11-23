@@ -91,7 +91,7 @@ function parseClaims(raw: unknown): TokenClaims | null {
     subject: c.subject,
     issuer: c.issuer,
     audience: c.audience,
-    scopes: c.scopes as string[],
+    scopes: c.scopes,
     issuedAt: c.issuedAt,
     expiresAt: c.expiresAt,
   };

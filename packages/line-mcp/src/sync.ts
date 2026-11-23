@@ -8,7 +8,7 @@ export interface SyncOptions {
   credentialStore: CredentialStore;
   cache: MessageCache;
   /** The SAME request-client factory registerLineTools' deps use (see request-client.ts). */
-  createRequestClient(principal: LinePrincipal): Promise<RequestLineClient>;
+  readonly createRequestClient: (principal: LinePrincipal) => Promise<RequestLineClient>;
 }
 
 function toPrincipal(mid: string): LinePrincipal {

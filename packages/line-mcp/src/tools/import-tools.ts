@@ -110,7 +110,7 @@ export function registerInitiateImport(
         'The response includes a file_ref_id to use with complete_import.',
       inputSchema: {},
     },
-    async () => {
+    () => {
       const { upload_url } = deps.importService.initiate(context.principal, context.request);
       return { content: [{ type: 'text' as const, text: JSON.stringify({ upload_url }) }] };
     },

@@ -23,6 +23,12 @@ function presetsDir(): string {
   return join(__dirname, '..', 'assets', 'presets');
 }
 
+interface PresetFile {
+  description?: string;
+  templates?: NamedTemplate[];
+  currency_aliases?: Record<string, string>;
+}
+
 export function loadAllPresets(dir = presetsDir()): Record<string, Preset> {
   const result: Record<string, Preset> = {};
   let entries: string[];
@@ -34,7 +40,7 @@ export function loadAllPresets(dir = presetsDir()): Record<string, Preset> {
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
     try {
-      const raw = JSON.parse(readFileSync(join(dir, entry), 'utf8'));
+      const raw = JSON.parse(readFileSync(join(dir, entry), 'utf8')) as PresetFile;
       const name = entry.slice(0, -5);
       result[name] = {
         description: raw.description ?? '',

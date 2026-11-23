@@ -35,7 +35,7 @@ function resolveTestAuth(): ReadonlyArray<{ token: string; authData: AuthData }>
   const authRaw = process.env.LINE_AUTH_DATA;
   if (!token || !authRaw) return undefined;
   try {
-    const authData: AuthData = JSON.parse(authRaw);
+    const authData = JSON.parse(authRaw) as AuthData;
     process.stderr.write('[LINE] Test token seeded from TEST_TOKEN + LINE_AUTH_DATA\n');
     return [{ token, authData }];
   } catch {

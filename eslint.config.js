@@ -19,7 +19,30 @@ module.exports = tseslint.config(
     ],
   },
   js.configs.recommended,
+  // Untyped rules stay on for everything else (JS config, scripts, tests).
+  // A typed project for tests would need a lint-only tsconfig per package
+  // (the build tsconfigs exclude *.test.ts) plus one for the root tests.
+  // Keeping them untyped holds lint at ~6.5 s instead of ~19 s, at the cost of
+  // no type-aware floating-promise checks in tests.
   ...tseslint.configs.recommended,
+  {
+    files: ['packages/*/src/**/*.ts'],
+    ignores: ['**/*.test.ts'],
+    extends: [...tseslint.configs.recommendedTypeChecked],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        // eslint-disable-next-line no-undef -- eslint.config.js is CommonJS; __dirname is the repo root, which projectService needs as the tsconfig search start
+        tsconfigRootDir: __dirname,
+      },
+    },
+    rules: {
+      // Explicit even though recommendedTypeChecked already enables both:
+      // these are the async-safety rules this config exists to guarantee.
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+    },
+  },
   {
     rules: {
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],

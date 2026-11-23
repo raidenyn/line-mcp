@@ -38,6 +38,7 @@ function sendCommandNow(win: Window & typeof globalThis, command: string, payloa
     responseHandlers.set('error', (m) => {
       responseHandlers.delete('response');
       responseHandlers.delete('error');
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- sandbox protocol reports failures as raw values; callers see them unchanged
       reject((m as Record<string, unknown>)['data']);
     });
     win.dispatchEvent(
@@ -93,6 +94,7 @@ function initialize(): Promise<{ win: Window & typeof globalThis }> {
     });
 
     // Serve ltsm.wasm from disk; the bundle calls fetch("ltsm.wasm") with bare fetch
+    // eslint-disable-next-line @typescript-eslint/require-await -- sandbox chains .then() on the result; WASM binary is read synchronously
     const wasmFetch = async (url: string) => {
       if (String(url).endsWith('ltsm.wasm')) {
         return new win.Response(wasmBinary.buffer, { headers: { 'Content-Type': 'application/wasm' } });
