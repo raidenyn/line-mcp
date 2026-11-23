@@ -3,11 +3,23 @@ import { describe, expect, it } from 'vitest';
 
 describe('release documentation', () => {
   it('documents enforced commits and perf releases for contributors', () => {
-    const guide = readFileSync('CLAUDE.md', 'utf8');
+    const guide = readFileSync('AGENTS.md', 'utf8');
     expect(guide).toContain('`perf` → patch');
     expect(guide).toContain('commit-msg');
     expect(guide).toContain('CI');
     expect(guide).toContain('docs/RELEASING.md');
+    expect(guide).toContain('Change type → required process');
+    expect(guide).not.toMatch(/do not create or offer git worktrees/i);
+  });
+
+  it('keeps CLAUDE.md as a thin import plus Claude-specific notes', () => {
+    const claude = readFileSync('CLAUDE.md', 'utf8');
+    expect(claude).toMatch(/^@AGENTS\.md$/m);
+    // Claude-specific notes may follow the import, but the shared guide must
+    // not be duplicated back into CLAUDE.md.
+    expect(claude).not.toContain('## Commands');
+    expect(claude).not.toContain('## Workflow');
+    expect(claude).not.toContain('## Doc map');
   });
 
   it('documents bootstrap and the gated release operations', () => {

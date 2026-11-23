@@ -71,7 +71,7 @@ describe('verification entrypoints', () => {
   });
 
   it('documents the verification ladder and its measured rungs', () => {
-    const guide = readFileSync('CLAUDE.md', 'utf8');
+    const guide = readFileSync('AGENTS.md', 'utf8');
     expect(guide).toContain('Verification ladder');
     expect(guide).toMatch(/npm run verify(?![:\w])/);
     for (const command of ['npm run verify:changed', 'npm run verify:all', 'npm run test:e2e']) {
