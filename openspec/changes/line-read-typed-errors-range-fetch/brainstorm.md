@@ -68,7 +68,7 @@ Alternative A (approved by the user on 2026-11-24):
   - HTTP 401, "not authenticated", pending/failed login → `session_expired`
   - network errors (fetch rejects), HTTP 5xx, any other failure → `unavailable`
   - the original error is kept as `cause`.
-- `complete: false` with `oldestReachedMs` tells the caller the walk ended
+- (superseded by design D4: `coverage` = `complete` | `history_end` | `truncated`) `complete: false` with `oldestReachedMs` tells the caller the walk ended
   before `sinceMs` (history start, LINE no longer serving it, or the walk's
   safety stops).
 - Existing reader methods and `withMessageCache` are unchanged.
@@ -81,6 +81,10 @@ Alternative A (approved by the user on 2026-11-24):
   contact failure fails the whole call; an optional `AbortSignal` lets a
   deadline-enforcing caller prevent late cache writes; the mock acceptance test
   uses the built package so only one signer instance runs.
+- Refined after Sol review round 2: the typed read never waits for a login
+  in progress; refresh outcome is per read; coverage distinguishes
+  `history_end` from `truncated`; non-advancing messages are kept on the new
+  path; abort covers every stage; a size checkpoint guards the 1.5x limit.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the

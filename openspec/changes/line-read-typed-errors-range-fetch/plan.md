@@ -16,15 +16,16 @@
 - Existing behaviour and error message text of `getMessages`, `getMessagesInRange`, `withMessageCache`, login and token refresh stay identical; existing tests are not modified.
 - Error kinds are exactly `'session_expired' | 'unavailable'`; `LineReadError.message` only ever takes the fixed texts of design D2.
 - Commits: Conventional Commits, e.g. `feat(line-client): …`, `test(line-client): …`. End each commit message with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Size: the issue targets ~450 lines (~6 files) and requires a stop at ~1.5×; Task 3 ends with a size checkpoint.
 - TDD per task (red → green). `npm run lint` must pass (the lint-on-edit hook reports errors after each edit; fix them).
 
 ## Review Focus
 
 1. Boundary timestamps: messages at exactly `sinceMs` and `untilMs` are included (Task 3 `includes both bounds`).
 2. Failure on a later page or during contact resolution yields `{ ok: false }`, never a partial `ok: true` (Task 3 `fails whole range when a later page fails`, `fails whole range when contacts fail`).
-3. A refresh outage followed by a 401 is `unavailable`, not `session_expired` (Task 3 `refresh 500 then 401 is unavailable`).
+3. A refresh outage followed by a 401 is `unavailable`, attributed per read even with overlapping reads (Task 2 `refresh failure is returned to each overlapping caller`, Task 3 `refresh 500 then 401 is unavailable`).
 4. A deadline abort after LINE answered writes nothing (Task 5 `no write after abort`).
-5. Safety stops report `complete: false` with the fetched messages (Task 3 `progress-guard stop is incomplete`, `iteration cap is incomplete`).
+5. Safety stops keep received messages and report `truncated`; normal end of history reports `history_end` (Task 3 `progress-guard stop keeps received messages`, `iteration cap is truncated`, `boundary-only previous page is history_end`).
 
 ---
 
@@ -35,86 +36,83 @@
 - Test: `packages/line-client/src/client.test.ts` (new `describe('classifyLineReadError')`)
 
 **Interfaces:**
-- Produces (from `client.ts`): the D1 types; `export function classifyLineReadError(err: unknown, context?: { refreshFailedTransiently?: boolean }): LineReadError`; `export class LineHttpError`, `export class LineApiError` (tests only; not re-exported from `index.ts`). A private-but-exported `class LineNotAuthenticatedError extends Error` with constructor `(message: string, options?: { cause?: unknown })` is declared here too so the classifier can recognise it; Task 2 throws it.
+- Produces (from `client.ts`): the D1 types; `export function classifyLineReadError(err: unknown, context?: { refreshFailedTransiently?: boolean }): LineReadError`; `export class LineHttpError`, `export class LineApiError`, and a new `export class LineNotAuthenticatedError extends Error` with constructor `(message: string, options?: { cause?: unknown })` (all three exported from `client.ts` for tests only, never from `index.ts`).
 
-- [ ] **Step 1: Write failing tests** — `it.each` rows asserting `kind`, exact `message`, and `cause === err`:
-  - `new LineHttpError(401, '/p')` → `session_expired`, `'LINE session expired; log in again'`
-  - `new LineHttpError(401, '/p')` with `{ refreshFailedTransiently: true }` → `unavailable`, `'LINE unavailable: token refresh failed'`
-  - `new LineHttpError(500, '/p')` → `'LINE unavailable: HTTP 500'`; same for 503, 429, 400, 403, 404 (each `unavailable`)
-  - `new LineApiError(10051, '/p')` → `'LINE unavailable: LINE error 10051'`
-  - `new TypeError('fetch failed')` → `'LINE unavailable: network error'`
-  - `new DOMException('aborted', 'AbortError')` → `'LINE unavailable: aborted'`
-  - `new LineNotAuthenticatedError('Not authenticated. …')` → `session_expired`
-  - `new LineNotAuthenticatedError('Login failed: x', { cause: new LineHttpError(500, '/p') })` → `unavailable`, `'LINE unavailable: HTTP 500'`
-  - `new LineNotAuthenticatedError('Login failed: x', { cause: new TypeError('fetch failed') })` → `unavailable`
-  - `new LineNotAuthenticatedError('Login failed: x', { cause: new LineHttpError(400, '/p') })` → `session_expired`
-  - `new SyntaxError('Unexpected token')`, `'a string'`, `undefined` → `'LINE unavailable: unexpected error'`
-  - `Object.create(null)` → does not throw, `unavailable`
+- [ ] **Step 1: Write failing tests** — `it.each` rows asserting `kind`, exact `message`, and `cause === err` (design D2 table):
+  - `new LineHttpError(401, '/p')` → `session_expired`, `'LINE session expired; log in again'`; with `{ refreshFailedTransiently: true }` → `unavailable`, `'LINE unavailable: token refresh failed'`
+  - `new LineHttpError(500|503|429|400|403|404, '/p')` → `'LINE unavailable: HTTP <n>'`
+  - `new LineApiError(10051, '/p')` → `'LINE unavailable: LINE error 10051'`; `new LineApiError('eyJsecret' as unknown as number, '/p')` → `'LINE unavailable: LINE error'`
+  - `new TypeError('fetch failed')` → `'LINE unavailable: network error'`; `new DOMException('aborted', 'AbortError')` → `'LINE unavailable: aborted'`
+  - `new LineNotAuthenticatedError('Not authenticated')`, `new LineNotAuthenticatedError('Login in progress')` → `session_expired`
+  - `LineNotAuthenticatedError` with cause `new LineHttpError(500, '/p')` → `'LINE unavailable: HTTP 500'`; with cause `new TypeError()` → `'LINE unavailable: network error'`; with cause `new LineHttpError(400, '/p')` → `session_expired`
+  - `new SyntaxError('x')`, `'a string'`, `undefined`, `Object.create(null)` → `'LINE unavailable: unexpected error'`
+  - `new Proxy({}, { get() { throw new Error('boom'); }, getPrototypeOf() { throw new Error('boom'); } })` → does not throw, `'LINE unavailable: unexpected error'`
   - `new Error('Bearer eyJsecret.token')` → `message` does not contain `eyJsecret`
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/client.test.ts -t classifyLineReadError` — Expected: FAIL (not exported).
-- [ ] **Step 3:** Implement per design D2. Transient = abort, `TypeError`, `LineHttpError` with `status >= 500 || status === 429`. Use `instanceof`/`name` checks only; never stringify `err`.
+- [ ] **Step 3:** Implement per design D2 (whole inspection inside `try`; integers only via `Number.isInteger`).
 - [ ] **Step 4:** Run `npx vitest run packages/line-client/src/client.test.ts` — Expected: all PASS.
 - [ ] **Step 5:** Commit `feat(line-client): add typed LINE read errors and classifier`.
 
-### Task 2: Classifiable authentication state
+### Task 2: Authentication for the typed read
 
 **Files:**
-- Modify: `packages/line-client/src/client.ts` (`ensureAuthenticated` ~line 274; `refreshIfExpired` ~lines 237–272)
+- Modify: `packages/line-client/src/client.ts` (`refreshIfExpired` ~lines 238–272; new private `authenticateForRead` next to `ensureAuthenticated` ~274)
 - Test: `packages/line-client/src/client.test.ts`
 
 **Interfaces:**
-- Consumes: `LineNotAuthenticatedError`, `classifyLineReadError` (Task 1).
-- Produces: `ensureAuthenticated` throws `LineNotAuthenticatedError` at its three sites (messages unchanged; "Login failed" passes `{ cause: this.pendingLoginError }`). Private field `lastRefreshFailedStatus: number | null` on `LineClient`, set when the refresh answered non-2xx — by the refreshing instance and by concurrent waiters (change the static `refreshLocks` promise value to an internal `{ data } | { failedStatus }` union; legacy outcome unchanged: tokens applied only on success, no throw on failure). Task 3 reads and clears it.
+- Consumes: `LineNotAuthenticatedError` (Task 1).
+- Produces (design D3): `private refreshOutcome(): Promise<{ failedStatus: number | null }>` (legacy `refreshIfExpired` awaits it and ignores the value; the static `refreshLocks` value becomes an internal `{ data } | { failedStatus }` union shared with concurrent waiters; a rejected refresh `fetch` still propagates); `private authenticateForRead(signal?: AbortSignal): Promise<{ refreshFailedStatus: number | null }>`. `ensureAuthenticated` is NOT changed.
+
+Tests call the private method via `(client as unknown as { authenticateForRead(s?: AbortSignal): Promise<{ refreshFailedStatus: number | null }> })`.
 
 - [ ] **Step 1: Write failing tests**:
-  - `no-auth throws LineNotAuthenticatedError with unchanged text`: `await new LineClient(null, vi.fn()).getMessages('c').catch(e => e)` → `instanceof LineNotAuthenticatedError`, message `'Not authenticated. Call the login tool first and scan the QR code.'`.
-  - `failed login keeps text and cause`: reuse `makeLoginFetch(httpErr(500))` from `describe('LineClient QR login')` (add the test inside that describe); after `waitForCompletion()` rejects, `client.getMessages('c')` rejects with a `LineNotAuthenticatedError` whose message starts with `'Login failed: '` and whose `cause` is a `LineHttpError` with `status` 500.
-  - `PIN pending throws LineNotAuthenticatedError`: inside the QR-login describe, build a fetch from `makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }))` but override `checkPinCodeVerified` to return a never-resolving promise; `login()`, then `getMessages('c')` rejects with `LineNotAuthenticatedError` and message starting `'PIN required: Enter "123456"'`.
-  - `records refresh failure for the refreshing client and a concurrent waiter`: two `LineClient`s with the same `mid` and a JWT expiring in 1 h; fetch answers `tokenRefresh` with `httpErr(500)`; trigger both refreshes concurrently (via `getMessages`, recent → `apiOk([])`); assert via `(client as unknown as { lastRefreshFailedStatus: number | null }).lastRefreshFailedStatus === 500` on both, and the existing access token is unchanged.
+  - `no auth → LineNotAuthenticatedError('Not authenticated')`, fetch not called.
+  - `login in progress → throws without waiting`: inside `describe('LineClient QR login')`, `makeLoginFetch(apiOk({}))` with `checkQrCodeVerified` overridden to a never-resolving promise; after `login()`, `authenticateForRead()` rejects with `LineNotAuthenticatedError` within the test timeout and no message route was called.
+  - `login failed keeps cause`: `makeLoginFetch(httpErr(500))`; after `waitForCompletion()` rejects, `authenticateForRead()` rejects with a `LineNotAuthenticatedError` whose `cause` is a `LineHttpError` with `status` 500.
+  - `refresh failure is returned to each overlapping caller`: one client, JWT expiring in 1 h; `tokenRefresh` answers `httpErr(500)` from a deferred promise; start two `authenticateForRead()` calls, then resolve the deferred; both resolve `{ refreshFailedStatus: 500 }`; `tokenRefresh` fetched once; access token unchanged.
+  - `abort abandons the refresh wait`: deferred `tokenRefresh`; `authenticateForRead(controller.signal)`, abort, it rejects with an `AbortError` before the deferred is resolved; resolving later still applies the refreshed token for other callers (`refreshOutcome` result seen by a second call).
+  - Legacy guard: the existing `LineClient — JWT expiry` and `concurrent refresh deduplication` tests pass unchanged.
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/client.test.ts` — Expected: new tests FAIL.
-- [ ] **Step 3:** Implement as in Interfaces.
-- [ ] **Step 4:** Run the same command — Expected: all PASS, existing tests untouched.
-- [ ] **Step 5:** Commit `feat(line-client): make authentication failures classifiable`.
+- [ ] **Step 3:** Implement per design D3.
+- [ ] **Step 4:** Run the same command — Expected: all PASS.
+- [ ] **Step 5:** Commit `feat(line-client): add non-waiting authentication for typed reads`.
 
 ### Task 3: `getMessagesBetween`
 
 **Files:**
-- Modify: `packages/line-client/src/client.ts` (`getMessagesInRange` ~lines 664–730, `fetchRawPage`/`fetchPreviousRawPage` ~612–628)
+- Modify: `packages/line-client/src/client.ts` (`getMessagesInRange` ~664–730; `fetchRawPage`/`fetchPreviousRawPage` ~612–628; `fetchContactsV2` ~588, `resolveContactNames` ~630 gain optional `signal`)
 - Test: `packages/line-client/src/client.test.ts` (new `describe('LineClient.getMessagesBetween')` with its own `raw(id, createdTime, from = 'u1')` helper)
 
 **Interfaces:**
-- Consumes: Task 1 types/classifier; Task 2 `lastRefreshFailedStatus`.
+- Consumes: Task 1 classifier/types; Task 2 `authenticateForRead`.
 - Produces:
   ```ts
-  private walkHistory(chatMid: string, sinceMs: number, pageSize: number, signal?: AbortSignal): Promise<{ raw: RawMessage[]; reachedSince: boolean }>;
+  private walkHistory(chatMid: string, sinceMs: number, pageSize: number, opts: { signal?: AbortSignal; keepNonAdvancing: boolean }): Promise<{ raw: RawMessage[]; stop: 'reached_since' | 'history_end' | 'truncated' }>;
   async getMessagesBetween(chatMid: string, sinceMs: number, untilMs: number, options?: MessageRangeOptions): Promise<LineReadResult>;
   ```
-  Page fetchers take an optional `signal` passed to `request(…, { signal })`. Before each page the walk calls `signal?.throwIfAborted()`.
 
-All success stubs below answer `getContactsV2` with `apiOk({ contacts: {} })` unless stated.
+All success stubs answer `getContactsV2` with `apiOk({ contacts: {} })` unless stated.
 
 - [ ] **Step 1: Write failing tests** (`pageSize` 2 where paging is needed):
-  - `returns exactly the range across pages`: recent `[m5@5000, m6@6000]`; previous from m5 → `[m3@3000, m4@4000]`; previous from m3 → `[m1@1000, m2@2000]`; `(2000, 4000, { pageSize: 2 })` → `ok`, sorted ids `['m2','m3','m4']`, `complete: true`, `oldestReachedMs: 1000`.
-  - `includes both bounds`: messages at exactly 2000 and 4000 are returned.
-  - `empty range inside history`: messages at 1000 and 5000, range `[2000, 4000]` → `messages: []`, `complete: true`.
-  - `reports start of history`: recent `[m1@3000]` (short page), `[1000, 4000]` → ids `['m1']`, `complete: false`, `oldestReachedMs: 3000`.
-  - `empty chat`: recent `[]` → `messages: []`, `complete: false`, `oldestReachedMs: null`.
-  - `progress-guard stop is incomplete`: recent `[a@3000, b@3000]`, previous → `[c@3000, d@3000]` (same ms), range `[1000, 4000]` → `ok`, ids `a,b`, `complete: false`.
-  - `iteration cap is incomplete`: `pageSize: 1`, recent `[x@1_000_000]`; previous always returns one fresh message 1 ms older than its boundary (ids from a counter); range `[0, 2_000_000]` → `ok`, `complete: false`, `messages.length === 1001`.
-  - `rejects invalid range without a request`: each of `(5000, 4000)`, `(-1, 10)`, `(NaN, 10)`, `(0, Infinity)` → `rejects.toBeInstanceOf(RangeError)`, fetch not called.
-  - `maps 401 to session_expired`, `maps 500 to unavailable`, `maps business error to unavailable` (`apiErr(10004, 'x')`), `maps rejected fetch to unavailable` (`TypeError('fetch failed')`).
-  - `not authenticated is session_expired`: `new LineClient(null, fetch).getMessagesBetween('g1', 0, 1)` → `session_expired`, fetch not called.
-  - `failed login on HTTP 500 is unavailable`: QR-login describe, `makeLoginFetch(httpErr(500))`, after the failed login `getMessagesBetween` → `unavailable`.
-  - `refresh 500 then 401 is unavailable`: JWT expiring in 1 h; `tokenRefresh` → `httpErr(500)`; recent → `httpErr(401)` → `unavailable`, message `'LINE unavailable: token refresh failed'`.
-  - `401 without refresh is session_expired` (fresh JWT; recent → `httpErr(401)`).
-  - `fails whole range when a later page fails`: recent full page OK, previous → `httpErr(500)` → `ok: false`, `unavailable`.
-  - `fails whole range when contacts fail`: messages OK, `getContactsV2` → `httpErr(500)` → `ok: false`, `unavailable`.
-  - `resolves sender names`: `getContactsV2` returns a named contact for `u1`; `messages[0].senderName` equals it.
-  - `aborts between pages`: `AbortController`; the previous-page stub aborts the controller and returns a full page; result `unavailable`, message `'LINE unavailable: aborted'`, and no second previous-page call.
+  - `returns exactly the range across pages`: recent `[m5@5000, m6@6000]`; previous from m5 → `[m3@3000, m4@4000]`; from m3 → `[m1@1000, m2@2000]`; `(2000, 4000, { pageSize: 2 })` → sorted ids `['m2','m3','m4']`, `coverage: 'complete'`, `oldestReachedMs: 1000`.
+  - `includes both bounds` (messages at exactly 2000 and 4000 returned); `empty range inside history` (1000 and 5000, range `[2000,4000]` → `[]`, `complete`).
+  - `short recent page is history_end`: recent `[m1@3000]`, `[1000, 4000]` → `['m1']`, `history_end`, `oldestReachedMs: 3000`.
+  - `boundary-only previous page is history_end`: recent `[m3@3000, m4@4000]`, previous returns `[m3@3000]` → `history_end`.
+  - `empty chat`: recent `[]` → `[]`, `history_end`, `oldestReachedMs: null`.
+  - `progress-guard stop keeps received messages`: recent `[a@3000, b@3000]`, previous → `[c@3000, d@3000]`, range `[1000, 4000]` → ids `a,b,c,d`, `truncated`, exactly one previous-page call.
+  - `iteration cap is truncated`: `pageSize: 1`, recent `[x@1_000_000]`; previous always returns one fresh message 1 ms older than its boundary; range `[0, 2_000_000]` → `truncated`, `messages.length === 1001`.
+  - `rejects invalid range without a request`: `(5000, 4000)`, `(-1, 10)`, `(NaN, 10)`, `(0, Infinity)` → `RangeError`, fetch not called.
+  - `maps 401 to session_expired`, `maps 500 to unavailable`, `maps business error to unavailable` (`apiErr(10004, 'x')`), `maps rejected fetch to unavailable`.
+  - `not authenticated is session_expired` (fetch not called); `login in progress is session_expired` (QR-login describe, pending `checkQrCodeVerified`; no `getRecentMessagesV2` call); `failed login on HTTP 500 is unavailable` (QR-login describe, `makeLoginFetch(httpErr(500))`).
+  - `refresh 500 then 401 is unavailable` (JWT expiring in 1 h; `tokenRefresh` → 500; recent → 401; message `'LINE unavailable: token refresh failed'`); `401 without refresh is session_expired`.
+  - `fails whole range when a later page fails` (previous → 500 → `unavailable`); `fails whole range when contacts fail` (`getContactsV2` → 500).
+  - `resolves sender names` (named contact for `u1`).
+  - `aborts between pages` (previous-page stub aborts and returns a full page → `'LINE unavailable: aborted'`, no second previous call); `aborts during the final short page` (recent stub aborts the controller and resolves a short page → `aborted`); `aborts during contact lookup` (`getContactsV2` stub returns a promise that rejects when `init.signal` aborts; abort after it is called → `aborted`).
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/client.test.ts -t getMessagesBetween` — Expected: FAIL.
-- [ ] **Step 3:** Implement per design D3: move the loop of `getMessagesInRange` verbatim into `walkHistory`; `reachedSince` = any fetched raw message with `createdTime < sinceMs`. `getMessagesInRange` = `walkHistory` + its existing filter, name resolution and mapping. `getMessagesBetween`: validate (throw `RangeError` before anything else), clear `lastRefreshFailedStatus`, then one `try` around auth + walk + filter + `resolveContactNames` + map; `catch` → `{ ok: false, error: classifyLineReadError(err, { refreshFailedTransiently: status >= 500 || status === 429 }) }`.
+- [ ] **Step 3:** Implement per design D4: move the loop of `getMessagesInRange` verbatim into `walkHistory`, adding the stop reason and the `keepNonAdvancing` branch; `getMessagesInRange` uses `keepNonAdvancing: false` and keeps its output. `getMessagesBetween`: validate first, then one `try` around `authenticateForRead(signal)` + walk + filter + `resolveContactNames(mids, signal)` + map + final `signal?.throwIfAborted()`; `catch` → `{ ok: false, error: classifyLineReadError(err, { refreshFailedTransiently }) }` with `refreshFailedTransiently` from the local `refreshFailedStatus` (≥ 500 or 429).
 - [ ] **Step 4:** Run `npx vitest run packages/line-client/src/client.test.ts` — Expected: all PASS, including the existing `LineClient.getMessagesInRange` block.
 - [ ] **Step 5:** Commit `feat(line-client): add getMessagesBetween range walk with end bound`.
+- [ ] **Step 6: Size checkpoint.** Run `git diff --stat origin/main -- packages docs ':!*.test.ts'` and `git diff --stat origin/main -- '*.test.ts'`. If non-test source already exceeds ~300 changed lines, or the projected total (tests included) clearly exceeds ~675 lines (1.5× the issue's ~450), STOP: report the numbers to the controller with a split proposal (e.g. cancellation and the refresh-outcome work as a follow-up task) instead of continuing.
 
 ### Task 4: Public client surface
 
@@ -125,11 +123,11 @@ All success stubs below answer `getContactsV2` with `apiOk({ contacts: {} })` un
 
 **Interfaces:**
 - Consumes: `LineClient.getMessagesBetween` (Task 3).
-- Produces: `LineApiClient.getMessagesBetween(chatMid: string, sinceMs: number, untilMs: number, options?: MessageRangeOptions): Promise<LineReadResult>`; `index.ts` exports `classifyLineReadError` and types `LineReadError`, `LineReadErrorKind`, `LineReadResult`, `MessageRange`, `MessageRangeOptions`. Not exported: `LineHttpError`, `LineApiError`, `LineNotAuthenticatedError`.
+- Produces: `LineApiClient.getMessagesBetween(chatMid: string, sinceMs: number, untilMs: number, options?: MessageRangeOptions): Promise<LineReadResult>`; `index.ts` exports `classifyLineReadError` and types `LineReadError`, `LineReadErrorKind`, `LineReadResult`, `MessageRange`, `RangeCoverage`, `MessageRangeOptions`. Not exported: `LineHttpError`, `LineApiError`, `LineNotAuthenticatedError`.
 
 - [ ] **Step 1: Write failing test** `createLineClient exposes getMessagesBetween`: `createLineClient(baseAuth, { fetch: stub })`, recent → one message at 2000, contacts → `{ contacts: {} }`; `getMessagesBetween('g1', 1000, 3000)` → `ok`, one message.
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/client.test.ts -t "exposes getMessagesBetween"` — Expected: FAIL.
-- [ ] **Step 3:** Add the member, wiring and exports; add the D4 stub to `fakeLineApi()`.
+- [ ] **Step 3:** Add the member, wiring and exports; add the design D4b stub to `fakeLineApi()`.
 - [ ] **Step 4:** Run `npm run build && npx vitest run packages/line-client packages/server` — Expected: build exit 0, tests PASS.
 - [ ] **Step 5:** Commit `feat(line-client): expose getMessagesBetween and typed read errors`.
 
@@ -161,7 +159,7 @@ All success stubs below answer `getContactsV2` with `apiOk({ contacts: {} })` un
   - `cache errors propagate`: `upsertMessages` throws `new Error('disk full')` → `rejects.toThrow('disk full')`.
   - `ignores the newest cached message`: the cache double also has a spy `latestTimestamp` → never called.
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/message-range.test.ts` — Expected: FAIL (module missing).
-- [ ] **Step 3:** Implement per design D4; export `fetchMessageRange` and `MessageRangeRequest` from `index.ts`.
+- [ ] **Step 3:** Implement per design D4b; export `fetchMessageRange` and `MessageRangeRequest` from `index.ts`.
 - [ ] **Step 4:** Run the same command — Expected: PASS. Then `npm run lint` — no errors.
 - [ ] **Step 5:** Commit `feat(line-client): add fetchMessageRange into the message cache`.
 
@@ -176,10 +174,10 @@ All success stubs below answer `getContactsV2` with `apiOk({ contacts: {} })` un
 Setup: `beforeAll` → `mock = createMockLineServer({ port: 0, controlToken: 't' })`; `({ origin } = await mock.start())`; `mock.state.configure({ scenarioId: 'range', mode: 'seeded', epochSeconds: now, expectedRefreshCount: 1, expectedLoginBranches: [], expectedRejections: {} })` (after `start()`, so fixtures carry the bound origin). One shared `api = createLineClient(mock.state.fixtures.seededAuth, { lineApiBaseUrl: origin })` for both success cases (its first call refreshes and supersedes the seeded pair). `afterAll` → `mock.stop({ verify: false })`. In-memory cache double: `Map` keyed by message id; `upsertMessages`, `getMessages(owner, chat)` sorted by `Number(createdTime)`. `ownerMid` = seeded `mid`. `t(id)` = `Number(fixture.createdTime)` of the group fixture with that id. Compare ids as sorted arrays.
 
 - [ ] **Step 1: Write the tests**:
-  - `fetches an older range below newer cached messages`: seed the cache with `group-debit`, `group-credit`, `group-image` (fixture objects mapped to `Message` fields); `fetchMessageRange(api, cache, owner, MOCK_GROUP_MID, { sinceMs: t('group-history-005'), untilMs: t('group-history-010') })` → `ok`, ids `group-history-005`…`010` (6), `complete: true`; cache now holds those 6 plus the 3 seeded; `mock.state.report().routeCounts` shows at least one previous-messages call.
-  - `reports incomplete coverage at the start of history`: same client, range `group-history-000`…`010` → 11 ids, `complete: false`, `oldestReachedMs === t('group-history-000')`.
+  - `fetches an older range below newer cached messages`: seed the cache with `group-debit`, `group-credit`, `group-image` (fixture objects mapped to `Message` fields); `fetchMessageRange(api, cache, owner, MOCK_GROUP_MID, { sinceMs: t('group-history-005'), untilMs: t('group-history-010') })` → `ok`, ids `group-history-005`…`010` (6), `coverage: 'complete'`; cache now holds those 6 plus the 3 seeded; `mock.state.report().routeCounts` shows at least one previous-messages call.
+  - `reports history_end at the start of history`: same client, range `group-history-000`…`010` → 11 ids, `coverage: 'history_end'`, `oldestReachedMs === t('group-history-000')`.
   - `reports session_expired for a token LINE rejects`: `createLineClient({ ...seededAuth, accessToken: makeMockLineJwt('unknown', now - 60, now + 86400 * 10) }, { lineApiBaseUrl: origin })` → `ok: false`, `session_expired`; cache unchanged; `mock.state.report()` shows an `unknown_access_token` rejection.
-  - `reports unavailable when LINE cannot be reached`: start a second mock, keep its origin, stop it; client with a far-expiry token (as above) against that origin → `ok: false`, `unavailable`; cache unchanged.
+  - `reports unavailable when LINE cannot be reached`: start a second mock, keep its origin, stop it; client with a far-expiry token (as above) against that origin → `ok: false`, `unavailable`, `message === 'LINE unavailable: network error'` (proves the request was attempted, not a signer failure); cache unchanged.
   (Check `MockReport` fields in `tests/support/mock-line-server/state.ts` for the exact names of route counts and rejections.)
 - [ ] **Step 2:** Run `npm run build && npx vitest run packages/line-client/src/message-range.mock.test.ts` — Expected: PASS. If one fails, the defect is in an earlier task's code; fix it there, never loosen the test.
 - [ ] **Step 3:** Run `npm run test:unit` — Expected: PASS.
@@ -191,7 +189,7 @@ Setup: `beforeAll` → `mock = createMockLineServer({ port: 0, controlToken: 't'
 - Modify: `docs/ARCHITECTURE.md` (line-client section)
 - Modify: `packages/line-client/README.md` only if it lists exports
 
-- [ ] **Step 1:** Add a short paragraph: `getMessagesBetween` / `fetchMessageRange`, `complete` semantics, `LineReadError` kinds and mapping (401 and local auth → `session_expired`; refresh outage, network, 5xx, other → `unavailable`; displaced-session LINE codes unverified), and the cancellation hand-off (abort at the deadline; no write after abort).
+- [ ] **Step 1:** Add a short paragraph: `getMessagesBetween` / `fetchMessageRange`, `coverage` semantics and how the source port should use `history_end` vs `truncated` (design D4), `LineReadError` kinds and mapping (401 and local auth → `session_expired`; refresh outage, network, 5xx, other → `unavailable`; displaced-session LINE codes unverified), and the cancellation hand-off (abort at the deadline; no write after abort).
 - [ ] **Step 2:** Run `npm run verify` — Expected: exit 0.
 - [ ] **Step 3:** Run `npx vitest run tests/artifacts/line-client-pack.test.ts` — Expected: PASS.
 - [ ] **Step 4:** Commit `docs(line-client): document typed read errors and range fetch`.

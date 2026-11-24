@@ -8,18 +8,22 @@
 - **THEN** the call resolves to `{ ok: false, error }` whose `error.kind` is `session_expired` or `unavailable`
 
 ### Requirement: Failure messages carry no secrets
-The `message` of a `LineReadError` SHALL be chosen from fixed texts and SHALL NOT include text taken from the underlying failure. Classifying any value, including one that cannot be converted to a string, SHALL NOT throw.
+The `message` of a `LineReadError` SHALL be chosen from fixed texts, with only runtime-validated integer status or code numbers inserted, and SHALL NOT include text taken from the underlying failure. Classifying any value SHALL NOT throw, even when inspecting it throws.
 
 #### Scenario: Token-bearing failure
 - **WHEN** the underlying failure's message contains an access token
 - **THEN** the `LineReadError.message` does not contain it
 
-#### Scenario: Unstringifiable failure
-- **WHEN** the failure value is an object without a prototype
+#### Scenario: Malformed business error
+- **WHEN** LINE answers HTTP 200 with a non-numeric `code` such as a token string
+- **THEN** the result is `unavailable` and `message` does not contain that string
+
+#### Scenario: Value that throws on inspection
+- **WHEN** the failure value is a proxy whose property access throws
 - **THEN** classification returns `unavailable` without throwing
 
 ### Requirement: Session failures are session_expired
-An HTTP 401 from LINE, missing authentication, a login waiting for its PIN, and a failed login whose cause is not transient SHALL be classified as `session_expired`.
+An HTTP 401 from LINE, missing authentication, a login still in progress, and a failed login whose cause is not transient SHALL be classified as `session_expired`. The range fetch SHALL NOT wait for a login in progress and SHALL send no history request in that case.
 
 #### Scenario: Authentication failure from LINE
 - **WHEN** the LINE mock answers a message fetch with HTTP 401 for the access token in use
@@ -29,12 +33,12 @@ An HTTP 401 from LINE, missing authentication, a login waiting for its PIN, and 
 - **WHEN** the client has no authentication data and a range fetch is made
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired`
 
-#### Scenario: Login waiting for its PIN
-- **WHEN** a login is waiting for the PIN to be entered and a range fetch is made
-- **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired`
+#### Scenario: Login in progress
+- **WHEN** a login is waiting for its QR scan or PIN and a range fetch is made
+- **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired` without waiting and without a history request
 
 ### Requirement: Transient failures are unavailable
-A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except 401, a LINE business error and any other unexpected failure SHALL be classified as `unavailable`. A 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, and a failed login whose cause is transient, SHALL also be `unavailable`.
+A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except 401, a LINE business error and any other unexpected failure SHALL be classified as `unavailable`. A 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, and a failed login whose cause is transient, SHALL also be `unavailable`. The refresh outcome SHALL be attributed per read, so an overlapping read on the same client cannot change another read's classification.
 
 #### Scenario: Network failure
 - **WHEN** the LINE endpoint cannot be reached (the connection is refused)
@@ -57,7 +61,7 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `unavailable`
 
 ### Requirement: Exact range fetch
-`LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` SHALL return every message the walk fetched whose creation time is within `[sinceMs, untilMs]` inclusive, with sender names resolved, and no message outside it. A failure on any page or during sender-name resolution SHALL fail the whole call.
+`LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` SHALL return every message received from LINE during the walk whose creation time is within `[sinceMs, untilMs]` inclusive, with sender names resolved, and no message outside it. A failure on any page or during sender-name resolution SHALL fail the whole call.
 
 #### Scenario: Range inside a long history
 - **WHEN** a range is requested whose start lies further back than one page of history
@@ -68,19 +72,23 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 - **THEN** the call resolves to `{ ok: false }` and no messages are returned
 
 ### Requirement: Range coverage is reported
-The range fetch SHALL report `complete: true` if and only if the walk fetched at least one message created before `sinceMs`, and SHALL report `oldestReachedMs` as the creation time of the oldest message fetched, or `null` when none was fetched. A walk that ends earlier SHALL return the fetched in-range messages with `complete: false`.
+The range fetch SHALL report `coverage` as `complete` if and only if the walk received a message created before `sinceMs`; otherwise as `history_end` when LINE served nothing older (empty or short page, or only the boundary message re-included), or as `truncated` when the walk stopped on its progress guard or iteration cap. It SHALL report `oldestReachedMs` as the creation time of the oldest message received, or `null` when none was received.
 
 #### Scenario: Walk passes the start of the range
-- **WHEN** the walk fetches a message older than `sinceMs`
-- **THEN** `complete` is `true`
+- **WHEN** the walk receives a message older than `sinceMs`
+- **THEN** `coverage` is `complete`
 
 #### Scenario: Range reaching before the start of history
 - **WHEN** the requested `sinceMs` is older than the chat's oldest message
-- **THEN** the messages from the oldest message up to `untilMs` are returned, `complete` is `false` and `oldestReachedMs` is the oldest message's creation time
+- **THEN** the messages from the oldest message up to `untilMs` are returned, `coverage` is `history_end` and `oldestReachedMs` is the oldest message's creation time
 
-#### Scenario: Safety stop
-- **WHEN** the walk stops on its progress guard or iteration cap before fetching a message older than `sinceMs`
-- **THEN** the fetched in-range messages are returned with `complete` `false`
+#### Scenario: Progress-guard stop keeps received messages
+- **WHEN** a previous page returns fresh messages with the same creation time as the current oldest
+- **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
+
+#### Scenario: Iteration cap
+- **WHEN** the walk hits its iteration cap before receiving a message older than `sinceMs`
+- **THEN** the received in-range messages are returned with `coverage` `truncated`
 
 ### Requirement: Invalid ranges are rejected
 The range fetch SHALL reject with a `RangeError`, before any request to LINE, when either bound is not finite, `sinceMs` is negative, or `sinceMs` is greater than `untilMs`.
@@ -101,11 +109,15 @@ The range fetch SHALL reject with a `RangeError`, before any request to LINE, wh
 - **THEN** the failure is returned and `upsertMessages` is not called
 
 ### Requirement: Cancelled fetches write nothing
-When the caller's `signal` is aborted before the cache write, `fetchMessageRange` SHALL return an `unavailable` failure and SHALL NOT write to the cache, even if LINE already answered.
+When the caller's `signal` is aborted at any point before the range fetch returns, including during the last page, sender-name resolution or a token-refresh wait, the call SHALL settle with an `unavailable` failure without waiting for that work, and `fetchMessageRange` SHALL NOT write to the cache, even if LINE already answered.
 
 #### Scenario: Abort after LINE answered
 - **WHEN** the signal is aborted after `getMessagesBetween` resolved successfully but before the write
 - **THEN** the result is `unavailable` and `upsertMessages` is not called
+
+#### Scenario: Abort during the last page or contact lookup
+- **WHEN** the signal is aborted while the final short page or the contact lookup is in flight
+- **THEN** `getMessagesBetween` resolves to `unavailable` with message `LINE unavailable: aborted`
 
 ### Requirement: Existing reads unchanged
 The existing `getMessages`, `getMessagesInRange`, `withMessageCache`, login and token-refresh behaviour SHALL remain unchanged, and the errors they throw SHALL keep their message text.

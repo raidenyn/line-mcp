@@ -50,7 +50,8 @@ range fetch that is not anchored to the newest cached message. Today:
 ```ts
 export type LineReadErrorKind = 'session_expired' | 'unavailable';
 export interface LineReadError { kind: LineReadErrorKind; message: string; cause?: unknown }
-export interface MessageRange { messages: Message[]; complete: boolean; oldestReachedMs: number | null }
+export type RangeCoverage = 'complete' | 'history_end' | 'truncated';
+export interface MessageRange { messages: Message[]; coverage: RangeCoverage; oldestReachedMs: number | null }
 export type LineReadResult = { ok: true; value: MessageRange } | { ok: false; error: LineReadError };
 export interface MessageRangeOptions { pageSize?: number; signal?: AbortSignal }
 ```
@@ -64,72 +65,104 @@ result value anyway.
 ### D2 — Error classification
 
 One exported pure function `classifyLineReadError(err: unknown, context?: { refreshFailedTransiently?: boolean }): LineReadError`
-in `client.ts`, re-exported from `index.ts`. It never throws (no `String(err)`
-on arbitrary values) and never copies `err.message` into `message`; the
-original value is kept only as `cause`.
+in `client.ts`, re-exported from `index.ts`. It never throws: all inspection of
+`err` (`instanceof`, property reads) runs inside `try`, and any exception
+during inspection yields `unavailable` / `LINE unavailable: unexpected error`.
+It never copies text from `err` into `message`; numbers are interpolated only
+after `Number.isInteger` checks (otherwise the text without the number is
+used). The original value is kept only as `cause`.
 
 | Failure | Kind | `message` |
 | --- | --- | --- |
-| `LineHttpError` 401, refresh in this read did not fail transiently | `session_expired` | `LINE session expired; log in again` |
-| `LineHttpError` 401 after this read's token refresh got a 5xx or 429 | `unavailable` | `LINE unavailable: token refresh failed` |
-| `LineNotAuthenticatedError` (no auth, PIN pending, or login failed whose `cause` is not transient) | `session_expired` | as above |
-| `LineNotAuthenticatedError` whose `cause` is transient (network, abort, HTTP 5xx/429) | `unavailable` | per the cause row below |
-| `LineHttpError` 5xx, 429, other 4xx | `unavailable` | `LINE unavailable: HTTP <status>` |
-| `LineApiError` | `unavailable` | `LINE unavailable: LINE error <code>` |
-| abort (`signal.aborted`, or `name === 'AbortError'`) | `unavailable` | `LINE unavailable: aborted` |
-| `TypeError` from `fetch` (network) | `unavailable` | `LINE unavailable: network error` |
-| anything else | `unavailable` | `LINE unavailable: unexpected error` |
+| `LineHttpError` 401, `refreshFailedTransiently` not set | `session_expired` | `LINE session expired; log in again` |
+| `LineHttpError` 401 with `refreshFailedTransiently` | `unavailable` | `LINE unavailable: token refresh failed` |
+| `LineNotAuthenticatedError` without a transient `cause` (no auth, login in progress, login failed on a non-transient cause) | `session_expired` | `LINE session expired; log in again` |
+| `LineNotAuthenticatedError` whose `cause` is transient | `unavailable` | the cause's row below |
+| `LineHttpError` 5xx, 429, other 4xx | `unavailable` | `LINE unavailable: HTTP <status>` (`LINE unavailable: HTTP error` if not an integer) |
+| `LineApiError` | `unavailable` | `LINE unavailable: LINE error <code>` (`LINE unavailable: LINE error` if not an integer) |
+| abort (`name === 'AbortError'`) | `unavailable` | `LINE unavailable: aborted` |
+| `TypeError` (network failure from `fetch`) | `unavailable` | `LINE unavailable: network error` |
+| anything else, or inspection threw | `unavailable` | `LINE unavailable: unexpected error` |
 
-`LineNotAuthenticatedError extends Error` is a new private class thrown by
-`ensureAuthenticated` at its three sites with the same message text as today;
-the "Login failed" site sets `cause` to `pendingLoginError`.
+Transient = abort, `TypeError`, `LineHttpError` with status ≥ 500 or 429.
+`LineNotAuthenticatedError extends Error` is a new private class (exported from
+`client.ts` for tests only) with an optional `cause`.
 
-Refresh outcome: the refresh lock's promise value becomes an internal
-discriminated result so that both the refreshing caller and concurrent waiters
-learn a failed status; `LineClient` records the last refresh failure status
-per instance. `getMessagesBetween` clears it at start and passes
-`refreshFailedTransiently` to the classifier. Legacy callers see no
-difference (same return/throw behaviour).
+### D3 — Authentication for the typed read
 
-Which LINE business codes mean a displaced session is unverified (RFC open
-question "Session error"); only HTTP 401 and local auth state are mapped to
-`session_expired`, and the PR says so.
+The legacy `ensureAuthenticated` keeps its exact behaviour and text, including
+waiting for a pending login. The typed read uses a separate private
+`authenticateForRead(signal?)` that never waits for a login:
 
-### D3 — Range walk with an end bound and honest coverage
+1. a login is in progress (`pendingLogin !== null`) → throw
+   `LineNotAuthenticatedError('Login in progress')` (the user must finish it);
+2. `pendingLoginError` set → throw `LineNotAuthenticatedError('Login failed', { cause: pendingLoginError })`;
+3. no `auth` → throw `LineNotAuthenticatedError('Not authenticated')`;
+4. token refresh: `refreshIfExpired` is split into a private
+   `refreshOutcome(): Promise<{ failedStatus: number | null }>` that the legacy
+   `refreshIfExpired` awaits and ignores. The static refresh-lock promise
+   resolves to an internal `{ data } | { failedStatus }` union so concurrent
+   waiters learn the same outcome; tokens are applied only on success, as
+   today. The typed read awaits the outcome raced against its `signal` (the
+   shared refresh keeps running; only this read stops waiting) and keeps
+   `failedStatus` in a local variable passed to the classifier — no
+   per-instance shared field.
+
+`pendingLogin` is cleared on success (`client.ts` ~line 537) and on failure, so
+"login in progress" is never reported after a completed login. Which LINE
+business codes mean a displaced session is unverified (RFC open question
+"Session error"); only HTTP 401 and local auth state map to `session_expired`,
+and the PR says so.
+
+### D4 — Range walk with an end bound and coverage
 
 `LineClient.getMessagesInRange` is refactored onto a private
-`walkHistory(chatMid, sinceMs, pageSize, signal?)` returning
-`{ raw, reachedSince }`. `reachedSince` is true iff at least one fetched
-message has `createdTime < sinceMs` (coverage is what the walk fetched, not
-what the chat holds). `getMessagesInRange` keeps its exact behaviour on top of
-it (it passes no signal). The private page fetchers gain an optional `signal`
-forwarded to `request()`.
+`walkHistory(chatMid, sinceMs, pageSize, opts: { signal?: AbortSignal; keepNonAdvancing: boolean })`
+returning `{ raw, stop: 'reached_since' | 'history_end' | 'truncated' }`.
+`getMessagesInRange` calls it with `keepNonAdvancing: false` and no signal and
+keeps its exact behaviour. The private page fetchers and `fetchContactsV2` /
+`resolveContactNames` gain an optional `signal` forwarded to `request()`;
+legacy callers pass none.
+
+Stop reasons (`reached_since` takes precedence whenever any fetched message is older than `sinceMs`):
+- `reached_since`: a fetched message has `createdTime < sinceMs`;
+- `history_end`: the recent page is empty or shorter than `pageSize`, a
+  previous page is shorter than `pageSize`, or a previous page holds no fresh
+  ids (only the inclusive boundary re-included — what the mock and LINE return
+  at the start of served history);
+- `truncated`: a previous page's fresh messages are not strictly older than the
+  current oldest (progress guard), or the 1000-iteration cap is hit. With
+  `keepNonAdvancing: true` the fresh messages of the non-advancing page are
+  kept before stopping (they were received from LINE); legacy discards them.
 
 `LineClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)`:
 
 1. validates that both bounds are finite and `0 <= sinceMs <= untilMs`
    (else rejects with `RangeError`, no request);
-2. inside one `try`: `ensureAuthenticated`, the walk (checking
-   `signal.aborted` before each page), keep `sinceMs <= createdTime <= untilMs`,
-   `resolveContactNames`, map;
-3. returns `{ ok: true, value: { messages, complete: reachedSince, oldestReachedMs } }`,
+2. inside one `try`: `authenticateForRead(signal)`, the walk
+   (`signal.throwIfAborted()` before each page), keep
+   `sinceMs <= createdTime <= untilMs`, `resolveContactNames(…, signal)`, map,
+   then `signal.throwIfAborted()` once more before returning success;
+3. returns `{ ok: true, value: { messages, coverage, oldestReachedMs } }` with
+   `coverage` = `complete` for `reached_since`, else the stop reason;
    `oldestReachedMs` = oldest fetched `createdTime` or `null`;
 4. any failure, including a `getContactsV2` failure and an abort, returns
    `{ ok: false, error }` — never a partial `ok: true` built from earlier pages.
 
-`complete: false` is still `ok: true`: the walk ended (short page = start of
-what LINE serves, progress guard, or the 1000-iteration cap) before fetching
-anything older than `sinceMs`. Messages that were fetched are returned and
-cached; the caller must not report the re-request as fully covered. The
-progress guard may drop same-millisecond messages exactly as today; it then
-ends the walk, so the result is `complete: false` unless an older message was
-already fetched. The three causes cannot be told apart.
+Meaning for the next task (documented in `docs/ARCHITECTURE.md`):
+- `complete`: the whole range was walked.
+- `history_end`: LINE served nothing older; for live catch-up this counts as
+  caught up (an empty or new chat must not stay behind forever). For a
+  re-request it is reported to the caller as "LINE has nothing older than
+  `oldestReachedMs`" (chat start or no longer served; indistinguishable).
+- `truncated`: a safety stop; never counts as caught up; the re-request reports
+  it as cut short.
 
 The walk still starts at the newest message (LINE offers no time-anchored
 call). Starting from the oldest cached message would need a stored
 `deliveredTime`, which the cache lacks — out of scope.
 
-### D4 — Public surface and cancellation
+### D4b — Public surface and cancellation
 
 - `LineApiClient` gains
   `getMessagesBetween(chatMid, sinceMs, untilMs, options?: MessageRangeOptions): Promise<LineReadResult>`;
@@ -145,15 +178,17 @@ call). Starting from the oldest cached message would need a stored
   propagates (storage error, not a LINE error). It never reads
   `latestTimestamp`.
 - Hand-off to the source-port task: a deadline-enforcing caller passes an
-  `AbortSignal` it aborts at the deadline (or uses `getMessagesBetween` and
-  writes itself), and holds the per-source lock until the call settles.
+  `AbortSignal` it aborts at the deadline; the read then settles promptly
+  (requests in flight are aborted, refresh waits are abandoned without
+  cancelling the shared refresh), and the caller can release its per-source
+  lock when the call settles.
 - `index.ts` exports `fetchMessageRange`, `classifyLineReadError` and the types
   `LineReadError`, `LineReadErrorKind`, `LineReadResult`, `MessageRange`,
-  `MessageRangeOptions`, `MessageRangeRequest`. The private error classes are
-  not exported from `index.ts` (exported from `client.ts` for tests only).
+  `RangeCoverage`, `MessageRangeOptions`, `MessageRangeRequest`. The private
+  error classes are not exported from `index.ts`.
 - `fakeLineApi` in `packages/server/src/test-support.ts` gets a
   `getMessagesBetween` stub returning
-  `{ ok: true, value: { messages: [], complete: false, oldestReachedMs: null } }`.
+  `{ ok: true, value: { messages: [], coverage: 'history_end', oldestReachedMs: null } }`.
 
 ### D5 — Tests
 
@@ -174,14 +209,15 @@ call). Starting from the oldest cached message would need a stored
   - Fixture facts: the group chat has 205 messages (`group-history-000`…`201`,
     then `group-debit`, `group-credit`, `group-image`). The recent page (200)
     holds `group-history-005` upward; the previous page from `005` is
-    inclusive and returns `005`…`000`. A range `005`…`010` is therefore
-    `complete: true`; `000`…`010` is `complete: false`.
+    inclusive and returns `005`…`000` (a short page). A range `005`…`010` is
+    therefore `coverage: 'complete'`; `000`…`010` is `'history_end'`.
   - The seeded access token expires within 24 h, so the first read refreshes
     it and supersedes the seeded pair: both success cases use one client.
   - `session_expired`: a client with a far-expiry token unknown to the mock;
     assert the mock reported an `unknown_access_token` rejection.
   - `unavailable`: a far-expiry token (no refresh) against the origin of a
-    stopped mock (connection refused). HTTP 500 is covered by the stubbed
+    stopped mock (connection refused); assert `message` is
+    `LINE unavailable: network error`, proving the request was attempted. HTTP 500 is covered by the stubbed
     tests because the mock has no 5xx injection.
   - The mock's end-of-run verification is not asserted.
 
@@ -190,7 +226,11 @@ call). Starting from the oldest cached message would need a stored
 - [Real LINE codes for a displaced session are unknown] → map only 401 and
   local auth state; record in the PR and leave the RFC open question open.
 - [Old ranges cost a walk from the newest message] → acceptable for M1; the
-  iteration cap bounds it and `complete: false` reports a cut-short walk.
+  iteration cap bounds it and `coverage: 'truncated'` reports a cut-short walk.
+- [Size: the issue targets ~450 lines and says stop at ~1.5x] → the plan has a
+  size checkpoint after Task 3; if the diff (excluding OpenSpec files) heads
+  past ~675 lines of source, or tests make the total clearly larger, stop and
+  report with a split proposal (e.g. cancellation as a follow-up).
 - [Refactoring the walk and the refresh lock could change legacy behaviour] →
   existing `client.test.ts` cases must pass unchanged.
 - [Mock test needs a build] → documented verify command; `npm run verify`
