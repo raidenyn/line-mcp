@@ -2,10 +2,10 @@
 
 | Field | Value |
 |---|---|
-| Status | In review |
+| Status | Accepted |
 | Author | RaidenYN-Shadow |
 | Decider | RaidenYN |
-| Review by | RaidenYN; no date set, the feature is not scheduled for implementation |
+| Review by | RaidenYN; accepted 2026-11-24 |
 | Created / Updated | 2026-11-20 / 2026-11-24 |
 | Links | None. The session analysis and the earlier draft are working files outside the repository |
 
@@ -15,7 +15,7 @@ This RFC is the source of truth for the feature. Decision records and task break
 
 ## Summary
 
-`packages/bank-mcp` becomes a persisted, per-owner ledger: the server stores each transaction once, keeps the owner's decisions about it, and computes every reported number itself. Today it stores bank messages and category regexes but rebuilds every transaction from them on each call, so the agent that produces daily and weekly expense reports had to keep its own ledger and gave the owner two different values for one charge. The result is four milestones: three build the server and end with nine bank tools, three of today's five removed; the fourth delivers the agent skills for them. Every decision is agreed; the RFC waits for the decider's acceptance. Five unverified assumptions are listed as open questions.
+`packages/bank-mcp` becomes a persisted, per-owner ledger: the server stores each transaction once, keeps the owner's decisions about it, and computes every reported number itself. Today it stores bank messages and category regexes but rebuilds every transaction from them on each call, so the agent that produces daily and weekly expense reports had to keep its own ledger and gave the owner two different values for one charge. The result is four milestones: three build the server and end with nine bank tools, three of today's five removed; the fourth delivers the agent skills for them. Every decision is agreed, and the decider accepted the RFC on 2026-11-24. Five unverified assumptions are listed as open questions.
 
 ## Problem and context
 
@@ -447,8 +447,8 @@ Agreed, **Single release**: all milestones ship together in one release. For M4 
 | Tool removal | Old tools removed, not aliased, in M1 | yes | agreed | No rationale given | [What changes](#what-changes) |
 | Product rules | Data per LINE account; Saturday-to-Friday weeks; cards under an account; saved tags plus ad-hoc date ranges | yes | agreed | No rationale given | [Appendix C](#c-tools) |
 | RFC is the source | Decision records and breakdowns are written from this file | yes | agreed | Owner's instruction | Header |
-| Database placement | `ledger_` tables in `bank/bank.db` | routine (`docs/ARCHITECTURE.md`) | proposed | | [Identity](#identity) |
-| Import boundary | `ledger/` never imports `line-client`; a new check in M1 | routine (extends `tests/architecture/import-boundaries.test.ts`) | proposed | | [Identity](#identity) |
+| Database placement | `ledger_` tables in `bank/bank.db` | routine (`docs/ARCHITECTURE.md`) | agreed | Accepted with the RFC | [Identity](#identity) |
+| Import boundary | `ledger/` never imports `line-client`; a new check in M1 | routine (extends `tests/architecture/import-boundaries.test.ts`) | agreed | Accepted with the RFC | [Identity](#identity) |
 
 ## Open questions
 
@@ -465,7 +465,7 @@ None blocks the decision. Each is an assumption the RFC rests on without having 
 
 ## Decision outcome
 
-Not decided. Filled in when the review ends.
+Accepted on 2026-11-24 by RaidenYN, without conditions. The open questions are accepted as assumptions until the milestone named for each checks it. Resulting work: the task breakdown of all four milestones, written from this file.
 
 ## Review log
 
@@ -520,10 +520,11 @@ Not decided. Filled in when the review ends.
 - **2026-11-24, self-review 3 of 3 (links, tables, numbers, decision list).** Checked by script: every internal link resolves, every table row has its table's column count, both linked files exist, four Mermaid blocks, nine tools in Appendix C. The diagrams were not parsed again; they did not change. Fixed: the summary and the Duplicate-mark row now name the two details the author added and the owner has not confirmed, so "agreed" is not read as covering them. Found and left as is: "Tool removal" and "Product rules" carry "no rationale given".
 - **2026-11-24, owner confirmation.** Confirmed: how proposed corrections reach the owner, and how marked duplicates appear in review. The owner asked for a pull request with the RFC alone; links to the session analysis and the earlier draft were removed, because those working files stay out of the repository. The RFC is not accepted yet.
 - **2026-11-24, owner comment on agent skills.** The owner moved the agent skills from the postponed features into this project as its last milestone, because the new tools are useless if the agent does not know how to work with them. Added: M4 Agent skills and the decision Skills milestone; the row was removed from Appendix F. Server-agent scope is unchanged. How the skills are distributed and kept in sync with the server is left to the M4 breakdown, as the owner asked. Stated by the author, not by the owner: the list of skills in the M4 row, that M4 consumes the Tool envelope and the Filter set, and that under Single release the skills are ready when the tools are released. M4 has no size estimate. Not reviewed by Astra.
+- **2026-11-24, acceptance.** The owner accepted the RFC: "accept the RFC". Set with it: the two routine decisions, Database placement and Import boundary, are agreed. Known at acceptance and not changed by it: the M4 Agent skills change of the same day was not reviewed by Astra. The document is frozen; from here only milestone status, the header status, clarifications and amendments change.
 
 ## Amendments
 
-None: the RFC is not accepted.
+None.
 
 ## Appendix
 
