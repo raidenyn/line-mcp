@@ -306,7 +306,7 @@ export async function applyBalanceDiffs(
     for (const tx of group) counts.set(tx.original_currency, (counts.get(tx.original_currency) ?? 0) + 1);
     let balanceCurrency: string | undefined;
     if (counts.size === 1) {
-      balanceCurrency = counts.keys().next().value as string;
+      balanceCurrency = counts.keys().next().value;
     } else {
       const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
       if (sorted[0][1] > sorted[1][1]) balanceCurrency = sorted[0][0];

@@ -23,9 +23,9 @@ import type { AuthData, MessageCache } from '@raidenyn/line-client';
 export interface ServerRequestClientOptions {
   cache: MessageCache;
   /** Resolves the freshest LINE credential for a principal; `null` ⇒ reauthorize. */
-  resolveCredentials(principal: LinePrincipal): Promise<Readonly<AuthData> | null>;
+  readonly resolveCredentials: (principal: LinePrincipal) => Promise<Readonly<AuthData> | null>;
   /** Fired synchronously by the underlying LineClient when a token is refreshed mid-request. */
-  onAuthRefreshed(authData: Readonly<AuthData>): void;
+  readonly onAuthRefreshed: (authData: Readonly<AuthData>) => void;
   lineApiBaseUrl?: string;
 }
 

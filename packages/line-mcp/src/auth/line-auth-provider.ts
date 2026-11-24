@@ -156,6 +156,7 @@ export class LineAuthProvider implements AuthProvider<LinePrincipal> {
     });
   }
 
+  // eslint-disable-next-line @typescript-eslint/require-await -- implements AuthProvider's Promise contract; token verification is synchronous
   async authenticate(request: ExpressRequest): Promise<LinePrincipal | null> {
     const token = bearerToken(request);
     if (!token) return null;

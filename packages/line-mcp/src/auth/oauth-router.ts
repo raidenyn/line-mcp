@@ -392,9 +392,9 @@ export function mountOAuthRoutes(app: Express, deps: OAuthRouterDeps): void {
   });
 
   app.post(`${basePath}/authorize/select`, async (req: Request, res: Response) => {
-    const sessionId = typeof req.body?.selection_session === 'string'
-      ? req.body.selection_session : '';
-    const choice = typeof req.body?.choice === 'string' ? req.body.choice : '';
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const sessionId = typeof body.selection_session === 'string' ? body.selection_session : '';
+    const choice = typeof body.choice === 'string' ? body.choice : '';
     const selection = accountSelectionSessions.get(sessionId);
     accountSelectionSessions.delete(sessionId);
     if (!selection || selection.expiresAt < Date.now()) {

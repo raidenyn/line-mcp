@@ -100,7 +100,7 @@ function defaultServerFactory(info: { name: string; version: string }): McpServe
 }
 
 function defaultTransportFactory(): HostTransport {
-  return new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }) as unknown as HostTransport;
+  return new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
 }
 
 export function createMcpHost<P extends Principal>(options: McpHostOptions<P>): McpHost {
