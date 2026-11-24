@@ -114,6 +114,17 @@ Linux container with a warm `node_modules`. CI keeps the existing verbose jobs
 
 `npm run lint` must pass. Match the conventions of the file you are editing.
 
+## Agent hooks
+
+Claude Code (`.claude/settings.json`) and OpenCode
+(`.opencode/plugin/line-mcp-harness.ts`) run the same scripts:
+
+- `.claude/hooks/lint-on-edit.mjs` — after an edit to an in-repo `.ts` file,
+  runs `eslint --fix` on it and feeds back up to 20 lines of remaining errors;
+  fix them before moving on.
+- `.claude/hooks/session-context.mjs` — at session start, adds up to 30 lines:
+  branch, status, diff vs `origin/main`, active OpenSpec changes, last CI run.
+
 ## Hard rules
 
 - Never edit `packages/line-client/assets/ltsm/*` (proprietary LINE artifacts).

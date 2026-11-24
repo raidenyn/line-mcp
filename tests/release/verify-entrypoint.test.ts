@@ -28,7 +28,7 @@ describe('verification entrypoints', () => {
 
     const tests = scripts.verify.slice(scripts.verify.indexOf('vitest run'));
     expect(tests).toContain('--reporter=dot');
-    for (const path of ['packages', 'tests/architecture', 'tests/release', 'tests/smoke']) {
+    for (const path of ['packages', 'tests/architecture', 'tests/release', 'tests/harness', 'tests/smoke']) {
       expect(tests).toContain(path);
     }
 
