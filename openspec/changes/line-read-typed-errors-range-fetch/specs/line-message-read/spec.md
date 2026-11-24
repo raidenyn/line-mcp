@@ -103,7 +103,7 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 - **THEN** `coverage` is `truncated`, not `history_end`
 
 #### Scenario: Iteration cap
-- **WHEN** the walk hits its iteration cap before receiving a message older than `sinceMs`
+- **WHEN** the walk hits its iteration cap while the last page was full and advancing, so another request was needed, before receiving a message older than `sinceMs`
 - **THEN** the received in-range messages are returned with `coverage` `truncated`
 
 ### Requirement: Invalid ranges are rejected

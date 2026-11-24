@@ -81,7 +81,7 @@ Tests call the private method via `(client as unknown as { authenticateForRead()
 ### Task 3: `getMessagesBetween`
 
 **Files:**
-- Modify: `packages/line-client/src/client.ts` (`request()` ~152: when `opts.signal` is given, `throwIfAborted()` after signing and before `fetch`; `getMessagesInRange` ~664–730; `fetchRawPage`/`fetchPreviousRawPage` ~612–628; `fetchContactsV2` ~588 and `resolveContactNames` ~630 gain an optional `signal`; private field `rangePageSize = 200`)
+- Modify: `packages/line-client/src/client.ts` (`request()` ~152: new opt-in option `readSignal?: AbortSignal` — `throwIfAborted()` after signing and before `fetch`, and passed to `fetch`; the existing `signal` option used by QR/PIN polling is unchanged; `getMessagesInRange` ~664–730; `fetchRawPage`/`fetchPreviousRawPage` ~612–628; `fetchContactsV2` ~588 and `resolveContactNames` ~630 gain an optional `signal`; private field `rangePageSize = 200`)
 - Test: `packages/line-client/src/client.test.ts` (new `describe('LineClient.getMessagesBetween')` with its own `raw(id, createdTime, from = 'u1')` helper)
 
 **Interfaces:**
@@ -100,6 +100,7 @@ All success stubs answer `getContactsV2` with `apiOk({ contacts: {} })` unless s
     - `includes both bounds`; `empty range inside history` (1000 and 5000, range `[2000,4000]` → `[]`, `complete`).
     - `inclusive pagination ends in history_end`: recent `[m3@3000, m4@4000]`; previous from m3 → `[m2@2000, m3@3000]`; previous from m2 → `[m2@2000]`; range `[0, 5000]` → ids `m2,m3,m4`, `history_end`, `oldestReachedMs: 2000`.
     - `short recent page is history_end`; `empty chat` (`[]`, `history_end`, `oldestReachedMs: null`).
+    - `empty previous page is history_end` (what the mock sends at its oldest boundary): recent `[m3@3000, m4@4000]`, previous → `[]`, range `[0, 5000]` → ids `m3,m4`, `history_end`, `oldestReachedMs: 3000`.
     - `replayed full page is truncated`: recent `[m3@3000, m4@4000]`, previous returns `[m3@3000, m4@4000]` → `truncated`.
     - `short replay is truncated`: page size 3; recent `[m3@3000, m4@4000, m5@5000]`, previous from m3 returns `[m3@3000, m4@4000]` → `truncated`.
     - `boundary-only previous page is history_end` (stub compatibility case): page size 2; recent `[m3@3000, m4@4000]`, previous returns `[m3@3000]` → `history_end`.
@@ -120,9 +121,10 @@ All success stubs answer `getContactsV2` with `apiOk({ contacts: {} })` unless s
     - `already-aborted signal` → fetch not called.
     - `aborts between pages`: previous-page stub aborts and returns a full page; no further previous call.
     - `aborts while signing is blocked`: `vi.mocked(signForAccount).mockImplementationOnce(() => { signerEntered.resolve(); return signerGate.promise; })`; await `signerEntered`, abort, the read settles while the gate is still closed; then open the gate and flush (`await new Promise(r => setTimeout(r, 0))`): fetch was never called.
-    - `aborts while waiting for the shared refresh`: JWT expiring in 1 h; `tokenRefresh` stub resolves a latch and returns a deferred; await the latch, abort → read settles; then resolve the refresh with success and flush: no `getRecentMessagesV2` call was made.
+    - `aborts a read that joined another read's refresh`: JWT expiring in 1 h; `tokenRefresh` stub resolves a latch and returns a deferred; start read A (no signal), await the latch, start read B with a signal (it joins the same refresh), abort B → B settles aborted; resolve the refresh with success and let A finish: `tokenRefresh` fetched once, A → `ok`, and exactly one `getRecentMessagesV2` call (A's).
+    - `login polling is unchanged`: the existing `LineClient QR login` tests pass unchanged (they pass `signal`, not `readSignal`).
     - `abort wins over a ready 401`: recent stub resolves the latch and returns a deferred; await the latch, call `controller.abort(new Error('deadline'))`, then resolve the deferred with `httpErr(401)` → aborted, not `session_expired`.
-    - `aborts during a hanging 401 body`: recent → `new Response(new ReadableStream({ start() {} }), { status: 401 })`; abort after the stub was entered → aborted.
+    - `aborts during a hanging 401 body`: recent → an object shaped like a `Response` with `ok: false`, `status: 401` and a `text()` that resolves a latch and returns a never-settling promise; await the latch (inside `text()`), abort → aborted.
     - `aborts during contact lookup`: `getContactsV2` resolves a latch and returns a promise rejecting when `init.signal` aborts; await the latch, abort → aborted.
 - [ ] **Step 2:** Run `npx vitest run packages/line-client/src/client.test.ts -t getMessagesBetween` — Expected: FAIL.
 - [ ] **Step 3:** Implement per design D4: move the loop of `getMessagesInRange` verbatim into `walkHistory` with the stop reasons and the `keepNonAdvancing` branch; `getMessagesInRange` uses `keepNonAdvancing: false` and keeps its output. `getMessagesBetween`: validate, check `signal.aborted`, run the work in an inner async function, race it against a promise resolved by the signal's `abort` event (remove the listener afterwards), then apply D4 steps 4–5 (abort precedence via `signal?.aborted`).

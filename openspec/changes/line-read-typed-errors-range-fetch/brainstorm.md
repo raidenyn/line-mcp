@@ -58,9 +58,10 @@ Findings from the code as merged (`a56f130`):
 
 Alternative A (approved by the user on 2026-11-24):
 
-- `LineClient` gets a range walk with an end bound and a progress flag; the
-  public `LineApiClient` gets `getMessagesBetween(chatMid, sinceMs, untilMs)`
-  returning the result value.
+- `LineClient` gets a range walk with an end bound and a coverage value; a new
+  `LineReadClient` (extends the unchanged `LineApiClient`, returned by
+  `createLineClient`) gets `getMessagesBetween(chatMid, sinceMs, untilMs)`
+  returning the result value (round 4).
 - A new exported `fetchMessageRange(client, cache, ownerMid, chatMid, range)`
   calls it, upserts the messages into the cache with the existing
   `MessageCache.upsertMessages` (no schema change) and returns the result.
@@ -95,12 +96,14 @@ Alternative A (approved by the user on 2026-11-24):
   cancellation checkpoints so an aborted read issues no further request;
   `LineApiClient` unchanged, new `LineReadClient` returned by
   `createLineClient`; page size is a private field.
+- Refined after Sol review round 5: the post-signing abort check is an opt-in
+  `readSignal` request option, so QR/PIN polling is unchanged.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the
   cache-storing function in a new module next to `cached-message-reader.ts`.
-- `fakeLineApi` in `packages/server/src/test-support.ts` gains a stub for the new
-  member; no existing test is changed.
+- (superseded in round 4) `packages/server/src/test-support.ts` is not
+  changed; no existing test is changed.
 - Unverified: which real LINE codes signal a displaced session. Only HTTP 401
   is mapped; the PR reports this.
 

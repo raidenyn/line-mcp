@@ -161,9 +161,12 @@ must be ≥ 2 because LINE's previous page includes its boundary.
    map — and races it against the signal's `abort` event;
 4. cancellation checkpoints stop the losing work from issuing new requests:
    `signal.throwIfAborted()` after `authenticateForRead()`, before each page
-   and before the contact lookup; and `request()`, when given a signal, checks
-   it after signing and before calling `fetch` (legacy callers pass no signal,
-   so their path is unchanged);
+   and before the contact lookup; and `request()` gets a new opt-in option
+   `readSignal?: AbortSignal`, used only by the typed read's page and contact
+   requests: it is checked after signing and before calling `fetch`, and
+   forwarded to `fetch`. The existing `signal` option (used by QR and PIN
+   polling) keeps its current behaviour — no new check — so the login path is
+   unchanged;
 5. cancellation has precedence: if the signal is aborted when the race settles
    (whichever side won, whatever the work's error), the result is
    `{ ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: aborted' } }`
