@@ -59,20 +59,43 @@ The benchmark and the breakage inventory are in `brainstorm.md`.
 "pnpm@12.18.0"` in the root manifest is the single source of truth. 12.18.0 is
 the newest 12.x release more than two weeks old (published 2026-11-05).
 `pnpm/action-setup@v6` reads it in CI. A release test asserts that the
-Dockerfile's `PNPM_VERSION` equals it. The pin stays exact: pnpm refuses to run
-with a mismatched version when `packageManager` is set, which keeps local
-installs consistent.
+Dockerfile's `PNPM_VERSION` equals it. The pin stays exact. With 12.18.0's
+default `pmOnFail: download`, a different globally installed pnpm downloads and
+runs the pinned version instead of refusing, so every checkout runs 12.18.0.
+That default is kept on purpose and documented in AGENTS.md.
 
-**D2. Lockfile from `pnpm import`.** `pnpm-lock.yaml` is generated from the
-current `package-lock.json` with `pnpm import`, so resolved versions do not
-move. `package-lock.json` is then deleted, and `.gitignore` ignores
-`package-lock.json` to stop it from coming back.
+**D2. Lockfile from `pnpm import`, with a parity check.** `pnpm import`
+re-resolves the tree, using the versions in `package-lock.json` as preferences,
+so parity is checked rather than assumed. A throwaway script in the session
+scratchpad (not committed) compares the full external `name@version` set,
+including transitive dependencies:
+- From `package-lock.json`, it takes every `packages` key under
+  `node_modules/`, minus entries with `link: true`.
+- From `pnpm-lock.yaml`, it takes the last YAML document's `packages` keys,
+  with any peer suffix `(…)` stripped. The pinned `packageManager` can add a
+  leading document.
+
+Every difference is listed in `apply.md` with a reason. The npm lockfile is
+deleted only after the list is empty, or every remaining entry is explained as
+a platform-only or deduplication difference. `.gitignore` then ignores
+`package-lock.json`.
 
 **D3. Isolated (default) `node_modules` layout.** Not `node-linker=hoisted`
 (see brainstorm, Alternative B). Undeclared imports become failures, which is
-desirable. The root declares every workspace package that root-level tests and
-scripts import (`@raidenyn/line-mcp`, `@raidenyn/server`, `@raidenyn/bank-mcp`
-as dev dependencies, beside the existing root dependencies).
+desirable. The isolated layout alone does not prove that packages declare
+their imports: a package can still resolve anything in the root's
+`node_modules` by walking up the directory tree. A release test therefore
+checks that each package's bare imports are declared by that package, with an
+explicit shared-test-tooling exception (`vitest`, declared once at the root).
+Imports found today:
+- `packages/server` tests import `better-sqlite3` without declaring it, so it
+  becomes a server dev dependency.
+- `@modelcontextprotocol/sdk` is a peer dependency of `bank-mcp`, `line-mcp`
+  and `mcp-runtime`, which counts as declared.
+
+The root adds `@raidenyn/line-mcp` and `@raidenyn/server` as dev dependencies,
+because root tests import them. `@raidenyn/bank-mcp` is not added, because
+nothing at the root imports it.
 
 **D4. `workspace:^` for internal ranges.** This applies to the root and to
 `bank-mcp`, `line-client-sqlite`, `line-mcp` and `server`. The release process
@@ -87,11 +110,24 @@ packages:
   - packages/*
 allowBuilds:
   better-sqlite3: true
+  fsevents: false
+verifyDepsBeforeRun: false
 ```
-No `.npmrc`. An unknown build script makes `pnpm install` fail
-(`ERR_PNPM_IGNORED_BUILDS`), which is the intended gate. If 12.18.0 turns out
-to need a different key than `allowBuilds` (verified against 12.23.0), use the
-key that version documents, and record it in `apply.md`.
+- `allowBuilds` and `strictDepBuilds` (on by default) were verified on 12.18.0.
+  An unlisted build script fails the install (`ERR_PNPM_IGNORED_BUILDS`),
+  which is the intended gate.
+- `fsevents` (macOS-only, has an install script) is denied explicitly, so a
+  macOS install does not fail on it. It is an optional dependency of the
+  watcher tooling and is not needed at build or run time.
+- `pnpm-lock.yaml` does not record which packages have install scripts, so
+  completeness is enforced by pnpm itself: with `strictDepBuilds`, an install
+  on a platform that meets an unlisted script fails. Linux is verified locally
+  and in CI. The only macOS-specific script in the tree, `fsevents`, is listed
+  explicitly.
+- `verifyDepsBeforeRun: false` keeps `pnpm run` and `pnpm exec` from
+  installing anything implicitly, so the release plan job's scripts-disabled
+  install stays the only install there.
+- No `.npmrc`.
 
 **D6. Command mapping.**
 | npm | pnpm |
@@ -115,6 +151,12 @@ The step is removed, not translated: `pnpm ls` does not fail on the problems
 `npm ls` reported. The release `plan` job keeps `--ignore-scripts`; its step
 list gains `pnpm/action-setup@v6`.
 
+A release test asserts the exact install command in every job that sets up
+Node: `pnpm install --frozen-lockfile`, and in the release plan job
+`pnpm install --frozen-lockfile --ignore-scripts`. The negative assertions in
+`release-workflow.test.ts` (no publish, no release run) extend to
+`pnpm publish` and `pnpm run release`.
+
 **D8. Docker builder.**
 ```dockerfile
 FROM node:24 AS builder
@@ -132,15 +174,23 @@ RUN pnpm prune --prod
   on and has key-rotation failures.
 - `CI=true` stops pnpm from prompting before it recreates `node_modules`
   without a TTY.
-- If `pnpm prune --prod` does not reduce the tree in 12.18.0, use
-  `pnpm install --prod --frozen-lockfile --offline` instead.
+- The single production recipe is `pnpm prune --prod` at the workspace root.
+  On 12.18.0 it was verified to remove TypeScript, Vitest and ESLint from
+  `.pnpm` and keep the built `better-sqlite3` addon.
 - The runtime stages are unchanged in shape. They copy `/app/node_modules`
   (which holds `.pnpm` and relative symlinks) and the `packages/` tree, which
   carries each package's `node_modules` symlinks into `/app/node_modules/.pnpm`.
 - The standalone target still copies only its four packages, and their
   symlinks resolve within the copied root `node_modules`.
 - `docker-smoke.test.ts` proves both targets load `better-sqlite3` and serve
-  `tools/list`.
+  `tools/list`. It gains a layout case per image, run with
+  `docker run --rm --entrypoint sh <image> -c …`, that asserts:
+  - `find /app -xtype l` prints nothing (no dangling links);
+  - `/app/node_modules/.pnpm` has no `typescript@`, `vitest@`, `eslint@`,
+    `semantic-release@` or `@commitlint+` entries;
+  - for the standalone image, no path under `/app` or symlink target
+    (`find /app -type l -exec readlink {} +`) contains `packages/bank-mcp` or
+    `packages/server`.
 
 **D9. happy-dom vendoring.** `vendor-happy-dom.js` resolves every package
 directory through `fs.realpathSync` before recursing. Under pnpm this finds
@@ -192,6 +242,25 @@ they guard:
 - `e2e.test.ts`: `pnpm exec ts-node`.
 - `version-baseline.test.ts`: per D4.
 
+**D14. Verification environment.** The dev container runs Node 26 and has no
+Docker daemon.
+- Local gates run under Node 24, which the repository pins. The implementer
+  downloads the official Node 24 Linux x64 tarball into `~/.cache/node24` and
+  puts it first on `PATH` for every command in this change.
+- The `oauth-router.test.ts` "non-root basePath" failures come from this
+  container's `/etc/hosts`. Node binds `listen(0, 'localhost')` to `::1`,
+  while the test client connects to `127.0.0.1`. They fail identically under
+  npm and under Node 24, and pass with
+  `NODE_OPTIONS=--dns-result-order=ipv4first`.
+- Local gates run with that `NODE_OPTIONS`, and `apply.md` records that. The
+  test itself is not changed here; that is a separate fix. If any gate still
+  fails, the full gate is not green: the failure is recorded, and each
+  downstream check is run on its own.
+- The Docker rung (image builds, Docker smoke with the layout cases) runs in
+  CI's `docker` job on the draft PR. Locally the implementer runs
+  `pnpm run verify` and the pack test separately, and states that the Docker
+  checks ran only in CI. The PR is not marked ready until that job is green.
+
 ## Risks / Trade-offs
 
 - [Contributors without pnpm cannot install] → README and AGENTS.md document
@@ -202,10 +271,14 @@ they guard:
   `~/.local/share/pnpm/store`) must share a filesystem with the worktrees. That
   is true in the current dev container.
 - [Strict layout surfaces a phantom dependency only at runtime in Docker] →
-  The Docker smoke runs both images' real CLI and a `tools/list` roundtrip.
-  `pnpm run verify:all` is required for this change.
+  The Docker smoke runs both images' real CLI, a `tools/list` roundtrip and
+  the layout cases. It runs in CI's `docker` job, which must be green before
+  the PR is marked ready (D14).
+- [macOS installs are not verified in this change] → `fsevents` is denied
+  explicitly; a macOS contributor who hits another ignored build adds it to
+  `allowBuilds` after review.
 - [The `allowBuilds`/`prune` behaviour differs in 12.18.0 from the 12.23.0
-  bench] → D5 and D8 name the fallbacks, and verification runs against the
+  bench] → Both were re-checked on 12.18.0, and verification runs against the
   pinned version.
 - [`npm pack` on the pnpm layout regresses later] → The CI `pack-line-client`
   job keeps running the real pack/install test.
