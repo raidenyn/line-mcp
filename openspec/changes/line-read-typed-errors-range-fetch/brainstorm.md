@@ -90,6 +90,11 @@ Alternative A (approved by the user on 2026-11-24):
   page is `truncated`; `fetchMessageRange` can refuse a truncated walk before
   writing (`rejectTruncated`, for live catch-up); the classifier is internal
   and `cause` is non-enumerable.
+- Refined after Sol review round 4: stop reason decided from the last page
+  (short replay → `truncated`, cap only when another request was needed);
+  cancellation checkpoints so an aborted read issues no further request;
+  `LineApiClient` unchanged, new `LineReadClient` returned by
+  `createLineClient`; page size is a private field.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the

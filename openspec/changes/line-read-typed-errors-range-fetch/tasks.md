@@ -6,11 +6,11 @@
 ## 2. Range walk with an end bound
 
 - [ ] 2.1 Extract the backwards walk of `LineClient.getMessagesInRange` into a private `walkHistory(chatMid, sinceMs, pageSize, { signal?, keepNonAdvancing })` returning `{ raw, stop }`, keeping `getMessagesInRange` behaviour identical (design D4). Verify: `npx vitest run packages/line-client/src/client.test.ts`
-- [ ] 2.2 Add `LineClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` returning `LineReadResult` (inclusive bounds, `coverage`, `oldestReachedMs`, `RangeError` on invalid range, whole-call failure on any page or contact failure, abort raced against the whole read with precedence, `pageSize` test seam ≥ 2, auth classification incl. login-in-progress, refresh-outage and failed-login paths); stubbed-`fetch` unit tests per plan Task 3; then the size checkpoint of plan Task 3 Step 6. Verify: `npx vitest run packages/line-client/src/client.test.ts`
+- [ ] 2.2 Add `LineClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` returning `LineReadResult` (inclusive bounds, `coverage`, `oldestReachedMs`, `RangeError` on invalid range, whole-call failure on any page or contact failure, abort raced against the whole read with precedence and cancellation checkpoints (after auth, before each page/contact lookup, after signing before `fetch`), private `rangePageSize` test seam, stop reasons decided from the last page, auth classification incl. login-in-progress, refresh-outage and failed-login paths); stubbed-`fetch` unit tests per plan Task 3; then the size checkpoint of plan Task 3 Step 6. Verify: `npx vitest run packages/line-client/src/client.test.ts`
 
 ## 3. Public surface and cache fetch
 
-- [ ] 3.1 Add `getMessagesBetween` to `LineApiClient` and wire it in `createLineClient`; add the stub from design D4b to `fakeLineApi()` in `packages/server/src/test-support.ts`. Verify: `npm run build && npx vitest run packages/line-client packages/server`
+- [ ] 3.1 Add the exported `LineReadClient extends LineApiClient` with `getMessagesBetween`, return it from `createLineClient`, leave `LineApiClient` and `packages/server/src/test-support.ts` unchanged (design D4b). Verify: `npm run build && npx vitest run packages/line-client packages/server packages/line-mcp`
 - [ ] 3.2 Create `packages/line-client/src/message-range.ts` with `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? })` (design D4b) and export it and the new types from `index.ts` (not the classifier); unit tests with doubles: upserts on success, no write on failure, abort or refused truncation, cache-write errors propagate, `latestTimestamp` never read. Verify: `npx vitest run packages/line-client/src/message-range.test.ts`
 
 ## 4. Acceptance tests against the LINE mock

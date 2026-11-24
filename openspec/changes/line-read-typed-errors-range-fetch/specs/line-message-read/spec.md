@@ -65,7 +65,7 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `unavailable`
 
 ### Requirement: Exact range fetch
-`LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` SHALL return every message received from LINE during the walk whose creation time is within `[sinceMs, untilMs]` inclusive, with sender names resolved, and no message outside it. A failure on any page or during sender-name resolution SHALL fail the whole call.
+`LineReadClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` (on the client returned by `createLineClient`) SHALL return every message received from LINE during the walk whose creation time is within `[sinceMs, untilMs]` inclusive, with sender names resolved, and no message outside it. A failure on any page or during sender-name resolution SHALL fail the whole call.
 
 #### Scenario: Range inside a long history
 - **WHEN** a range is requested whose start lies further back than one page of history
@@ -91,11 +91,11 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 - **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
 
 #### Scenario: Safety stops are truncated
-- **WHEN** the walk stops on its progress guard, on a full previous page with no new messages, or on its iteration cap
+- **WHEN** the walk stops on its progress guard, on a previous page that only replays already-received messages (full or short), or on its iteration cap while the last page was full and advancing
 - **THEN** `coverage` is `truncated`
 
 #### Scenario: End of served history
-- **WHEN** a page is empty or shorter than the page size, including one holding only the boundary message, and no safety stop fired
+- **WHEN** the last page is empty, holds only the boundary message, or is shorter than the page size with new, older messages
 - **THEN** `coverage` is `history_end`
 
 #### Scenario: Replayed full page
@@ -125,15 +125,15 @@ The range fetch SHALL reject with a `RangeError`, before any request to LINE, wh
 - **THEN** the failure is returned and `upsertMessages` is not called
 
 ### Requirement: Cancelled fetches write nothing
-When the caller's `signal` is aborted at any point before the range fetch returns, including while a request is being signed, a response body is read, a page or contact lookup is in flight, or a token refresh is awaited, the call SHALL settle promptly with `unavailable` and message `LINE unavailable: aborted`, whatever the abort reason and whatever other failure occurred, and `fetchMessageRange` SHALL NOT write to the cache, even if LINE already answered.
+When the caller's `signal` is aborted before the range fetch returns, the call SHALL settle promptly with `unavailable` and message `LINE unavailable: aborted`, whatever the abort reason and whatever other failure occurred. It SHALL issue no further LINE request afterwards, and `fetchMessageRange` SHALL NOT write to the cache, even if LINE already answered. This SHALL hold during signing, body reads, page and contact requests, and token-refresh waits.
 
 #### Scenario: Abort after LINE answered
 - **WHEN** the signal is aborted after `getMessagesBetween` resolved successfully but before the write
 - **THEN** the result is `unavailable` and `upsertMessages` is not called
 
 #### Scenario: Abort while signing is blocked
-- **WHEN** the signal is aborted while the request signer has not resolved
-- **THEN** `getMessagesBetween` resolves to `unavailable` with message `LINE unavailable: aborted` without waiting for the signer
+- **WHEN** the signal is aborted while the request signer has not resolved, and the signer resolves afterwards
+- **THEN** `getMessagesBetween` resolves to `unavailable` with message `LINE unavailable: aborted` without waiting for the signer, and no request is sent
 
 #### Scenario: Abort wins over a concurrent failure
 - **WHEN** the signal is aborted with a custom reason while a 401 response body is being read

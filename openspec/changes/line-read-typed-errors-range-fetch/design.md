@@ -125,40 +125,52 @@ and the PR says so.
 `walkHistory(chatMid, sinceMs, pageSize, opts: { signal?: AbortSignal; keepNonAdvancing: boolean })`
 returning `{ raw, stop: 'reached_since' | 'history_end' | 'truncated' }`.
 `getMessagesInRange` calls it with `keepNonAdvancing: false` and no signal and
-keeps its exact behaviour. The private page fetchers and `fetchContactsV2` /
-`resolveContactNames` gain an optional `signal` forwarded to `fetch` through
-`request()`; legacy callers pass none.
+keeps its exact behaviour (it ignores `stop`). The private page fetchers and
+`fetchContactsV2` / `resolveContactNames` gain an optional `signal` forwarded
+to `request()`.
 
-Stop reasons. `reached_since` takes precedence whenever any fetched message is
-older than `sinceMs`. Otherwise, for a previous page, the progress guard is
-evaluated first:
-- `truncated`: a previous page has no fresh ids although it is full
-  (`length >= pageSize`, a replay), or its fresh messages are not strictly
-  older than the current oldest (progress guard; with `keepNonAdvancing: true`
-  those fresh messages are kept before stopping), or the 1000-iteration cap is
-  hit;
-- `history_end`: the recent page is empty or shorter than `pageSize`, or a
-  previous page is shorter than `pageSize` (including one holding only the
-  inclusive boundary — what the mock and LINE return at the start of served
-  history) and the guard did not fire.
+Stop reason, decided once from the last page the walk fetched:
+1. `reached_since` whenever any fetched message is older than `sinceMs`.
+2. The recent page is empty or shorter than `pageSize` → `history_end`.
+3. For the last previous page, in this order:
+   - no fresh ids, and the page is empty or holds only the exact boundary
+     message → `history_end` (the mock answers `[]` when the boundary is the
+     oldest message; a boundary-only page is accepted for compatibility with
+     inclusive pagination but is not verified real-LINE behaviour);
+   - no fresh ids otherwise (a full or short replay of already-seen
+     messages) → `truncated`;
+   - fresh messages not strictly older than the current oldest (progress
+     guard; with `keepNonAdvancing: true` they are kept before stopping) →
+     `truncated`;
+   - page shorter than `pageSize` → `history_end`;
+4. the loop ended only because the 1000-iteration cap was reached and the last
+   page was full and advancing (another request would have been needed) →
+   `truncated`.
 
-`LineClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?: MessageRangeOptions, pageSize = 200)`:
-`pageSize` is a test seam, not part of `LineApiClient` or `MessageRangeOptions`;
-it must be an integer ≥ 2 (with LINE's inclusive previous-page semantics a
-page of 1 can never advance).
+`pageSize` is not a public parameter: `LineClient` holds it in a private
+instance field `rangePageSize = 200` (tests override it through a cast). It
+must be ≥ 2 because LINE's previous page includes its boundary.
 
-1. validates that both bounds are finite, `0 <= sinceMs <= untilMs`, and
-   `pageSize` (else rejects with `RangeError`, no request);
-2. if `signal` is already aborted → returns the abort result;
+`LineClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?: MessageRangeOptions)`:
+
+1. validates that both bounds are finite and `0 <= sinceMs <= untilMs`
+   (else rejects with `RangeError`, no request);
+2. if `signal` is already aborted → returns the abort result, no request;
 3. runs the work — `authenticateForRead()`, the walk, keep
    `sinceMs <= createdTime <= untilMs`, `resolveContactNames(mids, signal)`,
    map — and races it against the signal's `abort` event;
-4. cancellation has precedence: if the signal is aborted when the race settles
+4. cancellation checkpoints stop the losing work from issuing new requests:
+   `signal.throwIfAborted()` after `authenticateForRead()`, before each page
+   and before the contact lookup; and `request()`, when given a signal, checks
+   it after signing and before calling `fetch` (legacy callers pass no signal,
+   so their path is unchanged);
+5. cancellation has precedence: if the signal is aborted when the race settles
    (whichever side won, whatever the work's error), the result is
    `{ ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: aborted' } }`
-   regardless of the abort `reason`; the work left running (a queued signer
-   call, a body read, a shared refresh) is ignored and its outcome discarded;
-5. otherwise success → `{ ok: true, value: { messages, coverage, oldestReachedMs } }`
+   regardless of the abort `reason`; leftover work (a queued signer call, a
+   body read, a shared refresh) finishes or fails silently and issues no
+   further request;
+6. otherwise success → `{ ok: true, value: { messages, coverage, oldestReachedMs } }`
    (`coverage` = `complete` for `reached_since`, else the stop reason;
    `oldestReachedMs` = oldest fetched `createdTime` or `null`); failure →
    `{ ok: false, error: classifyLineReadError(err, { refreshFailedTransiently }) }`.
@@ -171,15 +183,19 @@ call). Starting from the oldest cached message would need a stored
 
 ### D4b — Public surface, cache write and the source-port hand-off
 
-- `LineApiClient` gains
+- `LineApiClient` is NOT changed (adding a required member would break its
+  structural implementations such as `fakeLineApi`). A new exported interface
+  `LineReadClient extends LineApiClient` adds
   `getMessagesBetween(chatMid, sinceMs, untilMs, options?: MessageRangeOptions): Promise<LineReadResult>`;
-  `createLineClient` wires it to the inner client (default page size).
+  `createLineClient` returns `LineReadClient` (assignable wherever
+  `LineApiClient` is expected). The source-port task widens the type where its
+  adapter needs the method.
 - New module `packages/line-client/src/message-range.ts` exports
   `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? }): Promise<LineReadResult>`.
   It calls `client.getMessagesBetween(chatMid, sinceMs, untilMs, { signal })`, then,
-  before any write:
+  before inspecting the result or writing:
+  - `signal?.aborted` → the abort result, nothing written (abort first);
   - failure → returned, nothing written;
-  - `signal?.aborted` → the abort result, nothing written;
   - `rejectTruncated` and `coverage === 'truncated'` →
     `{ ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: history walk truncated' } }`,
     nothing written;
@@ -197,15 +213,13 @@ call). Starting from the oldest cached message would need a stored
     `coverage` / `oldestReachedMs` in its own result ("cut short" for
     `truncated`, "LINE has nothing older" for `history_end`);
   - a deadline-enforcing caller passes an `AbortSignal` it aborts at the
-    deadline; the call settles promptly and writes nothing, so the per-source
-    lock can be released when it settles.
-- `index.ts` exports `fetchMessageRange` and the types `LineReadError`,
-  `LineReadErrorKind`, `LineReadResult`, `MessageRange`, `RangeCoverage`,
-  `MessageRangeOptions`, `MessageRangeRequest`. Not exported: the classifier
-  and the private error classes.
-- `fakeLineApi` in `packages/server/src/test-support.ts` gets a
-  `getMessagesBetween` stub returning
-  `{ ok: true, value: { messages: [], coverage: 'history_end', oldestReachedMs: null } }`.
+    deadline; the call settles promptly, writes nothing and issues no further
+    request, so the per-source lock can be released when it settles.
+- `index.ts` exports `fetchMessageRange` and the types `LineReadClient`,
+  `LineReadError`, `LineReadErrorKind`, `LineReadResult`, `MessageRange`,
+  `RangeCoverage`, `MessageRangeOptions`, `MessageRangeRequest`. Not exported:
+  the classifier and the private error classes.
+- `packages/server/src/test-support.ts` is not touched.
 
 ### D5 — Tests
 
@@ -226,8 +240,10 @@ call). Starting from the oldest cached message would need a stored
   - Fixture facts: the group chat has 205 messages (`group-history-000`…`201`,
     then `group-debit`, `group-credit`, `group-image`). The recent page (200)
     holds `group-history-005` upward; the previous page from `005` is
-    inclusive and returns `005`…`000` (a short page). A range `005`…`010` is
-    therefore `coverage: 'complete'`; `000`…`010` is `'history_end'`.
+    inclusive and returns `005`…`000` (a short page with fresh, older
+    messages). A range `005`…`010` is therefore `coverage: 'complete'`;
+    `000`…`010` is `'history_end'`. (The mock answers `[]` only when the
+    boundary is the oldest message.)
   - The seeded access token expires within 24 h, so the first read refreshes
     it and supersedes the seeded pair: both success cases use one client.
   - `session_expired`: a client with a far-expiry token unknown to the mock;

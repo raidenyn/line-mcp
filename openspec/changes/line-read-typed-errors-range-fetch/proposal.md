@@ -5,7 +5,7 @@ The expense-ledger source port (`catchUp`, `fetchRange`) must get either LINE me
 ## What Changes
 
 - New exported typed failure for LINE message fetches: `LineReadError` with `kind` `session_expired` or `unavailable` and a fixed, secret-free message, produced internally from the private `LineHttpError`, `LineApiError`, local authentication state, token-refresh outcome and network failures.
-- New `LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs, { signal? })` returning a result value `LineReadResult`: the messages of `[sinceMs, untilMs]`, a `coverage` of `complete`, `history_end` or `truncated`, and the oldest timestamp reached — or the typed error. Aborting the signal settles the call promptly.
+- New `LineReadClient` (extends the unchanged `LineApiClient`, returned by `createLineClient`) with `getMessagesBetween(chatMid, sinceMs, untilMs, { signal? })` returning a result value `LineReadResult`: the messages of `[sinceMs, untilMs]`, a `coverage` of `complete`, `history_end` or `truncated`, and the oldest timestamp reached — or the typed error. Aborting the signal settles the call promptly and no further request is issued.
 - New exported `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? })` that stores the fetched range in the message cache whatever the newest cached message is, and writes nothing after a failure, an abort, or (on request) a truncated walk.
 - Internal: a non-waiting authentication step and a per-caller token-refresh outcome for the typed read; `ensureAuthenticated` and the legacy refresh behaviour are unchanged.
 - Non-breaking. `getMessages`, `getMessagesInRange`, `withMessageCache`, login, the messenger tools, OAuth and `line-mcp` sync behave as before. No cache schema change, no new dependencies.
@@ -21,7 +21,6 @@ The expense-ledger source port (`catchUp`, `fetchRange`) must get either LINE me
 ## Impact
 
 - `packages/line-client/src/client.ts` (walk refactor, `getMessagesBetween`, internal classifier, non-waiting auth and refresh outcome), new `packages/line-client/src/message-range.ts`, `packages/line-client/src/index.ts` exports, new unit tests in `packages/line-client/src/`.
-- `packages/server/src/test-support.ts`: `fakeLineApi()` gains a `getMessagesBetween` stub.
 - `docs/ARCHITECTURE.md`: one line on the new line-client surface.
 - Untouched: `packages/line-client-sqlite`, `packages/line-client/assets/ltsm/`, all servers' behaviour.
 
