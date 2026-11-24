@@ -82,14 +82,32 @@ function parseStoredAuthRecord(value: unknown, expectedMid: string): StoredAuthR
   return result.ok ? result.record : null;
 }
 
+function authRecordPath(mid: string, storeDir: string): string | null {
+  if (!isSafeMid(mid)) return null;
+  const dir = path.resolve(storeDir);
+  const file = path.resolve(dir, `${mid}.json`);
+  return file.startsWith(dir + path.sep) ? file : null;
+}
+
+function buildStoredRecord(
+  authData: AuthData,
+  displayName: string | undefined,
+  existingName: string | undefined,
+): StoredAuthRecord {
+  if (!isSafeMid(authData.mid) || !parseStoredAuthRecord(authData, authData.mid)) {
+    throw new Error('Refusing to persist invalid LINE authentication data');
+  }
+  const name = displayName?.trim() || existingName;
+  return { ...authData, ...(name ? { displayName: name } : {}) };
+}
+
 export function loadStoredAuthRecord(
   mid: string,
   storeDir = defaultAuthDir(),
 ): StoredAuthRecord | null {
-  if (!isSafeMid(mid)) return null;
+  const file = authRecordPath(mid, storeDir);
+  if (!file) return null;
   try {
-    const file = path.resolve(storeDir, `${mid}.json`);
-    if (!file.startsWith(path.resolve(storeDir) + path.sep)) return null;
     return parseStoredAuthRecord(JSON.parse(fs.readFileSync(file, 'utf8')), mid);
   } catch {
     return null;
@@ -158,12 +176,8 @@ export function persistAuthData(
   displayName?: string,
   storeDir = defaultAuthDir(),
 ): void {
-  if (!isSafeMid(authData.mid) || !parseStoredAuthRecord(authData, authData.mid)) {
-    throw new Error('Refusing to persist invalid LINE authentication data');
-  }
   const existingName = loadStoredAuthRecord(authData.mid, storeDir)?.displayName;
-  const name = displayName?.trim() || existingName;
-  const record: StoredAuthRecord = { ...authData, ...(name ? { displayName: name } : {}) };
+  const record = buildStoredRecord(authData, displayName, existingName);
   const dir = path.resolve(storeDir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   fs.chmodSync(dir, 0o700);
@@ -187,6 +201,68 @@ export function loadAuthFromDisk(mid: string, storeDir = defaultAuthDir()): Auth
   return record ? authDataFromStoredRecord(record) : null;
 }
 
+// ─── Async I/O variants for the credential store ────────────────────────────
+//
+// FileCredentialStore is on the request path, so its I/O must not block the
+// event loop. The sync helpers above stay for callers that are themselves
+// synchronous (migration/audit tooling and the standalone helpers' tests).
+
+async function loadStoredAuthRecordAsync(
+  mid: string,
+  storeDir: string,
+): Promise<StoredAuthRecord | null> {
+  const file = authRecordPath(mid, storeDir);
+  if (!file) return null;
+  try {
+    return parseStoredAuthRecord(JSON.parse(await fs.promises.readFile(file, 'utf8')), mid);
+  } catch {
+    return null;
+  }
+}
+
+async function listStoredAuthRecordsAsync(storeDir: string): Promise<StoredAuthRecord[]> {
+  let entries: fs.Dirent[];
+  try {
+    entries = await fs.promises.readdir(storeDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const records: StoredAuthRecord[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const mid = entry.name.slice(0, -5);
+    const record = await loadStoredAuthRecordAsync(mid, storeDir);
+    if (record) records.push(record);
+    else process.stderr.write(`[OAuth] Ignoring invalid auth record for ${maskMid(mid)}\n`);
+  }
+  return records;
+}
+
+async function persistAuthDataAsync(
+  authData: AuthData,
+  displayName: string | undefined,
+  storeDir: string,
+): Promise<void> {
+  const existingName = (await loadStoredAuthRecordAsync(authData.mid, storeDir))?.displayName;
+  const record = buildStoredRecord(authData, displayName, existingName);
+  const dir = path.resolve(storeDir);
+  await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.promises.chmod(dir, 0o700);
+  const destination = path.resolve(dir, `${authData.mid}.json`);
+  if (!destination.startsWith(dir + path.sep)) throw new Error('Unsafe auth record path');
+  const temporary = path.join(
+    dir,
+    `.${authData.mid}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`,
+  );
+  try {
+    await fs.promises.writeFile(temporary, JSON.stringify(record, null, 2), { mode: 0o600, flag: 'wx' });
+    await fs.promises.rename(temporary, destination);
+  } catch (error) {
+    try { await fs.promises.unlink(temporary); } catch { /* no temporary file to remove */ }
+    throw error;
+  }
+}
+
 // ─── Async credential store (the auth provider's persistence port) ──────────
 //
 // The typed provider talks to persistence only through this narrow async
@@ -203,18 +279,16 @@ export interface CredentialStore {
 export class FileCredentialStore implements CredentialStore {
   constructor(private readonly authStoreDir: string) {}
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async load(mid: string): Promise<Readonly<AuthData> | null> {
-    return loadAuthFromDisk(mid, this.authStoreDir);
+    const record = await loadStoredAuthRecordAsync(mid, this.authStoreDir);
+    return record ? authDataFromStoredRecord(record) : null;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async list(): Promise<readonly StoredAuthRecord[]> {
-    return listStoredAuthRecords(this.authStoreDir);
+    return listStoredAuthRecordsAsync(this.authStoreDir);
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- implements CredentialStore's Promise contract; disk I/O is synchronous
   async saveAtomic(snapshot: Readonly<AuthData>, displayName?: string): Promise<void> {
-    persistAuthData(snapshot, displayName, this.authStoreDir);
+    await persistAuthDataAsync(snapshot, displayName, this.authStoreDir);
   }
 }

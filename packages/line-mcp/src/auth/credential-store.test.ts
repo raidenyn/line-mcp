@@ -185,4 +185,37 @@ describe('stored auth records', () => {
     expect(loaded).toEqual(TEST_AUTH);
     expect(loaded).not.toHaveProperty('displayName');
   });
+
+  describe('FileCredentialStore', () => {
+    it('uses async I/O to write, list, and load records', async () => {
+      const dir = path.join(tmpdir, 'auth');
+      const store = new mod.FileCredentialStore(dir);
+
+      await store.saveAtomic(TEST_AUTH, 'Personal LINE');
+
+      expect(await store.load(TEST_AUTH.mid)).toEqual(TEST_AUTH);
+      const listed = await store.list();
+      expect(listed).toHaveLength(1);
+      expect(listed[0]).toMatchObject({ ...TEST_AUTH, displayName: 'Personal LINE' });
+
+      fs.writeFileSync(path.join(dir, 'u-corrupt.json'), '{');
+      expect((await store.list()).map(record => record.mid)).toEqual([TEST_AUTH.mid]);
+    });
+
+    it('keeps the previous record when the async rename fails', async () => {
+      const dir = path.join(tmpdir, 'auth');
+      const store = new mod.FileCredentialStore(dir);
+      await store.saveAtomic(TEST_AUTH, 'Personal LINE');
+      const rename = vi.spyOn(fs.promises, 'rename').mockRejectedValueOnce(new Error('rename denied'));
+
+      try {
+        await expect(store.saveAtomic(FRESH_AUTH)).rejects.toThrow('rename denied');
+      } finally {
+        rename.mockRestore();
+      }
+
+      expect(await store.load(TEST_AUTH.mid)).toEqual(TEST_AUTH);
+      expect(fs.readdirSync(dir)).toEqual([`${TEST_AUTH.mid}.json`]);
+    });
+  });
 });
