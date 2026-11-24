@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 
 // The fast rung is restricted to the in-process suites: smoke, Docker and
 // packaging need a build or a daemon and belong to `verify` / `verify:all`.
-const UNIT_PATHS = ['packages', 'tests/architecture', 'tests/release'];
+const UNIT_PATHS = ['packages', 'tests/architecture', 'tests/release', 'tests/harness'];
 // Everything `eslint .` lints, so a changed script is checked by the inner loop.
 const LINTABLE = /\.(?:c|m)?[jt]s$/;
 
