@@ -75,6 +75,13 @@ Alternative A (approved by the user on 2026-11-24):
 
 ## Key Decisions
 
+- Refined after Sol review round 1 (design.md is authoritative): fixed
+  secret-free error messages; refresh-outage-then-401 and transient login
+  failures are `unavailable`; coverage is what the walk fetched; any page or
+  contact failure fails the whole call; an optional `AbortSignal` lets a
+  deadline-enforcing caller prevent late cache writes; the mock acceptance test
+  uses the built package so only one signer instance runs.
+
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the
   cache-storing function in a new module next to `cached-message-reader.ts`.
