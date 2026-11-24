@@ -85,6 +85,11 @@ Alternative A (approved by the user on 2026-11-24):
   in progress; refresh outcome is per read; coverage distinguishes
   `history_end` from `truncated`; non-advancing messages are kept on the new
   path; abort covers every stage; a size checkpoint guards the 1.5x limit.
+- Refined after Sol review round 3: abort is one race over the whole read
+  with precedence; `pageSize` is an internal test seam (≥ 2); a replayed full
+  page is `truncated`; `fetchMessageRange` can refuse a truncated walk before
+  writing (`rejectTruncated`, for live catch-up); the classifier is internal
+  and `cause` is non-enumerable.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the

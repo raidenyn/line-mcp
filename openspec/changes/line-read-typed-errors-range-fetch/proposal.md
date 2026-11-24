@@ -4,11 +4,11 @@ The expense-ledger source port (`catchUp`, `fetchRange`) must get either LINE me
 
 ## What Changes
 
-- New exported typed failure for LINE message fetches: `LineReadError` with `kind` `session_expired` or `unavailable`, produced by an exported `classifyLineReadError()` from the private `LineHttpError`, `LineApiError`, authentication failures and network failures.
-- New `LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs)` returning a result value `LineReadResult`: the messages of `[sinceMs, untilMs]`, whether the walk reached `sinceMs` (`complete`) and the oldest timestamp reached, or the typed error.
-- New exported `fetchMessageRange(client, cache, ownerMid, chatMid, range)` that stores the fetched range in the message cache whatever the newest cached message is.
-- `ensureAuthenticated` throws a private `Error` subclass instead of a plain `Error`, with identical message text, so it can be classified.
-- Non-breaking. `getMessages`, `getMessagesInRange`, `withMessageCache`, the messenger tools, OAuth and `line-mcp` sync behave as before. No cache schema change, no new dependencies.
+- New exported typed failure for LINE message fetches: `LineReadError` with `kind` `session_expired` or `unavailable` and a fixed, secret-free message, produced internally from the private `LineHttpError`, `LineApiError`, local authentication state, token-refresh outcome and network failures.
+- New `LineApiClient.getMessagesBetween(chatMid, sinceMs, untilMs, { signal? })` returning a result value `LineReadResult`: the messages of `[sinceMs, untilMs]`, a `coverage` of `complete`, `history_end` or `truncated`, and the oldest timestamp reached — or the typed error. Aborting the signal settles the call promptly.
+- New exported `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? })` that stores the fetched range in the message cache whatever the newest cached message is, and writes nothing after a failure, an abort, or (on request) a truncated walk.
+- Internal: a non-waiting authentication step and a per-caller token-refresh outcome for the typed read; `ensureAuthenticated` and the legacy refresh behaviour are unchanged.
+- Non-breaking. `getMessages`, `getMessagesInRange`, `withMessageCache`, login, the messenger tools, OAuth and `line-mcp` sync behave as before. No cache schema change, no new dependencies.
 
 ## Capabilities
 
@@ -20,7 +20,7 @@ The expense-ledger source port (`catchUp`, `fetchRange`) must get either LINE me
 
 ## Impact
 
-- `packages/line-client/src/client.ts` (walk refactor, `getMessagesBetween`, classifier, auth error class), new `packages/line-client/src/message-range.ts`, `packages/line-client/src/index.ts` exports, new unit tests in `packages/line-client/src/`.
+- `packages/line-client/src/client.ts` (walk refactor, `getMessagesBetween`, internal classifier, non-waiting auth and refresh outcome), new `packages/line-client/src/message-range.ts`, `packages/line-client/src/index.ts` exports, new unit tests in `packages/line-client/src/`.
 - `packages/server/src/test-support.ts`: `fakeLineApi()` gains a `getMessagesBetween` stub.
 - `docs/ARCHITECTURE.md`: one line on the new line-client surface.
 - Untouched: `packages/line-client-sqlite`, `packages/line-client/assets/ltsm/`, all servers' behaviour.

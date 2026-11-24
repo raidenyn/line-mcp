@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Typed message-fetch failure
-`@raidenyn/line-client` SHALL export a typed failure `LineReadError` with a `kind` of exactly `session_expired` or `unavailable`, a fixed human-readable `message`, and the original failure as `cause`. The range fetch SHALL report every LINE, authentication, network or abort failure as `{ ok: false, error }` and SHALL NOT reject for them.
+`@raidenyn/line-client` SHALL export a typed failure `LineReadError` with a `kind` of exactly `session_expired` or `unavailable`, a fixed human-readable `message`, and, when an underlying failure value exists, that value as a non-enumerable `cause` that is not serialized with the result. The range fetch SHALL report every LINE, authentication, network or abort failure as `{ ok: false, error }` and SHALL NOT reject for them.
 
 #### Scenario: Failure is a value
 - **WHEN** a range fetch fails for any LINE, authentication, network or abort reason
@@ -15,8 +15,8 @@ The `message` of a `LineReadError` SHALL be chosen from fixed texts, with only r
 - **THEN** the `LineReadError.message` does not contain it
 
 #### Scenario: Malformed business error
-- **WHEN** LINE answers HTTP 200 with a non-numeric `code` such as a token string
-- **THEN** the result is `unavailable` and `message` does not contain that string
+- **WHEN** LINE answers a range fetch with HTTP 200 and a non-numeric `code` such as a token string
+- **THEN** the result is `unavailable`, and neither `message` nor `JSON.stringify` of the result contains that string
 
 #### Scenario: Value that throws on inspection
 - **WHEN** the failure value is a proxy whose property access throws
@@ -34,7 +34,7 @@ An HTTP 401 from LINE, missing authentication, a login still in progress, and a 
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired`
 
 #### Scenario: Login in progress
-- **WHEN** a login is waiting for its QR scan or PIN and a range fetch is made
+- **WHEN** a login is waiting for its PIN (after a certificate rejection) and a range fetch is made
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired` without waiting and without a history request
 
 ### Requirement: Transient failures are unavailable
@@ -56,6 +56,10 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 - **WHEN** the token refresh answers HTTP 500 and the message fetch then answers HTTP 401
 - **THEN** the range fetch resolves to `{ ok: false }` with `error.kind` `unavailable`
 
+#### Scenario: Overlapping reads with different refresh outcomes
+- **WHEN** one read joins a refresh that answers HTTP 500 and gets HTTP 401, while a later read on the same client refreshes successfully
+- **THEN** the first read still reports `unavailable`
+
 #### Scenario: Login failed on a server error
 - **WHEN** the background login failed with HTTP 500 and a range fetch is made
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `unavailable`
@@ -72,7 +76,7 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 - **THEN** the call resolves to `{ ok: false }` and no messages are returned
 
 ### Requirement: Range coverage is reported
-The range fetch SHALL report `coverage` as `complete` if and only if the walk received a message created before `sinceMs`; otherwise as `history_end` when LINE served nothing older (empty or short page, or only the boundary message re-included), or as `truncated` when the walk stopped on its progress guard or iteration cap. It SHALL report `oldestReachedMs` as the creation time of the oldest message received, or `null` when none was received.
+The range fetch SHALL report `coverage` as `complete` if and only if the walk received a message created before `sinceMs`. Otherwise it SHALL report `truncated` when the walk hit a safety stop, and `history_end` when LINE served nothing older. `oldestReachedMs` SHALL be the creation time of the oldest message received, or `null` when none was received.
 
 #### Scenario: Walk passes the start of the range
 - **WHEN** the walk receives a message older than `sinceMs`
@@ -85,6 +89,18 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 #### Scenario: Progress-guard stop keeps received messages
 - **WHEN** a previous page returns fresh messages with the same creation time as the current oldest
 - **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
+
+#### Scenario: Safety stops are truncated
+- **WHEN** the walk stops on its progress guard, on a full previous page with no new messages, or on its iteration cap
+- **THEN** `coverage` is `truncated`
+
+#### Scenario: End of served history
+- **WHEN** a page is empty or shorter than the page size, including one holding only the boundary message, and no safety stop fired
+- **THEN** `coverage` is `history_end`
+
+#### Scenario: Replayed full page
+- **WHEN** a previous page is full but contains only messages already received
+- **THEN** `coverage` is `truncated`, not `history_end`
 
 #### Scenario: Iteration cap
 - **WHEN** the walk hits its iteration cap before receiving a message older than `sinceMs`
@@ -109,15 +125,26 @@ The range fetch SHALL reject with a `RangeError`, before any request to LINE, wh
 - **THEN** the failure is returned and `upsertMessages` is not called
 
 ### Requirement: Cancelled fetches write nothing
-When the caller's `signal` is aborted at any point before the range fetch returns, including during the last page, sender-name resolution or a token-refresh wait, the call SHALL settle with an `unavailable` failure without waiting for that work, and `fetchMessageRange` SHALL NOT write to the cache, even if LINE already answered.
+When the caller's `signal` is aborted at any point before the range fetch returns, including while a request is being signed, a response body is read, a page or contact lookup is in flight, or a token refresh is awaited, the call SHALL settle promptly with `unavailable` and message `LINE unavailable: aborted`, whatever the abort reason and whatever other failure occurred, and `fetchMessageRange` SHALL NOT write to the cache, even if LINE already answered.
 
 #### Scenario: Abort after LINE answered
 - **WHEN** the signal is aborted after `getMessagesBetween` resolved successfully but before the write
 - **THEN** the result is `unavailable` and `upsertMessages` is not called
 
-#### Scenario: Abort during the last page or contact lookup
-- **WHEN** the signal is aborted while the final short page or the contact lookup is in flight
-- **THEN** `getMessagesBetween` resolves to `unavailable` with message `LINE unavailable: aborted`
+#### Scenario: Abort while signing is blocked
+- **WHEN** the signal is aborted while the request signer has not resolved
+- **THEN** `getMessagesBetween` resolves to `unavailable` with message `LINE unavailable: aborted` without waiting for the signer
+
+#### Scenario: Abort wins over a concurrent failure
+- **WHEN** the signal is aborted with a custom reason while a 401 response body is being read
+- **THEN** the result is `LINE unavailable: aborted`, not `session_expired`
+
+### Requirement: Truncated walks can be refused before writing
+When `fetchMessageRange` is called with `rejectTruncated: true` and the walk's coverage is `truncated`, it SHALL return `unavailable` with message `LINE unavailable: history walk truncated` and SHALL NOT write to the cache. Without the flag, a truncated result SHALL be written and returned unchanged.
+
+#### Scenario: Live catch-up refuses a truncated walk
+- **WHEN** `rejectTruncated` is true and `getMessagesBetween` returns `coverage` `truncated`
+- **THEN** the result is `unavailable` and `upsertMessages` is not called
 
 ### Requirement: Existing reads unchanged
 The existing `getMessages`, `getMessagesInRange`, `withMessageCache`, login and token-refresh behaviour SHALL remain unchanged, and the errors they throw SHALL keep their message text.
