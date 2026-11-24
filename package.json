@@ -12,10 +12,10 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "test:unit": "vitest run packages tests/architecture tests/release",
+    "test:unit": "vitest run packages tests/architecture tests/release tests/harness",
     "test:smoke": "npm run build && vitest run tests/smoke",
     "test:e2e": "vitest run tests/e2e.test.ts",
-    "verify": "npm run lint && npm run build && npx openspec validate --all --strict && vitest run --reporter=dot packages tests/architecture tests/release tests/smoke",
+    "verify": "npm run lint && npm run build && npx openspec validate --all --strict && vitest run --reporter=dot packages tests/architecture tests/release tests/harness tests/smoke",
     "verify:changed": "node scripts/verify-changed.mjs",
     "verify:all": "npm run verify && docker build --target server -t line-mcp-server:test . && docker build --target line-mcp -t line-mcp-standalone:test . && npx vitest run --reporter=dot tests/docker/docker-smoke.test.ts && npx vitest run --reporter=dot tests/artifacts/line-client-pack.test.ts",
     "lint": "eslint .",

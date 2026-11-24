@@ -164,3 +164,6 @@ settings.local.json
 
 # Sensetive examples
 /specs/chat_export_examples
+
+# Temporary lint fixtures from tests/harness (removed after each test)
+tests/harness/.fixture-*/
