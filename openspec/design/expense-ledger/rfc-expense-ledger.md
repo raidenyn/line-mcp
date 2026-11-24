@@ -15,7 +15,7 @@ This RFC is the source of truth for the feature. Decision records and task break
 
 ## Summary
 
-`packages/bank-mcp` becomes a persisted, per-owner ledger: the server stores each transaction once, keeps the owner's decisions about it, and computes every reported number itself. Today it stores bank messages and category regexes but rebuilds every transaction from them on each call, so the agent that produces daily and weekly expense reports had to keep its own ledger and gave the owner two different values for one charge. The result is three milestones that end with nine bank tools, three of today's five removed. Every decision is agreed; the RFC waits for the decider's acceptance. Five unverified assumptions are listed as open questions.
+`packages/bank-mcp` becomes a persisted, per-owner ledger: the server stores each transaction once, keeps the owner's decisions about it, and computes every reported number itself. Today it stores bank messages and category regexes but rebuilds every transaction from them on each call, so the agent that produces daily and weekly expense reports had to keep its own ledger and gave the owner two different values for one charge. The result is four milestones: three build the server and end with nine bank tools, three of today's five removed; the fourth delivers the agent skills for them. Every decision is agreed; the RFC waits for the decider's acceptance. Five unverified assumptions are listed as open questions.
 
 ## Problem and context
 
@@ -84,7 +84,7 @@ Prior art: `summarize_transactions` totals a period but has no identity, base cu
 - Migrating existing categories.
 - Detecting refunds automatically, and partial refunds. Thai banks do not announce refunds in LINE; the owner marks a full refund by hand.
 - The postponed features listed in [Appendix F](#f-postponed-features), among them manual transactions, bulk changes of the classification of checked transactions and agent rules.
-- Anything the agent does: web search, the conversation with the owner, scheduling, report wording and delivery. These depend on the agent's harness and may become skills later; they are outside this RFC and this repository's code.
+- Doing the agent's work on the server: web search, the conversation with the owner, scheduling, report wording and delivery stay with the agent and its harness. The skills that tell the agent how to do this work with the new tools are part of this project, as its last milestone (M4).
 
 ## What changes
 
@@ -154,7 +154,7 @@ The server keeps a ledger of transactions built from bank messages and answers e
 
 The server owns data and numbers. The agent owns everything said to the owner.
 
-| Server (this repository) | Agent (its harness; later skills) |
+| Server (this repository) | Agent (its harness; skills from M4) |
 |---|---|
 | Transactions, their identity and amounts | Web search for a merchant the server could not identify |
 | Stored decisions, merchants, tags, accounts | Asking the owner and wording the question |
@@ -318,7 +318,7 @@ Each contract is additive while milestones land: new tables, fields, members and
 
 - **What it is:** error model for all bank tools.
 - **Shape:** structured result; errors `{ code, message, action?, details? }` with codes `setup_required`, `invalid_argument`, `not_found`, `conflict`, `internal_error`, `line_session_expired`; `idempotency_key` and `expected_revision` on writes; lists are ordered by the ledger's ingest sequence number (a request may ask for transaction-date order instead), and a cursor continues after the last row returned, so in ingest order a row is never repeated and a change in the ledger does not invalidate the cursor. In transaction-date order that is not guaranteed: a row whose date changes between two pages can appear twice or be missed.
-- **Produced by:** M1. **Consumed by:** M2–M3.
+- **Produced by:** M1. **Consumed by:** M2–M4.
 - **Stability:** frozen.
 - **Agreed:** the cursor is enough; a list is not refused because the ledger changed while paging. A transaction that appears behind the cursor during paging is missed by that pass and seen by the next. Totals are not affected, because figures come from one `analyze_transactions` request.
 
@@ -326,7 +326,7 @@ Each contract is additive while milestones land: new tables, fields, members and
 
 - **What it is:** interface shared by lists, bulk tagging and figures.
 - **Shape:** period (preset or dates, in the owner's timezone), sources, accounts and cards, categories including the value "uncategorised", state (`auto`, `suggested`, `unidentified`, `checked`, or "open" for the first three), "needs review" as a separate filter (defined in Appendix A), changed since a date, a list of merchants, tags, currency, direction, amount range, `counts_in_totals`.
-- **Produced by:** M1 (`list_transactions`). **Consumed by:** M2 (tagging by filter, review), M3 (`analyze_transactions`).
+- **Produced by:** M1 (`list_transactions`). **Consumed by:** M2 (tagging by filter, review), M3 (`analyze_transactions`), M4 (the skills name the filters).
 - **Stability:** provisional until M3 is tested on real data; values are added, not renamed.
 - **Agreed:** one filter set for all three uses, so the rows behind a figure are always reachable by repeating its filters. The daily report asks for "needs review", which also returns checked transactions with a proposed correction; a figure for state "open" covers every open transaction, also those older than `review_from`, and none that is checked, and a list with the same filters returns exactly those rows. Alternative: a separate reference from a figure to its rows. Changing it later is additive.
 
@@ -336,6 +336,8 @@ The exact request and result of `analyze_transactions` (its measures and bounds 
 
 Also left to the breakdown of the milestone that owns it, because no other milestone depends on the answer: the mechanics of template writes and corrections (M1, M2), and the storage format of templates (M1; formerly the open question Template shape). The RFC fixes only what crosses milestones: templates stay shared per chat, and after a format change the previous release must still be able to read them.
 
+Left to the M4 breakdown, at the owner's direction: how the skills are distributed so that they stay in sync with the server.
+
 ## Alternatives
 
 | Criterion | Proposed ledger | Stateless parser plus an override table | Do nothing: the agent keeps the state |
@@ -343,7 +345,7 @@ Also left to the breakdown of the milestone that owns it, because no other miles
 | Same numbers twice | Yes | No: conversion and totals stay per call | No (measured) |
 | Decisions stored once | Yes | Per transaction only | In agent files, which drifted |
 | "What is new" without agent memory | Yes | No | No (measured) |
-| Build cost | Three milestones | One milestone | None |
+| Build cost | Four milestones | One milestone | None |
 | Breaking change | Yes, one release | No | No |
 
 The deciding trade-off is build cost against repeatable numbers. The override table is the strongest runner-up: it is small and fixes one-off classification. It lost because it leaves the three measured failures in place: differing values, double-counted card payments and repeated questions.
@@ -369,7 +371,7 @@ The deciding trade-off is build cost against repeatable numbers. The override ta
 
 ## Drawbacks and risks
 
-- **Breaking release (hard to reverse).** The whole feature ships as one release that removes three old tools; agents that name them must be rewritten. Between M1 and M3 the main branch has no totals tool, which is acceptable only because nothing is released in between.
+- **Breaking release (hard to reverse).** The whole feature ships as one release that removes three old tools; agents that name them must be rewritten; M4 delivers the skills for that. Between M1 and M3 the main branch has no totals tool, which is acceptable only because nothing is released in between.
 - **Empty taxonomy (hard to reverse for the owner's time).** Categories are not migrated, so the owner classifies again.
 - **Silent gaps in history.** The ledger does not know whether LINE returned every message of a period. Mitigation: an explicit error when a fetch fails, a re-request of any time range, and an export for history LINE no longer serves.
 - **Review load.** On-boarding months of history means reviewing every transaction once. Mitigation: merchants pre-fill the suggestions and one call confirms a list.
@@ -384,7 +386,7 @@ The deciding trade-off is build cost against repeatable numbers. The override ta
 - **Failure behaviour:** when LINE cannot be reached, tools answer from the stored ledger; those that return or total transactions add the incomplete-list error.
 - **Observability:** `ledger_status` reports the last successful catch-up, the last error, and per source the number of transactions that need review.
 - **Migration and rollback:** new tables only; the cache and the legacy `categories` table are untouched, so rolling back to the previous release restores the old tools with their data. If the template format changes (left to the M1 breakdown), the old release must still be able to read the files, or an old-format copy is kept. Decisions made in the ledger stay in its tables, unused.
-- **Cost:** no new service or dependency. The owner spends time on on-boarding; the agent's skill and cron prompts are rewritten outside this repository.
+- **Cost:** no new service or dependency. The owner spends time on on-boarding; the agent's skills are written in M4; the schedule prompts stay in the agent's harness.
 
 ## Milestones
 
@@ -393,10 +395,13 @@ The deciding trade-off is build cost against repeatable numbers. The override ta
 | M1 Ledger | Transactions persist with identity and base amounts; the LINE read returns messages or a typed error; sub-accounts; `ledger_status`, `manage_accounts`, `list_transactions`; the template rescan before a write is saved; the three old tools removed | Source port, Ledger data model, Tool envelope, Filter set | — | — | ~6 PRs | planned |
 | M2 Classification, tags and review | Merchants, categories with the built-in internal transfer, tags and tagging by filter, bulk confirm, the refund mark, the reversal hint, proposed corrections for checked transactions | — | all M1 contracts | M1 | ~6 PRs | planned |
 | M3 Analytics | `analyze_transactions` | — | Filter set, Ledger data model, Tool envelope | M2 | ~3 PRs | planned |
+| M4 Agent skills | The agent knows how to work with the nine tools: on-boarding, the daily report and review, identifying a merchant by web search, period questions and report wording. The exact list of skills is set at the breakdown | — | Tool envelope, Filter set | M3 | not estimated | planned |
 
-The milestones are sequential and are a build order, not releases. M1 is first because it carries the data model, the hardest part to change. Analytics is last of the three main milestones because it rests on all the others. Sizes are estimated.
+The milestones are sequential and are a build order, not releases. M1 is first because it carries the data model, the hardest part to change. Analytics is last of the three server milestones because it rests on all the others. M4 is last of all because the skills describe the tools as built. Sizes are estimated; M4 has no estimate yet.
 
-Agreed, **Single release**: all milestones ship together in one release. The deprecated tools are removed as early as possible, in M1 with the transactions, so the name `manage_categories` is free for the per-owner contract in M2.
+Agreed, **Skills milestone**: the agent skills are the last milestone of this project and not a later feature, because the new tools are useless if the agent does not know how to work with them. The split of work is unchanged: the server still searches nothing, asks nothing and schedules nothing. How the skills are distributed so that they stay in sync with the server is left to the M4 breakdown.
+
+Agreed, **Single release**: all milestones ship together in one release. For M4 this means the skills are ready when the tools are released; whether they travel in the same package depends on how they are distributed. The deprecated tools are removed as early as possible, in M1 with the transactions, so the name `manage_categories` is free for the per-owner contract in M2.
 
 
 ## Decisions to approve
@@ -435,6 +440,7 @@ Agreed, **Single release**: all milestones ship together in one release. The dep
 | Manual refund mark | The owner marks a full refund | yes | agreed | Owner: Thai banks do not report refunds; partial refunds later | [Internal transfers](#internal-transfers-reversals-and-refunds) |
 | Cache-untouched | The LINE cache keeps its schema | yes | agreed | Owner: keep the cache clearly separate from the ledger database | [Consistency](#consistency-and-the-line-cache) |
 | Server-agent scope | Web search, conversation, scheduling and wording belong to the agent | yes | agreed | Owner: they depend on the agent's harness | [Server and agent](#server-and-agent) |
+| Skills milestone | The agent skills for the new tools are the last milestone of this project (M4) | yes | agreed | Owner: the new tools are useless if the agent does not know how to work with them | [Milestones](#milestones) |
 | General tags | A tag is any label | yes | agreed | Owner: also "Christmas 2026", "AI" | [Analytics](#analytics-and-reports) |
 | One analytics tool | Every period figure comes from `analyze_transactions`; the daily report's summary uses the same code | yes | agreed | Owner: calculations belong in the deterministic layer | [Analytics](#analytics-and-reports) |
 | No-migration | Old categories are dropped | yes | agreed | Owner: "Just drop ignore approach and create a new one" | [Non-goals](#goals-and-non-goals) |
@@ -513,6 +519,7 @@ Not decided. Filled in when the review ends.
 - **2026-11-24, self-review 2 of 3 (one name per concept).** Fixed: "daily list" became the daily report; "open questions" as a count in `ledger_status` became "transactions that need review", so the term is left to the Open questions section; "refresh" is defined on first use; prose says "spending" and keeps `outcome` only as the measure's name; the M1 row names the template rescan.
 - **2026-11-24, self-review 3 of 3 (links, tables, numbers, decision list).** Checked by script: every internal link resolves, every table row has its table's column count, both linked files exist, four Mermaid blocks, nine tools in Appendix C. The diagrams were not parsed again; they did not change. Fixed: the summary and the Duplicate-mark row now name the two details the author added and the owner has not confirmed, so "agreed" is not read as covering them. Found and left as is: "Tool removal" and "Product rules" carry "no rationale given".
 - **2026-11-24, owner confirmation.** Confirmed: how proposed corrections reach the owner, and how marked duplicates appear in review. The owner asked for a pull request with the RFC alone; links to the session analysis and the earlier draft were removed, because those working files stay out of the repository. The RFC is not accepted yet.
+- **2026-11-24, owner comment on agent skills.** The owner moved the agent skills from the postponed features into this project as its last milestone, because the new tools are useless if the agent does not know how to work with them. Added: M4 Agent skills and the decision Skills milestone; the row was removed from Appendix F. Server-agent scope is unchanged. How the skills are distributed and kept in sync with the server is left to the M4 breakdown, as the owner asked. Stated by the author, not by the owner: the list of skills in the M4 row, that M4 consumes the Tool envelope and the Filter set, and that under Single release the skills are ready when the tools are released. M4 has no size estimate. Not reviewed by Astra.
 
 ## Amendments
 
@@ -643,7 +650,7 @@ Not part of this RFC. Each needs its own decision before it is built.
 | Agent rules: stored rules for cases a merchant code cannot decide (patterns on the message text, transfers without a payee, regular payments by amount and day, aggregators) | Owner: possibly a standalone feature | The owner answers each such transaction |
 | Automatic pairing of the two sides of an internal transfer | Out of scope for now | A merchant mapping or the owner's mark |
 | Automatic tagging by a tag's dates and conditions | Close to agent rules | Tagging by filter in one request |
-| Splitting one transaction over several categories | It changes what a category filter, a summary and a figure count, which the three milestones must not have to guess | One category per transaction |
+| Splitting one transaction over several categories | It changes what a category filter, a summary and a figure count, which the milestones must not have to guess | One category per transaction |
 | Undo of a decision as a stored history | Needs reversible decision records from the first decision on | The owner changes an answer directly; the trace shows what set it |
 | Changing the base currency | Needs a revaluation of every stored amount, including checked ones, at the rate of each transaction's date | Set once. Every transaction keeps its original amount, currency and date, so a later change is a recomputation without a schema change |
 | Correcting a transaction's amount by hand | Amounts come from the bank message; an owner override would have to survive every re-read | None; a wrong amount is fixed through the template, with the owner accepting the correction, or stays |
@@ -653,6 +660,5 @@ Not part of this RFC. Each needs its own decision before it is built.
 | Bulk changes of the classification of checked transactions | Follow-up | One call acknowledges, answers or decides corrections for any number of listed transactions; a checked answer is changed one transaction at a time |
 | Proof that a period of history is complete (checked ranges, export acceptance, resumable fetches) | Replaced by Transaction-level consistency | Error on failed fetch; re-request of any time range |
 | A second message source, such as another messenger or a bank API, and its template sharing rule | No such source yet | The source port keeps it possible |
-| Agent skills: merchant web search, on-boarding dialogue, scheduling, report wording | Belong to the agent's harness | Tools only |
 | Budgets, statement import, a subscriptions view | Not requested | None |
 | Migration of the old categories and removal of the legacy `categories` table | Owner: start fresh | The table is left unread |
