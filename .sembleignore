@@ -1,0 +1,4 @@
+# repo-search (Semble) index rules; gitignore syntax.
+# Index YAML too: CI workflows, docker-compose.yml, OpenSpec config/schema.
+!*.yaml
+!*.yml

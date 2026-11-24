@@ -110,6 +110,11 @@ Linux container with a warm `node_modules`. CI keeps the existing verbose jobs
   comments anchored to the relevant lines of that PR; report in chat only
   when there is no PR.
 
+## Code search
+
+If `repo-search` exists, use it for where/why questions; fall back to grep
+(always grep for exact identifiers and strings).
+
 ## Code style
 
 `npm run lint` must pass. Match the conventions of the file you are editing.
