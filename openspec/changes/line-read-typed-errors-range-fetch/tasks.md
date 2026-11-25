@@ -10,14 +10,14 @@
 
 ## 3. Public surface and cache fetch
 
-- [ ] 3.1 Add the exported `LineReadClient extends LineApiClient` with `getMessagesBetween`, return it from `createLineClient`, leave `LineApiClient` and `packages/server/src/test-support.ts` unchanged (design D4b). Verify: `npm run build && npx vitest run packages/line-client packages/server packages/line-mcp`
-- [ ] 3.2 Create `packages/line-client/src/message-range.ts` with `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? })` (design D4b) and export it and the new types from `index.ts` (not the classifier); unit tests with doubles: upserts on success, no write on failure, abort or refused truncation, cache-write errors propagate, `latestTimestamp` never read. Verify: `npx vitest run packages/line-client/src/message-range.test.ts`
+- [x] 3.1 Add the exported `LineReadClient extends LineApiClient` with `getMessagesBetween`, return it from `createLineClient`, leave `LineApiClient` and `packages/server/src/test-support.ts` unchanged (design D4b). Verify: `npm run build && npx vitest run packages/line-client packages/server packages/line-mcp`
+- [x] 3.2 Create `packages/line-client/src/message-range.ts` with `fetchMessageRange(client, cache, ownerMid, chatMid, { sinceMs, untilMs, signal?, rejectTruncated? })` (design D4b) and export it and the new types from `index.ts` (not the classifier); unit tests with doubles: upserts on success, no write on failure, abort or refused truncation, cache-write errors propagate, `latestTimestamp` never read. Verify: `npx vitest run packages/line-client/src/message-range.test.ts`
 
 ## 4. Acceptance tests against the LINE mock
 
-- [ ] 4.1 Add `packages/line-client/src/message-range.mock.test.ts` driving the built `@raidenyn/line-client` against the in-process mock (design D5): an older range below newer cached messages is returned and cached (`coverage: 'complete'` for `005`…`010`, `'history_end'` for `000`…`010`); an unknown access token gives `session_expired`; a stopped mock gives `unavailable` with the network-error message and a recorded `fetch` to its recent-messages route. Verify: `npm run build && npx vitest run packages/line-client/src/message-range.mock.test.ts`
+- [x] 4.1 Add `packages/line-client/src/message-range.mock.test.ts` driving the built `@raidenyn/line-client` against the in-process mock (design D5): an older range below newer cached messages is returned and cached (`coverage: 'complete'` for `005`…`010`, `'history_end'` for `000`…`010`); an unknown access token gives `session_expired`; a stopped mock gives `unavailable` with the network-error message and a recorded `fetch` to its recent-messages route. Verify: `npm run build && npx vitest run packages/line-client/src/message-range.mock.test.ts`
 
 ## 5. Docs and gate
 
-- [ ] 5.1 Add the new line-client read surface (typed failures, `getMessagesBetween`, `fetchMessageRange`, cancellation hand-off) to `docs/ARCHITECTURE.md` and the `packages/line-client` README if it lists exports. Verify: `npm run lint`
-- [ ] 5.2 Run the final size check (plan Task 7 Step 2), the pre-PR gate and the packed-artifact check. Verify: `npm run verify && npx vitest run tests/artifacts/line-client-pack.test.ts`
+- [x] 5.1 Add the new line-client read surface (typed failures, `getMessagesBetween`, `fetchMessageRange`, cancellation hand-off) to `docs/ARCHITECTURE.md` and the `packages/line-client` README if it lists exports. Verify: `npm run lint`
+- [x] 5.2 Run the final size check (plan Task 7 Step 2), the pre-PR gate and the packed-artifact check. Verify: `npm run verify && npx vitest run tests/artifacts/line-client-pack.test.ts`
