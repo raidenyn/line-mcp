@@ -26,10 +26,6 @@ const EXCLUDES = [
 
 /** Intentional matches, as `file:text` (no line numbers). */
 export const ALLOWED: ReadonlySet<string> = new Set([
-  `.claude/settings.json:      "Bash(${NPM} run test:e2e*)",`,
-  `.claude/settings.json:      "Bash(${NPX} vitest run *e2e*)"`,
-  `tests/release/agent-policy.test.ts:        'Bash(${NPM} run test:e2e*)',`,
-  `tests/release/agent-policy.test.ts:        'Bash(${NPX} vitest run *e2e*)',`,
   `tests/release/agent-policy.test.ts:    expect(allow).not.toContain('Bash(${NPX} vitest run *)');`,
   `tests/artifacts/line-client-pack.test.ts:    // \`${NPM} ls <pkg>\` exits non-zero (and prints "(empty)") when the named`,
   `tests/release/release-workflow.test.ts:      expect(run, where).not.toMatch(/^p?${NPM} run release$/m);`,

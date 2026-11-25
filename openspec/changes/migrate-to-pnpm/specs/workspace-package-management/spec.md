@@ -137,20 +137,31 @@ an external consumer would.
 - **THEN** the prepack vendoring resolves happy-dom and every transitive dependency
 - **AND** the tarball installs offline into a directory outside the checkout with no unmet dependencies
 
-### Requirement: Agent permissions and hooks use pnpm commands
+### Requirement: Agent permissions allow-list the pnpm commands
 
-The committed agent policy MUST allow the pnpm forms of the lint, build, unit,
-smoke and verify commands. It MUST ask before running the live e2e suite in
-both its pnpm and npm/npx forms. It MUST deny both `npm publish` and
-`pnpm publish`. The commit-message hook and the lint-on-edit hook MUST invoke
-tools through pnpm or the local `node_modules/.bin`, not `npx`.
+The committed agent policy is an allow-list only, with no `ask` or `deny` rules
+(repository decision in #164). Its allow-list MUST contain the pnpm forms of the
+lint, build, unit, smoke and verify commands and of the safe `vitest run`
+roots, and MUST NOT auto-approve a broad `vitest run` or any e2e pattern.
 
-#### Scenario: Publishing is denied for both managers
+#### Scenario: Safe commands are allow-listed in pnpm form
 
-- **WHEN** an agent attempts `pnpm publish` or `npm publish`
-- **THEN** the committed policy denies the command
+- **WHEN** an agent runs `pnpm run verify` or `pnpm exec vitest run packages`
+- **THEN** the committed policy allows it without a prompt
+- **AND** neither `pnpm exec vitest run *` nor any e2e pattern is allow-listed
 
-#### Scenario: e2e suite still asks
+### Requirement: Hooks and hard rules use pnpm
 
-- **WHEN** an agent runs `pnpm run test:e2e` or `npx vitest run tests/e2e.test.ts`
-- **THEN** the committed policy asks before running it
+The commit-message hook and the lint-on-edit hook MUST invoke tools through
+pnpm or the local `node_modules/.bin`, not `npx`. The `AGENTS.md` hard rule
+MUST name both `npm publish` and `pnpm publish` as forbidden.
+
+#### Scenario: Commit messages are checked through pnpm
+
+- **WHEN** a commit is made with the Husky hooks installed
+- **THEN** `.husky/commit-msg` runs `pnpm exec commitlint --edit`
+
+#### Scenario: Publishing stays forbidden for both managers
+
+- **WHEN** a reader checks the `AGENTS.md` hard rules
+- **THEN** both `npm publish` and `pnpm publish` are forbidden

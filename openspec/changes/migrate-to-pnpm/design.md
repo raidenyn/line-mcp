@@ -286,13 +286,13 @@ needs no pnpm. Only comments that describe the workspace layout change.
   `Bash(pnpm run test:unit*)`, `Bash(pnpm run test:smoke*)`,
   `Bash(pnpm run verify*)`, `Bash(pnpm exec vitest run packages*)` (and the
   same for each `tests/*` prefix listed today), and `Bash(pnpm exec eslint *)`.
-- The ask list covers the e2e suite in both managers' forms
-  (`Bash(pnpm run test:e2e*)`, `Bash(pnpm exec vitest run *e2e*)`,
-  `Bash(npm run test:e2e*)`, `Bash(npx vitest run *e2e*)`), because
-  `node_modules/.bin` still makes `npx` work.
-- The deny list keeps `Bash(npm publish*)` and adds `Bash(pnpm publish*)`.
-- `agent-policy.test.ts` asserts all of this. The `AGENTS.md` hard rule names
-  both managers.
+- *Superseded by #164 (merged to `main` during this PR):* the policy no longer
+  has `ask` or `deny` lists, so the planned e2e ask rules in both forms and the
+  `pnpm publish` deny rule were dropped when `main` was merged in. The
+  allow-list keeps the pnpm forms and still never auto-approves a broad
+  `vitest run` or an e2e pattern.
+- `agent-policy.test.ts` asserts the allow-list and the absence of `ask`/`deny`.
+  The `AGENTS.md` hard rule names both `npm publish` and `pnpm publish`.
 
 **D12. Hooks.**
 - `.husky/commit-msg` runs `pnpm exec commitlint --edit "$1"`.

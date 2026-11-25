@@ -27,7 +27,7 @@
 1. **Stale npm `node_modules` in an existing worktree.** A pnpm install over an npm tree keeps undeclared entries such as `debug`, the `@raidenyn/bank-mcp` link and old package-local binaries (Sol's bench run). Task 2 Step 4b deletes the npm trees first and asserts that those entries are gone. AGENTS.md (Task 8) documents the same one-time step, and Task 2.3 separately installs a clean export.
 2. **`npm pack` after pnpm restored the happy-dom symlink.** Task 4 asserts the symlink exists before the second pack, and checksums the store's happy-dom files.
 3. **The standalone Docker image under the strict layout.** Task 7 adds layout cases to the Docker smoke: no dangling links, no dev packages, no `bank-mcp` or `server` references. They run in CI's `docker` job.
-4. **Agent commands written the old way** (`npx vitest run tests/e2e.test.ts`). They must still ask. Task 5.1 asserts the npm/npx e2e ask rules remain.
+4. **Agent commands written the old way** (`npx vitest run tests/e2e.test.ts`). They must still ask. Task 5.1 asserts the npm/npx e2e ask rules remain. (Superseded by #164, which removed `ask`/`deny` rules from the policy; the allow-list still never matches e2e.)
 5. **A package that imports something only the root declares.** Task 2.1's per-package import check catches it; today that is `server`'s `better-sqlite3`.
 
 ---

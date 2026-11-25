@@ -52,7 +52,7 @@
 
 - [x] 5.1 Update `tests/release/agent-policy.test.ts`:
   - pnpm allow patterns;
-  - e2e ask rules in both pnpm and npm/npx forms;
+  - e2e ask rules in both pnpm and npm/npx forms (later superseded: #164 removed all `ask`/`deny` rules on `main`, and the merge adopted that);
   - no broad vitest allow in either form;
   - deny rules for both `npm publish*` and `pnpm publish*`.
 
