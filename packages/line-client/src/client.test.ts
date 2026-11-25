@@ -8,9 +8,17 @@ vi.mock('./signer', () => ({
   signForAccount: vi.fn().mockResolvedValue('fake-hmac'),
 }));
 
-import { LineClient, AuthData } from './client';
+import {
+  LineClient,
+  AuthData,
+  LineHttpError,
+  LineApiError,
+  LineNotAuthenticatedError,
+  classifyLineReadError,
+  LineReadResult,
+} from './client';
 import { createLineClient } from './index';
-import { getHmac } from './signer';
+import { getHmac, signForAccount } from './signer';
 
 // JWT with exp 10 days from now so refreshIfExpired never triggers
 function makeFakeJwt(expOffsetSec = 86400 * 10): string {
@@ -30,6 +38,14 @@ const baseAuth: AuthData = {
   kdfParameter2: 'k2',
 };
 
+// Auth whose JWT expires in 1 h, so every read triggers a token refresh. Use a
+// unique mid per test: the static refresh lock is keyed by mid.
+function soonAuth(mid: string): AuthData {
+  const soonExp = Math.floor(Date.now() / 1000) + 3600;
+  const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+  return { ...baseAuth, mid, accessToken: soonJwt };
+}
+
 function apiOk(data: unknown): Response {
   return new Response(JSON.stringify({ code: 0, message: 'ok', data }), {
     status: 200,
@@ -46,6 +62,11 @@ function apiErr(code: number, message: string, data: unknown = null): Response {
 
 function httpErr(status: number, body = 'error body'): Response {
   return new Response(body, { status });
+}
+
+type AuthenticateForRead = { authenticateForRead(): Promise<{ refreshFailedStatus: number | null }> };
+function authenticateForRead(client: LineClient): Promise<{ refreshFailedStatus: number | null }> {
+  return (client as unknown as AuthenticateForRead).authenticateForRead();
 }
 
 // ───────────────────────────────────────────────────────────
@@ -652,6 +673,599 @@ describe('LineClient.getMessagesInRange', () => {
 });
 
 // ───────────────────────────────────────────────────────────
+// getMessagesBetween
+// ───────────────────────────────────────────────────────────
+
+describe('LineClient.getMessagesBetween', () => {
+  type Route = (url: string, init?: RequestInit) => Response | Promise<Response>;
+
+  function raw(id: string, createdTime: number, from = 'u1') {
+    return { id, from, to: 'g1', toType: 2, createdTime: String(createdTime), contentType: 0, text: 'txt', hasContent: false };
+  }
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  const flush = () => new Promise(r => setTimeout(r, 0));
+
+  function refreshOk(accessToken = makeFakeJwt()): Response {
+    return new Response(JSON.stringify({ accessToken }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  function makeFetch(routes: { recent?: Route; previous?: Route; contacts?: Route; refresh?: Route } = {}) {
+    return vi.fn((url: string, init?: RequestInit): Promise<Response> => {
+      const route: Route =
+        url.includes('tokenRefresh') ? routes.refresh ?? (() => refreshOk())
+        : url.includes('getRecentMessagesV2') ? routes.recent ?? (() => apiOk([]))
+        : url.includes('getPreviousMessagesV2WithRequest') ? routes.previous ?? (() => apiOk([]))
+        : url.includes('getContactsV2') ? routes.contacts ?? (() => apiOk({ contacts: {} }))
+        : () => apiOk(null);
+      return Promise.resolve(route(url, init));
+    });
+  }
+
+  function callsTo(fetchFn: ReturnType<typeof makeFetch>, name: string) {
+    return fetchFn.mock.calls.filter(([url]) => url.includes(name));
+  }
+
+  function boundary(init?: RequestInit): { messageId: string; deliveredTime: string } {
+    const [req] = JSON.parse(String(init?.body)) as [{ endMessageId: { messageId: string; deliveredTime: string } }];
+    return req.endMessageId;
+  }
+
+  function setPageSize(client: LineClient, size: number) {
+    (client as unknown as { rangePageSize: number }).rangePageSize = size;
+  }
+
+  function value(result: LineReadResult) {
+    if (!result.ok) throw new Error(`expected ok, got ${result.error.kind}: ${result.error.message}`);
+    return result.value;
+  }
+
+  const ids = (result: LineReadResult) => value(result).messages.map(m => m.id).sort();
+
+  const ABORTED = { ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: aborted' } };
+
+  // ── Range and coverage ────────────────────────────────────
+
+  it('returns exactly the range across pages', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m5', 5000), raw('m6', 6000)]),
+      previous: (_url, init) => {
+        const { messageId } = boundary(init);
+        if (messageId === 'm5') return apiOk([raw('m3', 3000), raw('m4', 4000)]);
+        if (messageId === 'm3') return apiOk([raw('m1', 1000), raw('m2', 2000)]);
+        throw new Error(`unexpected boundary ${messageId}`);
+      },
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 2000, 4000);
+    expect(ids(result)).toEqual(['m2', 'm3', 'm4']);
+    expect(value(result).coverage).toBe('complete');
+    expect(value(result).oldestReachedMs).toBe(1000);
+  });
+
+  it('includes both bounds', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m1', 1000), raw('m2', 2000), raw('m3', 3000), raw('m4', 4000)]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+
+    const result = await client.getMessagesBetween('g1', 2000, 3000);
+    expect(ids(result)).toEqual(['m2', 'm3']);
+    expect(value(result).coverage).toBe('complete');
+  });
+
+  it('empty range inside history', async () => {
+    const fetchFn = makeFetch({ recent: () => apiOk([raw('m1', 1000), raw('m5', 5000)]) });
+    const client = new LineClient(baseAuth, fetchFn);
+
+    const result = await client.getMessagesBetween('g1', 2000, 4000);
+    expect(value(result)).toEqual({ messages: [], coverage: 'complete', oldestReachedMs: 1000 });
+  });
+
+  it('inclusive pagination ends in history_end', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: (_url, init) => {
+        const { messageId } = boundary(init);
+        if (messageId === 'm3') return apiOk([raw('m2', 2000), raw('m3', 3000)]);
+        if (messageId === 'm2') return apiOk([raw('m2', 2000)]);
+        throw new Error(`unexpected boundary ${messageId}`);
+      },
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(ids(result)).toEqual(['m2', 'm3', 'm4']);
+    expect(value(result).coverage).toBe('history_end');
+    expect(value(result).oldestReachedMs).toBe(2000);
+  });
+
+  it('short recent page is history_end', async () => {
+    const fetchFn = makeFetch({ recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]) });
+    const client = new LineClient(baseAuth, fetchFn);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(ids(result)).toEqual(['m3', 'm4']);
+    expect(value(result).coverage).toBe('history_end');
+    expect(value(result).oldestReachedMs).toBe(3000);
+    expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(0);
+  });
+
+  it('empty chat', async () => {
+    const fetchFn = makeFetch({ recent: () => apiOk([]) });
+    const client = new LineClient(baseAuth, fetchFn);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(value(result)).toEqual({ messages: [], coverage: 'history_end', oldestReachedMs: null });
+  });
+
+  it('empty previous page is history_end', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: () => apiOk([]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(ids(result)).toEqual(['m3', 'm4']);
+    expect(value(result).coverage).toBe('history_end');
+    expect(value(result).oldestReachedMs).toBe(3000);
+  });
+
+  it('replayed full page is truncated', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(value(result).coverage).toBe('truncated');
+  });
+
+  it('short replay is truncated', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000), raw('m5', 5000)]),
+      previous: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 3);
+
+    const result = await client.getMessagesBetween('g1', 0, 6000);
+    expect(value(result).coverage).toBe('truncated');
+  });
+
+  it('boundary-only previous page is history_end', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: () => apiOk([raw('m3', 3000)]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(value(result).coverage).toBe('history_end');
+  });
+
+  it('progress-guard stop keeps received messages', async () => {
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('a', 3000), raw('b', 3000)]),
+      previous: () => apiOk([raw('c', 3000), raw('d', 3000)]),
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 1000, 4000);
+    expect(ids(result)).toEqual(['a', 'b', 'c', 'd']);
+    expect(value(result).coverage).toBe('truncated');
+    expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(1);
+  });
+
+  function capFetch(lastPage?: (t: number) => ReturnType<typeof raw>[]) {
+    let n = 0;
+    return makeFetch({
+      recent: () => apiOk([raw('x1', 2_000_000), raw('x2', 2_000_001)]),
+      previous: (_url, init) => {
+        n++;
+        const t = parseInt(boundary(init).deliveredTime, 10);
+        if (n === 1000 && lastPage) return apiOk(lastPage(t));
+        return apiOk([raw(`p${n}a`, t - 2), raw(`p${n}b`, t - 1)]);
+      },
+    });
+  }
+
+  it('iteration cap is truncated', async () => {
+    const fetchFn = capFetch();
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 3_000_000);
+    expect(value(result).coverage).toBe('truncated');
+    expect(value(result).messages).toHaveLength(2002);
+    expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(1000);
+  });
+
+  it('terminal page on the last allowed request is history_end', async () => {
+    const fetchFn = capFetch(t => [raw('last', t - 1)]);
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 0, 3_000_000);
+    expect(value(result).coverage).toBe('history_end');
+    expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(1000);
+  });
+
+  it('crossing sinceMs on the last allowed request is complete', async () => {
+    const fetchFn = capFetch(t => [raw('old', 5), raw('last', t - 1)]);
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    const result = await client.getMessagesBetween('g1', 1000, 3_000_000);
+    expect(value(result).coverage).toBe('complete');
+    expect(value(result).oldestReachedMs).toBe(5);
+  });
+
+  it('rejects invalid arguments without a request', async () => {
+    const fetchFn = makeFetch();
+    const client = new LineClient(baseAuth, fetchFn);
+
+    for (const [since, until] of [[5000, 4000], [-1, 10], [NaN, 10], [0, Infinity]]) {
+      await expect(client.getMessagesBetween('g1', since, until)).rejects.toBeInstanceOf(RangeError);
+    }
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  // ── Errors ────────────────────────────────────────────────
+
+  it('maps 401 to session_expired', async () => {
+    const fetchFn = makeFetch({ recent: () => httpErr(401) });
+    const client = new LineClient(baseAuth, fetchFn);
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
+    });
+    expect(callsTo(fetchFn, 'tokenRefresh')).toHaveLength(0);
+  });
+
+  it('maps 500 to unavailable', async () => {
+    const client = new LineClient(baseAuth, makeFetch({ recent: () => httpErr(500) }));
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: HTTP 500' },
+    });
+  });
+
+  it('maps business error to unavailable', async () => {
+    const client = new LineClient(baseAuth, makeFetch({ recent: () => apiErr(10004, 'x') }));
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: LINE error 10004' },
+    });
+  });
+
+  it('maps rejected fetch to unavailable', async () => {
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => { throw new TypeError('fetch failed'); },
+    }));
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: network error' },
+    });
+  });
+
+  it('malformed business code is not leaked', async () => {
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => new Response(JSON.stringify({ code: 'eyJsecret', message: 'x', data: null }), { status: 200 }),
+    }));
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(result).toEqual({ ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: LINE error' } });
+    expect(JSON.stringify(result)).not.toContain('eyJsecret');
+  });
+
+  it('not authenticated is session_expired', async () => {
+    const fetchFn = makeFetch();
+    const client = new LineClient(null, fetchFn);
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('refresh 500 then 401 is unavailable', async () => {
+    const client = new LineClient(soonAuth('between-refresh-500'), makeFetch({
+      refresh: () => httpErr(500),
+      recent: () => httpErr(401),
+    }));
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: token refresh failed' },
+    });
+  });
+
+  it('overlapping reads keep their own refresh outcome', async () => {
+    const refreshA = deferred<Response>();
+    const refreshAEntered = deferred<void>();
+    const recentA = deferred<Response>();
+    const recentAEntered = deferred<void>();
+    let refreshCalls = 0;
+    let recentCalls = 0;
+    const fetchFn = makeFetch({
+      refresh: () => {
+        refreshCalls++;
+        if (refreshCalls === 1) { refreshAEntered.resolve(); return refreshA.promise; }
+        return refreshOk();
+      },
+      recent: () => {
+        recentCalls++;
+        if (recentCalls === 1) { recentAEntered.resolve(); return recentA.promise; }
+        return apiOk([]);
+      },
+    });
+    const client = new LineClient(soonAuth('between-overlap-outcome'), fetchFn);
+
+    const a = client.getMessagesBetween('g1', 0, 5000);
+    await refreshAEntered.promise;
+    refreshA.resolve(httpErr(500));
+    await recentAEntered.promise;
+
+    const b = await client.getMessagesBetween('g1', 0, 5000);
+    expect(b.ok).toBe(true);
+    expect(refreshCalls).toBe(2);
+
+    recentA.resolve(httpErr(401));
+    expect(await a).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: token refresh failed' },
+    });
+  });
+
+  it('refresh 401 is best-effort', async () => {
+    const auth = soonAuth('between-refresh-401');
+    const fetchFn = makeFetch({
+      refresh: () => httpErr(401),
+      recent: () => apiOk([raw('m1', 1000)]),
+    });
+    const client = new LineClient(auth, fetchFn);
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(ids(result)).toEqual(['m1']);
+    const [[, init]] = callsTo(fetchFn, 'getRecentMessagesV2');
+    expect((init?.headers as Record<string, string>)['x-line-access']).toBe(auth.accessToken);
+  });
+
+  it('header token matches the signed token during an overlapping refresh', async () => {
+    const auth = soonAuth('between-header-token');
+    const newToken = makeFakeJwt();
+    let refreshCalls = 0;
+    const fetchFn = makeFetch({
+      refresh: () => (++refreshCalls === 1 ? httpErr(500) : refreshOk(newToken)),
+      recent: () => apiOk([]),
+    });
+    const client = new LineClient(auth, fetchFn);
+    const signerEntered = deferred<void>();
+    const signerGate = deferred<string>();
+    let signedToken: string | undefined;
+    vi.mocked(signForAccount).mockImplementationOnce((_account, input) => {
+      signedToken = input.accessToken;
+      signerEntered.resolve();
+      return signerGate.promise;
+    });
+
+    const a = client.getMessagesBetween('g1', 0, 5000);
+    await signerEntered.promise;
+    expect((await client.getMessagesBetween('g1', 0, 5000)).ok).toBe(true);
+    expect(refreshCalls).toBe(2);
+    signerGate.resolve('fake-hmac');
+    expect((await a).ok).toBe(true);
+
+    const headerTokens = callsTo(fetchFn, 'getRecentMessagesV2')
+      .map(([, init]) => (init?.headers as Record<string, string>)['x-line-access']);
+    expect(signedToken).toBe(auth.accessToken);
+    // B sent the refreshed token; A must send the token it signed, not B's.
+    expect(headerTokens.sort()).toEqual([signedToken, newToken].sort());
+  });
+
+  it('fails whole range when a later page fails', async () => {
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: () => httpErr(500),
+    }));
+    setPageSize(client, 2);
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: HTTP 500' },
+    });
+  });
+
+  it('fails whole range when contacts fail', async () => {
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => apiOk([raw('m1', 1000)]),
+      contacts: () => httpErr(500),
+    }));
+    expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
+      ok: false,
+      error: { kind: 'unavailable', message: 'LINE unavailable: HTTP 500' },
+    });
+  });
+
+  it('resolves sender names', async () => {
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => apiOk([raw('m1', 1000)]),
+      contacts: () => apiOk({ contacts: { u1: { contact: { mid: 'u1', displayName: 'Alice' } } } }),
+    }));
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(value(result).messages[0].senderName).toBe('Alice');
+  });
+
+  // ── Abort ─────────────────────────────────────────────────
+
+  it('already-aborted signal', async () => {
+    const fetchFn = makeFetch();
+    const client = new LineClient(baseAuth, fetchFn);
+    const controller = new AbortController();
+    controller.abort();
+
+    expect(await client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal })).toEqual(ABORTED);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('aborts between pages', async () => {
+    const controller = new AbortController();
+    const fetchFn = makeFetch({
+      recent: () => apiOk([raw('m3', 3000), raw('m4', 4000)]),
+      previous: () => {
+        controller.abort();
+        return apiOk([raw('m1', 1000), raw('m2', 2000)]);
+      },
+    });
+    const client = new LineClient(baseAuth, fetchFn);
+    setPageSize(client, 2);
+
+    expect(await client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal })).toEqual(ABORTED);
+    await flush();
+    expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(1);
+  });
+
+  it.each([
+    { name: 'aborts while signing is blocked', stopPropagation: false },
+    { name: 'abort seen despite stopImmediatePropagation', stopPropagation: true },
+  ])('$name', async ({ stopPropagation }) => {
+    const fetchFn = makeFetch();
+    const client = new LineClient(baseAuth, fetchFn);
+    const controller = new AbortController();
+    if (stopPropagation) {
+      controller.signal.addEventListener('abort', event => event.stopImmediatePropagation());
+    }
+    const signerEntered = deferred<void>();
+    const signerGate = deferred<string>();
+    vi.mocked(signForAccount).mockImplementationOnce(() => {
+      signerEntered.resolve();
+      return signerGate.promise;
+    });
+
+    const read = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal });
+    await signerEntered.promise;
+    controller.abort();
+    expect(await read).toEqual(ABORTED);
+
+    signerGate.resolve('fake-hmac');
+    await flush();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("aborts a read that joined another read's refresh", async () => {
+    const refreshEntered = deferred<void>();
+    const refresh = deferred<Response>();
+    const fetchFn = makeFetch({
+      refresh: () => { refreshEntered.resolve(); return refresh.promise; },
+      recent: () => apiOk([]),
+    });
+    const client = new LineClient(soonAuth('between-joined-refresh'), fetchFn);
+    const controller = new AbortController();
+
+    const a = client.getMessagesBetween('g1', 0, 5000);
+    await refreshEntered.promise;
+    let bSettled = false;
+    const b = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal })
+      .finally(() => { bSettled = true; });
+    await flush();
+    expect(bSettled).toBe(false);
+    expect(callsTo(fetchFn, 'tokenRefresh')).toHaveLength(1);
+    expect(callsTo(fetchFn, 'getRecentMessagesV2')).toHaveLength(0);
+
+    controller.abort();
+    expect(await b).toEqual(ABORTED);
+
+    refresh.resolve(refreshOk());
+    expect((await a).ok).toBe(true);
+    await flush();
+    expect(callsTo(fetchFn, 'tokenRefresh')).toHaveLength(1);
+    expect(callsTo(fetchFn, 'getRecentMessagesV2')).toHaveLength(1);
+  });
+
+  it('abort raised synchronously inside the refresh fetch', async () => {
+    const controller = new AbortController();
+    const refresh = deferred<Response>();
+    const fetchFn = makeFetch({
+      refresh: () => { controller.abort(); return refresh.promise; },
+    });
+    const client = new LineClient(soonAuth('u-sync-abort'), fetchFn);
+
+    expect(await client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal })).toEqual(ABORTED);
+
+    refresh.resolve(refreshOk());
+    await flush();
+    expect(callsTo(fetchFn, 'getRecentMessagesV2')).toHaveLength(0);
+  });
+
+  it('abort wins over a ready 401', async () => {
+    const controller = new AbortController();
+    const recentEntered = deferred<void>();
+    const recent = deferred<Response>();
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => { recentEntered.resolve(); return recent.promise; },
+    }));
+
+    const read = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal });
+    await recentEntered.promise;
+    controller.abort(new Error('deadline'));
+    recent.resolve(httpErr(401));
+    expect(await read).toEqual(ABORTED);
+  });
+
+  it('aborts during a hanging 401 body', async () => {
+    const controller = new AbortController();
+    const bodyEntered = deferred<void>();
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => ({
+        ok: false,
+        status: 401,
+        text: () => { bodyEntered.resolve(); return new Promise<string>(() => {}); },
+      }) as unknown as Response,
+    }));
+
+    const read = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal });
+    await bodyEntered.promise;
+    controller.abort(new Error('deadline'));
+    expect(await read).toEqual(ABORTED);
+  });
+
+  it('aborts during contact lookup', async () => {
+    const controller = new AbortController();
+    const contactsEntered = deferred<void>();
+    const client = new LineClient(baseAuth, makeFetch({
+      recent: () => apiOk([raw('m1', 1000)]),
+      contacts: (_url, init) => {
+        contactsEntered.resolve();
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        });
+      },
+    }));
+
+    const read = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal });
+    await contactsEntered.promise;
+    controller.abort();
+    expect(await read).toEqual(ABORTED);
+  });
+});
+
+// ───────────────────────────────────────────────────────────
 // Concurrent refresh deduplication
 // ───────────────────────────────────────────────────────────
 
@@ -696,6 +1310,42 @@ describe('LineClient — concurrent refresh deduplication', () => {
     await client.listChats();
 
     expect(callback).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('LineClient — authenticateForRead', () => {
+  it('no auth → LineNotAuthenticatedError', async () => {
+    const mockFetch = vi.fn();
+    const client = new LineClient(null, mockFetch);
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Not authenticated');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('refresh failure is returned to each joined caller', async () => {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600;
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+    let resolveRefresh: ((r: Response) => void) | undefined;
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('tokenRefresh')) {
+        return new Promise<Response>(resolve => { resolveRefresh = resolve; });
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient({ ...baseAuth, mid: 'read-refresh-fail-mid', accessToken: soonJwt }, mockFetch);
+
+    const first = authenticateForRead(client);
+    const second = authenticateForRead(client);
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'));
+    resolveRefresh!(httpErr(500));
+
+    await expect(first).resolves.toEqual({ refreshFailedStatus: 500 });
+    await expect(second).resolves.toEqual({ refreshFailedStatus: 500 });
+    const refreshCalls = mockFetch.mock.calls.filter(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCalls).toHaveLength(1);
+    expect((client as unknown as { auth: AuthData }).auth.accessToken).toBe(soonJwt);
   });
 });
 
@@ -846,6 +1496,75 @@ describe('LineClient QR login', () => {
     expect(logs).toContain('[LINE] HTTP 500');
   });
 
+  it('PIN pending → throws without waiting', async () => {
+    const { fetchFn: baseFetch, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes('checkPinCodeVerified')) {
+        calls.push({ url, body: [], headers: {} });
+        return new Promise<Response>(() => {});
+      }
+      return baseFetch(url, init);
+    });
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Login in progress');
+    expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
+  });
+
+  it('login failed keeps cause', async () => {
+    const { fetchFn } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Login failed');
+    const cause = (err as { cause?: unknown }).cause;
+    expect(cause).toBeInstanceOf(LineHttpError);
+    expect((cause as LineHttpError).status).toBe(500);
+  });
+
+  it('getMessagesBetween: PIN pending is session_expired', async () => {
+    const { fetchFn: baseFetch, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes('checkPinCodeVerified')) return new Promise<Response>(() => {});
+      return baseFetch(url, init);
+    });
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
+    });
+    expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
+  });
+
+  it('getMessagesBetween: failed login on HTTP 500 is session_expired', async () => {
+    const { fetchFn, calls } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const result = await client.getMessagesBetween('g1', 0, 5000);
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
+    });
+    expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
+  });
+
   it('keeps a newer QR bootstrap unauthenticated when a superseded login completes', async () => {
     let resolveFirstPoll: (() => void) | undefined;
     let resolveSecondSession: (() => void) | undefined;
@@ -984,6 +1703,22 @@ describe('LineClient gateway base URL', () => {
     )).toBe(true);
   });
 
+  it('createLineClient exposes getMessagesBetween', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return apiOk([{ id: 'm1', from: 'u1', to: 'g1', toType: 2, createdTime: '2000', contentType: 0, text: 'hi', hasContent: false }]);
+      }
+      if (url.includes('getContactsV2')) return apiOk({ contacts: {} });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = createLineClient(baseAuth, { fetch: fetchFn });
+
+    const result = await client.getMessagesBetween('g1', 1000, 3000);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.messages).toHaveLength(1);
+  });
+
   it('uses the same custom gateway for token refresh', async () => {
     const soonAuth = { ...baseAuth, accessToken: makeFakeJwt(3600) };
     const fetchFn = vi.fn(async (url: string) => {
@@ -1010,5 +1745,91 @@ describe('LineClient gateway base URL', () => {
     await client.getImageBuffer('http://127.0.0.1:19191/fixture.jpg');
 
     expect(fetchFn).toHaveBeenCalledExactlyOnceWith('http://127.0.0.1:19191/fixture.jpg');
+  });
+});
+
+describe('classifyLineReadError', () => {
+  const EXPIRED = 'LINE session expired; log in again';
+  const proxy = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('boom');
+      },
+      getPrototypeOf() {
+        throw new Error('boom');
+      },
+    },
+  );
+
+  it.each<[string, () => unknown, { refreshFailedTransiently?: boolean } | undefined, string, string]>([
+    ['401', () => new LineHttpError(401, '/p'), undefined, 'session_expired', EXPIRED],
+    [
+      '401 transient refresh',
+      () => new LineHttpError(401, '/p'),
+      { refreshFailedTransiently: true },
+      'unavailable',
+      'LINE unavailable: token refresh failed',
+    ],
+    ['500', () => new LineHttpError(500, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 500'],
+    ['503', () => new LineHttpError(503, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 503'],
+    ['429', () => new LineHttpError(429, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 429'],
+    ['400', () => new LineHttpError(400, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 400'],
+    ['403', () => new LineHttpError(403, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 403'],
+    ['404', () => new LineHttpError(404, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 404'],
+    [
+      'non-integer status',
+      () => new LineHttpError('eyJsecret' as unknown as number, '/p'),
+      undefined,
+      'unavailable',
+      'LINE unavailable: HTTP error',
+    ],
+    ['api error', () => new LineApiError(10051, '/p'), undefined, 'unavailable', 'LINE unavailable: LINE error 10051'],
+    [
+      'api error non-integer',
+      () => new LineApiError('eyJsecret' as unknown as number, '/p'),
+      undefined,
+      'unavailable',
+      'LINE unavailable: LINE error',
+    ],
+    ['TypeError', () => new TypeError('fetch failed'), undefined, 'unavailable', 'LINE unavailable: network error'],
+    ['not authenticated', () => new LineNotAuthenticatedError('Not authenticated'), undefined, 'session_expired', EXPIRED],
+    ['login in progress', () => new LineNotAuthenticatedError('Login in progress'), undefined, 'session_expired', EXPIRED],
+    [
+      'NotAuth any cause',
+      () => new LineNotAuthenticatedError('x', { cause: new LineHttpError(500, '/p') }),
+      undefined,
+      'session_expired',
+      EXPIRED,
+    ],
+    [
+      'NotAuth TypeError cause',
+      () => new LineNotAuthenticatedError('x', { cause: new TypeError() }),
+      undefined,
+      'session_expired',
+      EXPIRED,
+    ],
+    ['SyntaxError', () => new SyntaxError('x'), undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['string', () => 'a string', undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['undefined', () => undefined, undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['null-proto', () => Object.create(null), undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['throwing proxy', () => proxy, undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+  ])('%s', (_name, make, context, kind, message) => {
+    const err = make();
+    const result = classifyLineReadError(err, context);
+    expect(result.kind).toBe(kind);
+    expect(result.message).toBe(message);
+    expect(result.cause).toBe(err);
+  });
+
+  it('never copies error text into message', () => {
+    const result = classifyLineReadError(new Error('Bearer eyJsecret.token'));
+    expect(result.message).not.toContain('eyJsecret');
+  });
+
+  it('cause is not serialized', () => {
+    const result = classifyLineReadError(new LineApiError('eyJsecret' as unknown as number, '/p'));
+    expect(JSON.stringify(result)).not.toContain('eyJsecret');
+    expect(Object.keys(result)).not.toContain('cause');
   });
 });
