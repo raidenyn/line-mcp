@@ -27,4 +27,4 @@
 - Size: ~+1445/−45 outside openspec against the issue's ~450 target; owner chose one PR (2026-11-25).
 - Internal deviation: `walkHistory` and the page fetchers take `read?: { signal? }` instead of `signal?` so a typed read without a signal still uses the typed `request()` path (accepted by the Task 3 review).
 - `npm run verify` passes except 9 `oauth-router.test.ts` ECONNREFUSED tests that also fail on `origin/main` here (environment).
-- The mock acceptance test reads the built `dist`; `verify:changed` does not build first (discovered work).
+- The mock acceptance test reads the built `dist`; `verify:changed` rebuilds it first when package sources changed (`e008762`).

@@ -55,7 +55,7 @@ npx openspec validate --all --strict → Totals: 6 passed, 0 failed (6 items)
 **Drift warnings** (non-blocking):
 
 - Internal signature: `walkHistory` and the page fetchers take `read?: { signal? }` rather than `signal?` (design D4 text), so a typed read without a signal still takes the typed `request()` path. Behaviour matches D4; wording only.
-- The mock acceptance test runs against the built `dist`; `npm run verify` builds first, `npm run verify:changed` does not.
+- The mock acceptance test runs against the built `dist`; both `npm run verify` and `npm run verify:changed` (since `e008762`) build it first.
 - Environment: `npm run verify` reports 9 `packages/line-mcp/src/auth/oauth-router.test.ts` ECONNREFUSED failures that also fail on `origin/main` in this container; everything else passes (1032 tests). `tests/artifacts/line-client-pack.test.ts` 7/7.
 
 ---
