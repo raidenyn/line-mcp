@@ -187,4 +187,35 @@ describe.skipIf(!dockerAvailable())('Docker runtime targets — real MCP tools/l
     const dirs = out.split('\n').map((s) => s.trim()).filter(Boolean).sort();
     expect(dirs).toEqual(['line-client', 'line-client-sqlite', 'line-mcp', 'mcp-runtime']);
   }, 60_000);
+
+  // pnpm's isolated layout is all relative symlinks, so a missing package or a
+  // pruned dependency shows up as a dangling link rather than a missing file.
+  describe.each([
+    ['composed', SERVER_IMAGE],
+    ['standalone', STANDALONE_IMAGE],
+  ])('%s image layout', (_label, image) => {
+    it('has no dangling symlinks', () => {
+      expect(shellIn(image, 'find /app -xtype l')).toBe('');
+    }, 60_000);
+
+    it('ships no development-only packages', () => {
+      const dev = shellIn(image, 'ls /app/node_modules/.pnpm')
+        .split('\n')
+        .filter((entry) => /^(typescript|vitest|eslint|semantic-release)@|^@commitlint\+/.test(entry));
+      expect(dev).toEqual([]);
+    }, 60_000);
+  });
+
+  it('standalone image neither contains nor links to bank-mcp or server', () => {
+    expect(shellIn(STANDALONE_IMAGE, "find /app -path '*packages/bank-mcp*' -o -path '*packages/server*'")).toBe('');
+    const targets = shellIn(STANDALONE_IMAGE, 'find /app -type l -exec readlink {} +').split('\n');
+    expect(targets.filter((target) => /packages\/(bank-mcp|server)\b|\.\.\/(bank-mcp|server)$/.test(target))).toEqual([]);
+  }, 60_000);
 });
+
+/** Runs a shell script inside a throwaway container of `image`; returns trimmed stdout. */
+function shellIn(image: string, script: string): string {
+  return execFileSync('docker', ['run', '--rm', '--entrypoint', 'sh', image, '-c', script], {
+    encoding: 'utf8',
+  }).trim();
+}

@@ -83,7 +83,7 @@
 
 ## 7. Docker builder (spec: Docker builder pin, production-only image; design D8)
 
-- [ ] 7.1 Add the Dockerfile pin assertion to `tests/release/package-manager.test.ts`. Add per-image layout cases to `tests/docker/docker-smoke.test.ts`: no dangling links; no dev-only packages in `.pnpm`; no `bank-mcp` or `server` paths or link targets in the standalone image. Then rewrite the builder stage (`ARG PNPM_VERSION`, `ENV CI=true`, global npm install of pnpm, pnpm manifests, frozen install, `pnpm run build`, `pnpm prune --prod`). The daemon is not available locally, so the Docker build and smoke run in CI's `docker` job on the draft PR (design D14).
+- [x] 7.1 Add the Dockerfile pin assertion to `tests/release/package-manager.test.ts`. Add per-image layout cases to `tests/docker/docker-smoke.test.ts`: no dangling links; no dev-only packages in `.pnpm`; no `bank-mcp` or `server` paths or link targets in the standalone image. Then rewrite the builder stage (`ARG PNPM_VERSION`, `ENV CI=true`, global npm install of pnpm, pnpm manifests, frozen install, `pnpm run build`, `pnpm prune --prod`). The daemon is not available locally, so the Docker build and smoke run in CI's `docker` job on the draft PR (design D14).
   Verify: `pnpm exec vitest run tests/release/package-manager.test.ts tests/docker/docker-smoke.test.ts && pnpm exec eslint tests/docker/docker-smoke.test.ts` (the Docker cases skip locally without a daemon)
 
 ## 8. Documentation

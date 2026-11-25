@@ -200,4 +200,21 @@ describe('package manager', () => {
       expect.objectContaining({ name: 'Peer dependency check', run: 'node scripts/check-peers.mjs' }),
     );
   });
+
+  it('pins the Docker builder to the same pnpm', () => {
+    const pinned = readRootManifest().packageManager?.replace(/^pnpm@/, '');
+    const dockerfile = readFileSync('Dockerfile', 'utf8');
+    expect(dockerfile.match(/^ARG PNPM_VERSION=(\S+)$/m)?.[1]).toBe(pinned);
+    for (const needle of [
+      'npm install -g pnpm@${PNPM_VERSION}',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'pnpm install --frozen-lockfile',
+      'pnpm prune --prod',
+    ]) {
+      expect(dockerfile).toContain(needle);
+    }
+    expect(dockerfile).not.toContain('package-lock.json');
+    expect(dockerfile).not.toMatch(/\bnpm ci\b/);
+  });
 });
