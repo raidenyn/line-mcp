@@ -1694,6 +1694,22 @@ describe('LineClient gateway base URL', () => {
     )).toBe(true);
   });
 
+  it('createLineClient exposes getMessagesBetween', async () => {
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.includes('getRecentMessagesV2')) {
+        return apiOk([{ id: 'm1', from: 'u1', to: 'g1', toType: 2, createdTime: '2000', contentType: 0, text: 'hi', hasContent: false }]);
+      }
+      if (url.includes('getContactsV2')) return apiOk({ contacts: {} });
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = createLineClient(baseAuth, { fetch: fetchFn });
+
+    const result = await client.getMessagesBetween('g1', 1000, 3000);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.messages).toHaveLength(1);
+  });
+
   it('uses the same custom gateway for token refresh', async () => {
     const soonAuth = { ...baseAuth, accessToken: makeFakeJwt(3600) };
     const fetchFn = vi.fn(async (url: string) => {
