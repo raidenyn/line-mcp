@@ -80,8 +80,7 @@ checks (otherwise the text without the number is used).
 | --- | --- | --- |
 | `LineHttpError` 401, `refreshFailedTransiently` not set | `session_expired` | `LINE session expired; log in again` |
 | `LineHttpError` 401 with `refreshFailedTransiently` | `unavailable` | `LINE unavailable: token refresh failed` |
-| `LineNotAuthenticatedError` without a transient `cause` (no auth, login in progress, login failed on a non-transient cause) | `session_expired` | `LINE session expired; log in again` |
-| `LineNotAuthenticatedError` whose `cause` is transient | `unavailable` | the cause's row below |
+| `LineNotAuthenticatedError` (no auth, login in progress, login failed for any cause — `login()` has already cleared `auth`, so no retry can succeed) | `session_expired` | `LINE session expired; log in again` |
 | `LineHttpError` 5xx, 429, other 4xx | `unavailable` | `LINE unavailable: HTTP <status>` (`LINE unavailable: HTTP error` if not an integer) |
 | `LineApiError` | `unavailable` | `LINE unavailable: LINE error <code>` (`LINE unavailable: LINE error` if not an integer) |
 | `TypeError` (network failure from `fetch`) | `unavailable` | `LINE unavailable: network error` |

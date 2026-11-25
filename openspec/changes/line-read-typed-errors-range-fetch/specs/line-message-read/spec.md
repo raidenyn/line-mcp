@@ -23,7 +23,7 @@ The `message` of a `LineReadError` SHALL be chosen from fixed texts, with only r
 - **THEN** classification returns `unavailable` without throwing
 
 ### Requirement: Session failures are session_expired
-An HTTP 401 from LINE (except a 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, which is `unavailable`), missing authentication, a login still in progress, and a failed login whose cause is not transient SHALL be classified as `session_expired`. The range fetch SHALL NOT wait for a login in progress and SHALL send no history request in that case.
+An HTTP 401 from LINE (except a 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, which is `unavailable`), missing authentication, a login still in progress, and a failed login (whatever its cause: a failed login leaves no session, so only a new login helps) SHALL be classified as `session_expired`. The range fetch SHALL NOT wait for a login in progress and SHALL send no history request in that case.
 
 #### Scenario: Authentication failure from LINE
 - **WHEN** the LINE mock answers a message fetch with HTTP 401 for the access token in use
@@ -41,8 +41,12 @@ An HTTP 401 from LINE (except a 401 that follows a token refresh failing with HT
 - **WHEN** a login is waiting for its PIN (after a certificate rejection) and a range fetch is made
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired` without waiting and without a history request
 
+#### Scenario: Login failed on a server error
+- **WHEN** the background login failed with HTTP 500 (so no session is left) and a range fetch is made
+- **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired`
+
 ### Requirement: Transient failures are unavailable
-A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except 401, a LINE business error and any other unexpected failure SHALL be classified as `unavailable`. A 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, and a failed login whose cause is transient, SHALL also be `unavailable`. The refresh outcome SHALL be attributed per read, so an overlapping read on the same client cannot change another read's classification.
+A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except 401, a LINE business error and any other unexpected failure SHALL be classified as `unavailable`. A 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read SHALL also be `unavailable`. The refresh outcome SHALL be attributed per read, so an overlapping read on the same client cannot change another read's classification.
 
 #### Scenario: Network failure
 - **WHEN** the LINE endpoint cannot be reached (the connection is refused)
@@ -63,10 +67,6 @@ A network failure, an abort, an HTTP 5xx or 429, any other non-2xx answer except
 #### Scenario: Overlapping reads with different refresh outcomes
 - **WHEN** one read joins a refresh that answers HTTP 500 and gets HTTP 401, while a later read on the same client refreshes successfully
 - **THEN** the first read still reports `unavailable`
-
-#### Scenario: Login failed on a server error
-- **WHEN** the background login failed with HTTP 500 and a range fetch is made
-- **THEN** it resolves to `{ ok: false }` with `error.kind` `unavailable`
 
 ### Requirement: Exact range fetch
 `LineReadClient.getMessagesBetween(chatMid, sinceMs, untilMs, options?)` (on the client returned by `createLineClient`) SHALL return every message received from LINE during the walk whose creation time is within `[sinceMs, untilMs]` inclusive, with sender names resolved, and no message outside it. A failure on any page or during sender-name resolution SHALL fail the whole call.
