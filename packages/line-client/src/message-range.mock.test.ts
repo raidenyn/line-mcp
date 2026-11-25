@@ -22,7 +22,8 @@ const ids = (messages: readonly Message[]): string[] => messages.map(m => m.id).
 const historyIds = (from: number, to: number): string[] =>
   Array.from({ length: to - from + 1 }, (_, i) => `group-history-${String(from + i).padStart(3, '0')}`);
 
-describe('fetchMessageRange against the LINE mock', () => {
+// Cases build on each other: shared cache, refresh count and refreshed token.
+describe.sequential('fetchMessageRange against the LINE mock', () => {
   let mock: MockLineServer;
   let origin: string;
   let api: ReturnType<typeof createLineClient>;

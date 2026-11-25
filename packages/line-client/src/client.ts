@@ -145,13 +145,6 @@ function isTransientStatus(status: number): boolean {
   return Number.isInteger(status) && (status >= 500 || status === 429);
 }
 
-function isTransientFailure(err: unknown): boolean {
-  if (err instanceof TypeError) return true;
-  if (err instanceof Error && err.name === 'AbortError') return true;
-  if (err instanceof LineHttpError) return isTransientStatus(err.status);
-  return false;
-}
-
 /**
  * Map any failure from a LINE read into a typed result. Never throws and never
  * copies text from `err` into `message`.
@@ -162,14 +155,6 @@ export function classifyLineReadError(
 ): LineReadError {
   try {
     if (err instanceof LineNotAuthenticatedError) {
-      const cause = (err as { cause?: unknown }).cause;
-      if (cause !== undefined && isTransientFailure(cause)) {
-        return lineReadError(
-          'unavailable',
-          classifyLineReadError(cause, context).message,
-          err,
-        );
-      }
       return lineReadError('session_expired', SESSION_EXPIRED_MESSAGE, err);
     }
     if (err instanceof LineHttpError) {
@@ -982,7 +967,7 @@ export class LineClient {
         let oldestReachedMs: number | null = null;
         for (const m of raw) {
           const t = parseInt(m.createdTime, 10);
-          if (oldestReachedMs === null || t < oldestReachedMs) oldestReachedMs = t;
+          if (Number.isFinite(t) && (oldestReachedMs === null || t < oldestReachedMs)) oldestReachedMs = t;
         }
         return {
           messages: this.mapRawMessages(inRange),

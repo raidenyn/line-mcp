@@ -1270,6 +1270,12 @@ describe('LineClient.getMessagesBetween', () => {
 // ───────────────────────────────────────────────────────────
 
 describe('LineClient — concurrent refresh deduplication', () => {
+  function makeSoonAuth(mid: string): AuthData {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600;
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+    return { ...baseAuth, mid, accessToken: soonJwt };
+  }
+
   function makeRefreshFetch() {
     return vi.fn().mockImplementation((url: string) => {
       if (url.includes('tokenRefresh'))
@@ -1284,7 +1290,7 @@ describe('LineClient — concurrent refresh deduplication', () => {
   }
 
   it('two instances with the same mid fire only one tokenRefresh call', async () => {
-    const auth = soonAuth('concurrent-mid-1');
+    const auth = makeSoonAuth('concurrent-mid-1');
     const mockFetch = makeRefreshFetch();
     const client1 = new LineClient(auth, mockFetch);
     const client2 = new LineClient(auth, mockFetch);
@@ -1296,7 +1302,7 @@ describe('LineClient — concurrent refresh deduplication', () => {
   });
 
   it('calls onTokenRefreshed exactly once after a successful refresh', async () => {
-    const auth = soonAuth('callback-mid-1');
+    const auth = makeSoonAuth('callback-mid-1');
     const mockFetch = makeRefreshFetch();
     const callback = vi.fn();
     const client = new LineClient(auth, mockFetch, callback);
@@ -1544,7 +1550,7 @@ describe('LineClient QR login', () => {
     expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
   });
 
-  it('getMessagesBetween: failed login on HTTP 500 is unavailable', async () => {
+  it('getMessagesBetween: failed login on HTTP 500 is session_expired', async () => {
     const { fetchFn, calls } = makeLoginFetch(httpErr(500));
     const client = new LineClient(null, fetchFn);
 
@@ -1552,7 +1558,10 @@ describe('LineClient QR login', () => {
     await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
 
     const result = await client.getMessagesBetween('g1', 0, 5000);
-    expect(result).toEqual({ ok: false, error: { kind: 'unavailable', message: 'LINE unavailable: HTTP 500' } });
+    expect(result).toEqual({
+      ok: false,
+      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
+    });
     expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
   });
 
@@ -1787,22 +1796,15 @@ describe('classifyLineReadError', () => {
     ['not authenticated', () => new LineNotAuthenticatedError('Not authenticated'), undefined, 'session_expired', EXPIRED],
     ['login in progress', () => new LineNotAuthenticatedError('Login in progress'), undefined, 'session_expired', EXPIRED],
     [
-      'NotAuth cause 500',
+      'NotAuth any cause',
       () => new LineNotAuthenticatedError('x', { cause: new LineHttpError(500, '/p') }),
       undefined,
-      'unavailable',
-      'LINE unavailable: HTTP 500',
+      'session_expired',
+      EXPIRED,
     ],
     [
-      'NotAuth cause TypeError',
+      'NotAuth TypeError cause',
       () => new LineNotAuthenticatedError('x', { cause: new TypeError() }),
-      undefined,
-      'unavailable',
-      'LINE unavailable: network error',
-    ],
-    [
-      'NotAuth cause 400',
-      () => new LineNotAuthenticatedError('x', { cause: new LineHttpError(400, '/p') }),
       undefined,
       'session_expired',
       EXPIRED,
