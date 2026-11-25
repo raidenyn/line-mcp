@@ -14,7 +14,7 @@
 - [ ] 2.1 Write the failing guards in `tests/release/package-manager.test.ts`. They cover:
   - an exact `packageManager` pin;
   - the pnpm lockfile, with no npm, shrinkwrap or yarn lockfile tracked;
-  - `pnpm-workspace.yaml` (`packages`, `allowBuilds` exactly `better-sqlite3: true, fsevents: false`, `verifyDepsBeforeRun: false`);
+  - `pnpm-workspace.yaml` (`packages`, `allowBuilds` exactly `better-sqlite3: true, fsevents: false`, `verifyDepsBeforeRun: false`, `hoistWorkspacePackages: false`);
   - `workspace:^` internal ranges in all four dependency sections;
   - declared bare imports per package and at the root, parsed with `ts.preProcessFile`, with only `vitest` as shared test tooling.
 
@@ -111,7 +111,7 @@
   - the negative assertions in `tests/release/package-manager.test.ts` (the workflow `npm (ci|run|ls)`/`npx` pattern and the Dockerfile `npm ci` check);
   - the sweep test's own pattern.
 
-  The filtering is an exported pure function, `findUnexpected(matches, allowed)`. A unit case proves that it accepts the allowlisted lines and rejects two synthetic legacy commands. They are built from separate tokens, so the test file does not match its own grep. The sweep is run with the new test file staged.
+  The filtering is an exported pure function, `findUnexpected(matches, allowed)`. A unit case proves that it accepts the allowlisted lines and rejects two synthetic legacy commands. These lines, and every allowlist entry that contains a legacy command, are built from separate tokens, so the test file does not match its own grep. The sweep is run with the new test file staged.
   Verify: `pnpm exec vitest run tests/release && pnpm exec openspec validate --all --strict`
 
 ## 9. Final gate (design D14)

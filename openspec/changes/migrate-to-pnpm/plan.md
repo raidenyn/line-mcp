@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - pnpm version: exactly `12.18.0`, declared once as `"packageManager": "pnpm@12.18.0"`. The Dockerfile `ARG PNPM_VERSION=12.18.0` must equal it.
-- `pnpm-workspace.yaml`: `packages: [packages/*]`, `allowBuilds: { better-sqlite3: true, fsevents: false }`, `verifyDepsBeforeRun: false`.
+- `pnpm-workspace.yaml`: `packages: [packages/*]`, `allowBuilds: { better-sqlite3: true, fsevents: false }`, `verifyDepsBeforeRun: false`, `hoistWorkspacePackages: false`.
 - Internal dependency range: `workspace:^`. Package versions stay `0.1.0`.
 - Shared test tooling exempt from per-package declaration: `vitest` only.
 - Automated installs: `pnpm install --frozen-lockfile`; the release plan job adds `--ignore-scripts`.
@@ -54,7 +54,7 @@
 - [ ] **Step 1: Write the failing tests** in `package-manager.test.ts`:
   - `pins an exact pnpm version`: `packageManager` matches `/^pnpm@\d+\.\d+\.\d+$/`.
   - `tracks only the pnpm lockfile`: `pnpm-lock.yaml` exists; `git ls-files` matching `/(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock)$/` is `[]`.
-  - `declares the workspace, build allowlist and no implicit installs`: `readWorkspaceConfig()` `toMatchObject({ packages: ['packages/*'], allowBuilds: { 'better-sqlite3': true, fsevents: false }, verifyDepsBeforeRun: false })`, and the `allowBuilds` keys are exactly those two.
+  - `declares the workspace, build allowlist and no implicit installs`: `readWorkspaceConfig()` `toMatchObject({ packages: ['packages/*'], allowBuilds: { 'better-sqlite3': true, fsevents: false }, verifyDepsBeforeRun: false, hoistWorkspacePackages: false })`, and the `allowBuilds` keys are exactly those two.
   - `links internal packages with the workspace protocol`: every `@raidenyn/*` key in any manifest's `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` is `'workspace:^'`.
   - `declares every root-level bare import in the root manifest`: for `tests/**/*.{ts,mjs,js}`, `scripts/**/*.{mjs,js}`, `vitest.config.ts` and `eslint.config.js`, every name from `bareImports` is a key of the root `dependencies` or `devDependencies`. Skip `node:`-prefixed names and `builtinModules`.
   - `declares every bare import in the package that makes it`: for each `packages/<dir>/src/**/*.ts`, every name from `bareImports` is in that package's `dependencies`, `devDependencies` or `peerDependencies`. Skip built-ins and `SHARED_TEST_TOOLING = ['vitest']`. The message names the file and the specifier.
@@ -216,6 +216,7 @@
     - It exports `findUnexpected(matches: string[], allowed: ReadonlySet<string>): string[]`, which strips the `:<line>:` part of each `file:line:text` match and returns those not in `allowed`.
     - The case `accepts allowlisted lines and rejects new legacy commands` calls it with the allowlisted entries plus two synthetic lines. The lines are built from separate tokens, so the test file itself never matches the grep: `` `README.md:1:${['np', 'm'].join('')} run build` `` and `` `docs/x.md:2:${['np', 'x'].join('')} vitest` ``. It expects exactly those two back.
     - The case `finds no unexpected npm commands` runs `spawnSync('git', ['grep', '-nE', PATTERN, '--', '.', ...EXCLUDES])`. Status `1` passes; status `0` requires `findUnexpected(...)` to be `[]`; any other status fails.
+    - `ALLOWED` entries whose text contains a legacy command are also assembled from split tokens (for example `` `.claude/settings.json:      "Bash(${NPX} vitest run *e2e*)",` `` with `const NPX = ['np', 'x'].join('')`). The comparison is still exact `file:text` at runtime, and the test file itself never matches the grep.
     - Run it once with the test file staged (`git add tests/release/npm-sweep.test.ts`), so the file is included in the grep. Only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
 - [ ] **Step 2:** Run `pnpm exec vitest run tests/release/verify-entrypoint.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**

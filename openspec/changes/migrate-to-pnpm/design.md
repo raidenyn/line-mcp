@@ -162,6 +162,7 @@ allowBuilds:
   better-sqlite3: true
   fsevents: false
 verifyDepsBeforeRun: false
+hoistWorkspacePackages: false
 ```
 - `allowBuilds` and `strictDepBuilds` (on by default) were verified on 12.18.0.
   An unlisted build script fails the install (`ERR_PNPM_IGNORED_BUILDS`),
@@ -177,6 +178,15 @@ verifyDepsBeforeRun: false
 - `verifyDepsBeforeRun: false` keeps `pnpm run` and `pnpm exec` from
   installing anything implicitly, so the release plan job's scripts-disabled
   install stays the only install there.
+- `hoistWorkspacePackages: false` keeps pnpm from linking every workspace
+  package into `node_modules/.pnpm/node_modules/@raidenyn/`. Those links
+  survive `pnpm prune --prod`, and in the standalone image they would dangle
+  for `bank-mcp` and `server`, which are not copied. Verified on 12.18.0:
+  - with the default, all six links exist after a fresh install and after
+    prune;
+  - with `false`, none exist;
+  - the build, plus the `packages`, `tests/architecture`, `tests/harness` and
+    `tests/smoke` suites, pass with the setting (795 tests).
 - No `.npmrc`.
 
 **D6. Command mapping.**
