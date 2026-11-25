@@ -5,8 +5,8 @@
 > Overwritten on each apply iteration; iteration counter grows.
 
 **Change**: `migrate-to-pnpm`
-**Iteration**: `1`
-**Applied at**: `2026-11-25 02:15` (UTC)
+**Iteration**: `2`
+**Applied at**: `2026-11-25 04:40` (UTC); iteration 1 at `02:15`
 **Executor**: `executing-plans` (inline, by the session agent, with manual red/green per task; see Notes)
 
 ---
@@ -20,21 +20,21 @@
 
 ## Commits
 
-- **Range**: `d354576..cde5d43` (implementation; planning commits `e8f8f21..d354576` precede it)
-- **Count**: `7`
+- **Range**: `d354576..0cc2c69` (implementation and review fixes; planning commits `e8f8f21..d354576` precede it)
+- **Count**: `8` code commits, plus the receipt and verify records
 
 ---
 
 ## Tasks
 
-- **Completed**: `12 of 13` checkboxes in tasks.md flipped to `- [x]`
-- **Remaining**: `9.1`. The local part is done (see Results). The task finishes when the draft PR is open and CI's `docker` job is green (design D14).
+- **Completed**: `13 of 13` checkboxes in tasks.md flipped to `- [x]`
+- **Remaining**: none
 
 ---
 
 ## Next step
 
-Run `openspec-verify-change`, get an independent review of `git diff origin/main...HEAD`, push, and open the draft PR. Its description must state the Docker-gate exception. Mark 9.1 done once every CI job, including `docker`, is green.
+Re-run verify (iteration 2), push, confirm CI is green on the new head, then mark PR #162 ready and finalize.
 
 ---
 
@@ -82,6 +82,14 @@ After the npm trees were deleted and pnpm installed: `node_modules/.package-lock
   - both CLIs answer `/healthz` with `{"status":"ok"}`.
 - Task 8.1: the npm sweep passes with the test file staged, and fails on an injected `npm run build` line in README.md.
 - Task 9.1 (local): `pnpm run verify` passed (lint, `tsc -b`, `openspec validate --all --strict`, 63 files / 974 tests). `pnpm exec vitest run --reporter=dot tests/artifacts/line-client-pack.test.ts` passed 7/7. Total wall time 1 m 16 s.
+
+### Iteration 2: CI and independent review
+
+- Draft PR #162: all 5 CI jobs passed on `f622683`. In the `docker` job, both images built for real and all 8 Docker smoke cases ran and passed: tools/list for both targets, plus the layout cases (no dangling links, no dev-only packages, no `bank-mcp`/`server` in the standalone image). That completes the Docker rung (design D14).
+- The independent review (OpenCode `openai/gpt-6.2-sol`, spec plus diff only) found 1 important issue and 4 nits, posted inline on #162. All were fixed in `0cc2c69`:
+  - important: an interrupted pack left the checkout unable to pack again. The vendoring script now resolves the whole closure first, copies through a staging directory, and replaces `happy-dom` last. `packages/line-client/src/vendor-happy-dom.test.ts` reproduces the failed copy: it fails on the old script and passes on the new one.
+  - nits: the `vitest` exception now applies to test files only, and `.mts`/`.cts` files are scanned. The workflow guard rejects any npm or yarn install and counts `pnpm i`/`pnpm add`. Both were proven by injected probes, since reverted. The README now shows `--frozen-lockfile`. The pack-test comment explains why a rerun is not a pnpm-layout check.
+- Local gate after the fixes: `pnpm run verify` passed (64 files, 976 tests). The pack check passed 7/7 starting from a restored pnpm symlink layout.
 
 ### Executor deviation
 

@@ -7,9 +7,9 @@
 
 ## State
 
-- Current task: `9.1`. The local gate is done. Next: verify, independent review, then a draft PR. The task finishes when every CI job, including `docker`, is green.
-- Head commit: `cde5d43` on `build/migrate-to-pnpm`
-- Tasks: `12` of `13` complete
+- Current task: none. All 13 tasks are complete. PR #162 waits on CI for the review-fix push, then goes ready for human review.
+- Head commit: see `git log -1` on `build/migrate-to-pnpm` (review fixes in `0cc2c69`)
+- Tasks: `13` of `13` complete
 
 ## Verified
 
@@ -22,13 +22,10 @@ Every command ran under `. ~/.cache/pnpm-env.sh`, which puts Node 24 first, sets
 
 ## Remaining
 
-- `openspec-verify-change`, then an independent review (spec plus `git diff origin/main...HEAD` only).
-- Push, then open a draft PR titled `build(deps): migrate the workspace to pnpm`. Its description states the owner-approved Docker-gate exception (design D14, 2026-11-25).
-- Wait for CI. `check`, `smoke`, `pack-line-client`, `docker` and `commit-policy` must all be green.
-- Post the review findings inline, fix them, mark the PR ready, then finalize and archive.
+- Wait for CI on the review-fix push, then mark #162 ready for human review.
+- After merge: finalize (`finalize.md`) and archive the change. The archive syncs the new `workspace-package-management` spec.
 
 ## Risks
 
-- The Docker images have only been checked by an on-disk simulation. The first real `docker build` runs in CI; its `docker` job is the gate.
 - macOS installs are unverified. `fsevents` is denied explicitly; add any other macOS-only build script to `allowBuilds` after review.
 - Existing worktrees must run `rm -rf node_modules packages/*/node_modules && pnpm install` once after merge (documented in AGENTS.md).

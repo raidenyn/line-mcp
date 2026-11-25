@@ -117,5 +117,5 @@
 
 ## 9. Final gate (design D14)
 
-- [ ] 9.1 Run the local pre-PR gate and the pack check under the preflight environment, and record the results in `apply.md`. Open the PR as a draft, and state in its description the owner-approved exception (design D14, 2026-11-25): the Docker rung runs in CI. The Docker rung is complete only when CI's `docker` job (image builds, smoke and layout cases) is green.
+- [x] 9.1 Run the local pre-PR gate and the pack check under the preflight environment, and record the results in `apply.md`. Open the PR as a draft, and state in its description the owner-approved exception (design D14, 2026-11-25): the Docker rung runs in CI. The Docker rung is complete only when CI's `docker` job (image builds, smoke and layout cases) is green.
   Verify: `pnpm run verify && pnpm exec vitest run --reporter=dot tests/artifacts/line-client-pack.test.ts`
