@@ -3,9 +3,7 @@
   "version": "0.1.0",
   "description": "",
   "private": true,
-  "workspaces": [
-    "packages/*"
-  ],
+  "packageManager": "pnpm@12.18.0",
   "engines": {
     "node": ">=24 <25"
   },
@@ -33,6 +31,8 @@
     "@commitlint/config-conventional": "21.2.0",
     "@eslint/js": "^10.0.1",
     "@fission-ai/openspec": "2.1.1",
+    "@raidenyn/line-mcp": "workspace:^",
+    "@raidenyn/server": "workspace:^",
     "@semantic-release/commit-analyzer": "13.0.1",
     "@semantic-release/release-notes-generator": "14.1.1",
     "@tsconfig/node20": "^20.1.9",
@@ -52,9 +52,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@raidenyn/line-client": "^0.1.0",
-    "@raidenyn/line-client-sqlite": "^0.1.0",
-    "@raidenyn/mcp-runtime": "^0.1.0",
+    "@raidenyn/line-client": "workspace:^",
+    "@raidenyn/line-client-sqlite": "workspace:^",
+    "@raidenyn/mcp-runtime": "workspace:^",
     "better-sqlite3": "^12.11.1",
     "express": "^5.2.1",
     "qrcode": "^1.5.4",

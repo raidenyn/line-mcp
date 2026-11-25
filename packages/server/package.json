@@ -19,14 +19,15 @@
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@raidenyn/bank-mcp": "^0.1.0",
-    "@raidenyn/line-client": "^0.1.0",
-    "@raidenyn/line-client-sqlite": "^0.1.0",
-    "@raidenyn/line-mcp": "^0.1.0",
-    "@raidenyn/mcp-runtime": "^0.1.0",
+    "@raidenyn/bank-mcp": "workspace:^",
+    "@raidenyn/line-client": "workspace:^",
+    "@raidenyn/line-client-sqlite": "workspace:^",
+    "@raidenyn/line-mcp": "workspace:^",
+    "@raidenyn/mcp-runtime": "workspace:^",
     "express": "^5.2.1"
   },
   "devDependencies": {
-    "@types/express": "^5.0.6"
+    "@types/express": "^5.0.6",
+    "better-sqlite3": "^12.11.1"
   }
 }

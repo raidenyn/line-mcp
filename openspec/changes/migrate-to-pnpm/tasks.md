@@ -1,6 +1,6 @@
 ## 1. Environment preflight (design D14)
 
-- [ ] 1.1 Prepare the shell that every later Verify command runs in:
+- [x] 1.1 Prepare the shell that every later Verify command runs in:
   - `export PATH="$HOME/.cache/node24/bin:$PATH"`, with Node 24 from the official tarball;
   - `export NODE_OPTIONS=--dns-result-order=ipv4first`;
   - pnpm 12.18.0 on `PATH` (`npm install -g pnpm@12.18.0`, with a user prefix if the global one is not writable);
@@ -11,7 +11,7 @@
 
 ## 2. Package manager foundation (specs: pinned manager, workspace protocol, build allowlist; design D1–D5)
 
-- [ ] 2.1 Write the failing guards in `tests/release/package-manager.test.ts`. They cover:
+- [x] 2.1 Write the failing guards in `tests/release/package-manager.test.ts`. They cover:
   - an exact `packageManager` pin;
   - the pnpm lockfile, with no npm, shrinkwrap or yarn lockfile tracked;
   - `pnpm-workspace.yaml` (`packages`, `allowBuilds` exactly `better-sqlite3: true, fsevents: false`, `verifyDepsBeforeRun: false`, `hoistWorkspacePackages: false`);
@@ -22,7 +22,7 @@
 
   Also update `tests/architecture/import-boundaries.test.ts` (pnpm workspace root, single `pnpm-lock.yaml`) and `tests/release/version-baseline.test.ts` (`workspace:^`, manifest-only versions).
   Verify: `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts` (expected red with assertion failures naming the pin, lockfile, workspace file, ranges and `packages/server`'s undeclared `better-sqlite3`; there must be no "Failed to load"/collection error)
-- [ ] 2.2 Migrate the manifests:
+- [x] 2.2 Migrate the manifests:
   - add `pnpm-workspace.yaml`;
   - add the `packageManager` pin and drop `workspaces`;
   - change internal ranges to `workspace:^`;
