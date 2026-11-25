@@ -5,13 +5,18 @@
 
 **Agent permissions**
 
-- The committed policy is `.claude/settings.json`. It allows the lint, build,
-  unit and smoke commands plus read-only git/openspec inspection; asks before
-  `git push`, PR merge/create, `docker push`, the live e2e suite and any vitest
-  run that targets it; and denies reads of LINE auth/runtime files
-  (`.line-auth.json`, `.line-mcp-tokens.json`, `data/`, `.env*`, legacy
-  `auth/`, `line-qr.png`), edits under `packages/line-client/assets/ltsm/`,
-  `npm publish` and force pushes.
+- The committed policy is `.claude/settings.json`. It allows the pnpm forms of
+  the lint, build, unit and smoke commands (`pnpm run …`, `pnpm exec vitest run
+  <safe root>`) plus read-only git/openspec inspection. It asks before:
+  - `git push`, PR merge/create and `docker push`;
+  - the live e2e suite, and any vitest run that targets it, in both the pnpm
+    and the legacy npm forms.
+
+  It denies:
+  - reads of LINE auth/runtime files (`.line-auth.json`,
+    `.line-mcp-tokens.json`, `data/`, `.env*`, legacy `auth/`, `line-qr.png`);
+  - edits under `packages/line-client/assets/ltsm/`;
+  - `npm publish`, `pnpm publish` and force pushes.
 - The `Read`/`Edit` denies bind Claude's built-in file tools (and the Bash file
   commands it recognizes). They are not OS-level isolation; the sandbox issue
   covers that.

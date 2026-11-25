@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 
 // CI peer-dependency gate. A frozen pnpm install skips peer diagnostics, so
 // this checks the lockfile's peer resolution explicitly (it replaces the
-// `npm ls --all` step the npm workspace used).
+// dependency-closure step the npm workspace ran).
 
 /**
  * List the peer problems in `pnpm peers check --json` output. Keeping this

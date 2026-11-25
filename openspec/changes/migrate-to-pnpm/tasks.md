@@ -88,7 +88,7 @@
 
 ## 8. Documentation
 
-- [ ] 8.1 Update the doc assertions in `tests/release/verify-entrypoint.test.ts`. Then update:
+- [x] 8.1 Update the doc assertions in `tests/release/verify-entrypoint.test.ts`. Then update:
   - `AGENTS.md`:
     - commands;
     - a setup note: pnpm 12.18.0, the `pmOnFail` auto-download behaviour, and a store that must share a filesystem with the worktrees;

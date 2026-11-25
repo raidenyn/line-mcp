@@ -78,8 +78,8 @@ describe('verification entrypoints', () => {
   it('documents the verification ladder and its measured rungs', () => {
     const guide = readFileSync('AGENTS.md', 'utf8');
     expect(guide).toContain('Verification ladder');
-    expect(guide).toMatch(/npm run verify(?![:\w])/);
-    for (const command of ['npm run verify:changed', 'npm run verify:all', 'npm run test:e2e']) {
+    expect(guide).toMatch(/pnpm run verify(?![:\w])/);
+    for (const command of ['pnpm install', 'pnpm run verify:changed', 'pnpm run verify:all', 'pnpm run test:e2e']) {
       expect(guide).toContain(command);
     }
     expect(guide).toContain('Measured');
