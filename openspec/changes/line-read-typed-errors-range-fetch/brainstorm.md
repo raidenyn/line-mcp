@@ -97,7 +97,7 @@ Alternative A (approved by the user on 2026-11-24):
   `LineApiClient` unchanged, new `LineReadClient` returned by
   `createLineClient`; page size is a private field.
 - Refined after Sol review round 5: the post-signing abort check is an opt-in
-  `readSignal` request option, so QR/PIN polling is unchanged.
+  request option (now `read`), so QR/PIN polling is unchanged.
 - Refined after Sol review round 6: the mock acceptance test loads the built
   package through `tests/support/line-client-built.ts` (the architecture gate
   rejects a self-import under `src`); the abort listener is registered before
@@ -106,6 +106,9 @@ Alternative A (approved by the user on 2026-11-24):
   the 401-after-refresh-outage exception is stated in the session requirement;
   `history_end` at the start of history requires no safety stop; size checks
   count staged new files against the merge base.
+- Refined after Sol review round 8: refresh stays best-effort on the typed
+  path (a refresh 401 alone is not an error); typed requests send the token
+  they signed with; only in-range guard messages are returned.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the

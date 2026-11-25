@@ -113,6 +113,13 @@ never waits for a login:
    variable — no per-instance shared field — so a later, successful refresh by
    another read cannot change this read's classification.
 
+   Refresh is best-effort on the typed path, as on the legacy one: a refresh
+   that answers non-2xx (including 401) does not stop the read; the read goes
+   on with the current access token. If LINE then serves the history, the
+   result is `ok: true`; if it answers 401, the classifier decides
+   (`session_expired`, or `unavailable` when the refresh failed with 5xx/429).
+   A refresh 401 is therefore never reported by itself.
+
 `pendingLogin` is cleared on success (`client.ts` ~line 537) and on failure, so
 "login in progress" is never reported after a completed login. Which LINE
 business codes mean a displaced session is unverified (RFC open question
@@ -167,9 +174,14 @@ must be ≥ 2 because LINE's previous page includes its boundary.
 4. cancellation checkpoints stop the losing work from issuing new requests:
    `signal.throwIfAborted()` after `authenticateForRead()`, before each page
    and before the contact lookup; and `request()` gets a new opt-in option
-   `readSignal?: AbortSignal`, used only by the typed read's page and contact
-   requests: it is checked after signing and before calling `fetch`, and
-   forwarded to `fetch`. The existing `signal` option (used by QR and PIN
+   `read?: { signal?: AbortSignal }`, set (with or without a signal) only by
+   the typed read's page and contact requests. With `read` set, `request()`
+   uses the access token it captured for signing also for `x-line-access`
+   (today it re-reads `this.auth.accessToken` after the signer's `await`, so a
+   refresh by an overlapping read during signing would pair an HMAC of the old
+   token with the new token, which the mock rejects); and `read.signal` is
+   checked after signing and before calling `fetch`, and forwarded to `fetch`.
+   Without `read`, `request()` behaves exactly as today. The existing `signal` option (used by QR and PIN
    polling) keeps its current behaviour — no new check — so the login path is
    unchanged;
 5. cancellation has precedence: if the signal is aborted when the race settles

@@ -29,6 +29,10 @@ An HTTP 401 from LINE (except a 401 that follows a token refresh failing with HT
 - **WHEN** the LINE mock answers a message fetch with HTTP 401 for the access token in use
 - **THEN** the range fetch resolves to `{ ok: false }` with `error.kind` `session_expired`
 
+#### Scenario: Refresh rejected but history served
+- **WHEN** the token refresh answers HTTP 401 and LINE then serves the history with the current access token
+- **THEN** the range fetch resolves to `{ ok: true }` (refresh is best-effort)
+
 #### Scenario: Not authenticated
 - **WHEN** the client has no authentication data and a range fetch is made
 - **THEN** it resolves to `{ ok: false }` with `error.kind` `session_expired`
@@ -88,7 +92,7 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 
 #### Scenario: Progress-guard stop keeps received messages
 - **WHEN** a previous page returns fresh messages none of which is strictly older than the current oldest (for example all with the same creation time)
-- **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
+- **THEN** those of them inside `[sinceMs, untilMs]` are included, no further page is requested, and `coverage` is `truncated`
 
 #### Scenario: Safety stops are truncated
 - **WHEN**, before receiving a message older than `sinceMs`, the walk stops on its progress guard, on a previous page that only replays already-received messages (full or short, other than a page holding only the boundary message), or on its iteration cap while the last page was full and advancing
