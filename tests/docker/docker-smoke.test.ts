@@ -22,7 +22,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
  * native addon loads inside the runtime base image (a broken base image fails
  * at container start, before `/healthz` ever answers).
  *
- * Excluded from `npm run test:unit`; run explicitly (the CI `docker` job and
+ * Excluded from `pnpm run test:unit`; run explicitly (the CI `docker` job and
  * the Task 12 local exit criteria both invoke this file by path).
  */
 

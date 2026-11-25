@@ -31,6 +31,9 @@ describe('agent permission policy', () => {
         'Bash(gh pr create*)',
         'Bash(gh pr merge*)',
         'Bash(docker push*)',
+        'Bash(pnpm run test:e2e*)',
+        'Bash(pnpm exec vitest run *e2e*)',
+        // Legacy forms still work (node_modules/.bin exists), so they must ask too.
         'Bash(npm run test:e2e*)',
         'Bash(npx vitest run *e2e*)',
       ]),
@@ -39,22 +42,29 @@ describe('agent permission policy', () => {
 
   it('does not allow a broad vitest run that would reach the live e2e suite', () => {
     const allow = settings.permissions?.allow ?? [];
+    expect(allow).not.toContain('Bash(pnpm exec vitest run *)');
     expect(allow).not.toContain('Bash(npx vitest run *)');
     expect(allow.some(rule => rule.includes('e2e'))).toBe(false);
     // The safe roots from CLAUDE.md are still auto-approved.
     expect(allow).toEqual(
       expect.arrayContaining([
-        'Bash(npx vitest run packages*)',
-        'Bash(npx vitest run tests/architecture*)',
-        'Bash(npx vitest run tests/release*)',
-        'Bash(npx vitest run tests/smoke*)',
-        'Bash(npx vitest run tests/artifacts*)',
-        'Bash(npx vitest run tests/docker*)',
+        'Bash(pnpm exec vitest run packages*)',
+        'Bash(pnpm exec vitest run tests/architecture*)',
+        'Bash(pnpm exec vitest run tests/release*)',
+        'Bash(pnpm exec vitest run tests/smoke*)',
+        'Bash(pnpm exec vitest run tests/artifacts*)',
+        'Bash(pnpm exec vitest run tests/docker*)',
+        'Bash(pnpm run lint*)',
+        'Bash(pnpm run build*)',
+        'Bash(pnpm run test:unit*)',
+        'Bash(pnpm run test:smoke*)',
+        'Bash(pnpm run verify*)',
+        'Bash(pnpm exec eslint *)',
       ]),
     );
   });
 
-  it('denies LINE credentials, ltsm edits, npm publish and force pushes', () => {
+  it('denies LINE credentials, ltsm edits, npm and pnpm publish and force pushes', () => {
     const deny = settings.permissions?.deny ?? [];
     expect(deny).toEqual(
       expect.arrayContaining([
@@ -67,6 +77,7 @@ describe('agent permission policy', () => {
         'Read(/line-qr.png)',
         'Edit(/packages/line-client/assets/ltsm/**)',
         'Bash(npm publish*)',
+        'Bash(pnpm publish*)',
         'Bash(git push --force*)',
         'Bash(git push -f*)',
         'Bash(git push * --force*)',

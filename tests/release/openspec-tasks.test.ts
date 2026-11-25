@@ -54,7 +54,7 @@ describe('OpenSpec task verification', () => {
       '## 2. Validation',
       '',
       '- [ ] 2.1 Run the suite',
-      '  Verify: `npm run test:unit`',
+      '  Verify: `pnpm run test:unit`',
       '',
     ].join('\n');
 
@@ -64,13 +64,13 @@ describe('OpenSpec task verification', () => {
   });
 
   it('accepts an unchecked task with a Verify line', () => {
-    const tasks = ['- [ ] 1.1 Add the parser', '  Verify: `npm run test:unit`'].join('\n');
+    const tasks = ['- [ ] 1.1 Add the parser', '  Verify: `pnpm run test:unit`'].join('\n');
 
     expect(findUnverifiedTasks(tasks)).toEqual([]);
   });
 
   it('accepts a Verify line written as a nested list item', () => {
-    const tasks = ['- [ ] 1.1 Add the parser', '  - Verify: `npm run test:unit`'].join('\n');
+    const tasks = ['- [ ] 1.1 Add the parser', '  - Verify: `pnpm run test:unit`'].join('\n');
 
     expect(findUnverifiedTasks(tasks)).toEqual([]);
   });
@@ -85,7 +85,7 @@ describe('OpenSpec task verification', () => {
     const tasks = [
       '- [ ] 1.1 Add the parser',
       '- [ ] 1.2 Run the suite',
-      '  Verify: `npm run test:unit`',
+      '  Verify: `pnpm run test:unit`',
     ].join('\n');
 
     expect(findUnverifiedTasks(tasks)).toEqual([

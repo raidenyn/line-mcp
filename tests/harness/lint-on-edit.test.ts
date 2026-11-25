@@ -77,6 +77,7 @@ describe('lint-on-edit formatting', () => {
     const lines = formatErrors(json, 'a.ts');
     expect(lines).toHaveLength(MAX_LINES);
     expect(lines.at(-1)).toContain('32 more');
+    expect(lines.at(-1)).toContain('run `pnpm exec eslint a.ts`');
   });
 });
 

@@ -50,7 +50,7 @@
 
 ## 5. Hooks and agent policy (spec: agent permissions and hooks use pnpm; design D11–D13)
 
-- [ ] 5.1 Update `tests/release/agent-policy.test.ts`:
+- [x] 5.1 Update `tests/release/agent-policy.test.ts`:
   - pnpm allow patterns;
   - e2e ask rules in both pnpm and npm/npx forms;
   - no broad vitest allow in either form;
@@ -58,9 +58,9 @@
 
   Then update `.claude/settings.json`.
   Verify: `pnpm exec vitest run tests/release/agent-policy.test.ts`
-- [ ] 5.2 Switch `.husky/commit-msg` and `tests/release/commit-policy.test.ts` to `pnpm exec commitlint`.
+- [x] 5.2 Switch `.husky/commit-msg` and `tests/release/commit-policy.test.ts` to `pnpm exec commitlint`.
   Verify: `pnpm exec vitest run tests/release/commit-policy.test.ts && printf 'feat: ok\n' > "$HOME/.cache/pnpm-msg" && sh .husky/commit-msg "$HOME/.cache/pnpm-msg"`
-- [ ] 5.3 Change the lint-on-edit hook's fallback and hint to `pnpm exec eslint` (with assertions in `tests/harness/lint-on-edit.test.ts` if it covers them). Change `tests/e2e.test.ts` to start the server with `pnpm exec ts-node`, and update its comments. Update the stale npm text in the `packages/line-mcp/src/standalone.test.ts` error messages, the `tests/docker/docker-smoke.test.ts` comments, the `npm run test:unit` comment in `tests/e2e.test.ts`, and the `npm run test:unit` fixtures in `tests/release/openspec-tasks.test.ts`.
+- [x] 5.3 Change the lint-on-edit hook's fallback and hint to `pnpm exec eslint` (with assertions in `tests/harness/lint-on-edit.test.ts` if it covers them). Change `tests/e2e.test.ts` to start the server with `pnpm exec ts-node`, and update its comments. Update the stale npm text in the `packages/line-mcp/src/standalone.test.ts` error messages, the `tests/docker/docker-smoke.test.ts` comments, the `npm run test:unit` comment in `tests/e2e.test.ts`, and the `npm run test:unit` fixtures in `tests/release/openspec-tasks.test.ts`.
   Verify: `pnpm exec vitest run tests/harness tests/release/openspec-tasks.test.ts packages/line-mcp/src/standalone.test.ts`
 
 ## 6. CI and release workflows (spec: frozen installs; design D7)
