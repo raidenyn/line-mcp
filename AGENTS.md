@@ -3,7 +3,7 @@
 Operational guide for agents working in this repository — the host-neutral
 source of truth that `CLAUDE.md` imports. Architecture: `docs/ARCHITECTURE.md`.
 
-This is a **LINE MCP server** — an npm-workspace monorepo of six TypeScript
+This is a **LINE MCP server** — a pnpm-workspace monorepo of six TypeScript
 packages (`packages/*`, `tsc -b`, CommonJS output) building two runnable
 servers: the composed server (`@raidenyn/server`, ten tools) and the
 standalone messenger server (`@raidenyn/line-mcp`, five tools).
@@ -11,22 +11,40 @@ standalone messenger server (`@raidenyn/line-mcp`, five tools).
 ## Commands
 
 ```bash
-npm run build        # tsc -b — composite build of all six packages
-npm run clean        # tsc -b --clean
-npm start            # composed server: node packages/server/dist/cli.js (HTTP MCP on localhost:3000)
-node packages/line-mcp/dist/cli.js                       # standalone messenger server
-npm run lint         # eslint .
-npm run verify       # pre-PR gate: lint, one tsc -b, strict OpenSpec validation, then unit/architecture/release/smoke
-npm run verify:changed  # inner loop: changed/untracked .ts lint + affected tests
-npm run verify:all   # verify + Docker smoke + packed line-client artifact check
-npm run test:unit    # in-process unit / contract / migration + import-boundary tests
-npm run test:smoke   # local LINE mock + compiled CLIs (no credentials, no Docker)
-npm run test:e2e     # live LINE e2e (requires .line-auth.json; manual, pre-release only)
-npx vitest run <file>                                    # single test file
-npx vitest run tests/docker/docker-smoke.test.ts         # both Docker targets: healthz + tools/list
-npx vitest run tests/artifacts/line-client-pack.test.ts  # packed line-client artifact check
-npm run commitlint  # validate a commit message/range with commitlint
+pnpm install         # install every workspace's deps from pnpm-lock.yaml (shared store, ~1 s when warm)
+pnpm run build       # tsc -b — composite build of all six packages
+pnpm run clean       # tsc -b --clean
+pnpm start           # composed server: node packages/server/dist/cli.js (HTTP MCP on localhost:3000)
+node packages/line-mcp/dist/cli.js                            # standalone messenger server
+pnpm run lint        # eslint .
+pnpm run verify      # pre-PR gate: lint, one tsc -b, strict OpenSpec validation, then unit/architecture/release/smoke
+pnpm run verify:changed  # inner loop: changed/untracked .ts lint + affected tests
+pnpm run verify:all  # verify + Docker smoke + packed line-client artifact check
+pnpm run test:unit   # in-process unit / contract / migration + import-boundary tests
+pnpm run test:smoke  # local LINE mock + compiled CLIs (no credentials, no Docker)
+pnpm run test:e2e    # live LINE e2e (requires .line-auth.json; manual, pre-release only)
+pnpm exec vitest run <file>                                    # single test file
+pnpm exec vitest run tests/docker/docker-smoke.test.ts         # both Docker targets: healthz, tools/list, image layout
+pnpm exec vitest run tests/artifacts/line-client-pack.test.ts  # packed line-client artifact check
+pnpm exec commitlint # validate a commit message/range with commitlint
 ```
+
+**Setup.** pnpm is the package manager, pinned exactly by `packageManager` in
+the root `package.json` (12.18.0). Install it once with
+`npm install -g pnpm@12.18.0`. A different pnpm on `PATH` downloads and runs the
+pinned version (`pmOnFail: download`, pnpm's default). Configuration lives in
+`pnpm-workspace.yaml`:
+- `allowBuilds` is the reviewed list of dependency build scripts; an install
+  that meets any other build script fails.
+- `verifyDepsBeforeRun: false` means `pnpm run`/`pnpm exec` never install
+  implicitly.
+
+For the fast install in a fresh worktree, pnpm's shared store (default
+`~/.local/share/pnpm/store`) must be on the same filesystem as the worktrees,
+so it can hardlink instead of copying. A checkout that still has an
+npm-installed tree must run `rm -rf node_modules packages/*/node_modules` once
+before its first `pnpm install`. Installing over the npm tree leaves
+undeclared packages and old package-local binaries resolvable.
 
 `LINE_API_BASE_URL` repoints the LINE client at a different gateway — tests
 and development only. Production leaves it unset; any override still receives
@@ -71,11 +89,11 @@ Other types (refactor, test, ci, build, perf): match the risk row; release/publi
 
 **Pre-PR gate (mandatory)**
 
-- Always, before creating or updating any PR: `npm run verify` — lint, one
+- Always, before creating or updating any PR: `pnpm run verify` — lint, one
   `tsc -b`, strict OpenSpec validation, then the unit/architecture/release
   suites and the mock-backed smoke suite. It never triggers a second build.
 - Touched `Dockerfile` or `docker-compose.yml`, or line-client packaging,
-  vendoring, or `assets` → run `npm run verify:all` instead: it adds the Docker
+  vendoring, or `assets` → run `pnpm run verify:all` instead: it adds the Docker
   smoke and the packed-artifact checks.
 - The live e2e suite is manual-only; never required for a PR.
 
@@ -83,10 +101,10 @@ Other types (refactor, test, ci, build, perf): match the risk row; release/publi
 
 | Rung | Command | When | Measured wall time |
 | --- | --- | --- | --- |
-| 0 | `npm run verify:changed` | Every edit: lint changed/untracked JS/TS files, rebuild with `tsc -b` when package sources changed, then only the tests affected by the diff vs `origin/main` | ~19 s with changes; ~0.3 s with no changes |
-| 1 | `npm run verify` | Before opening or updating a PR | ~40–65 s (warm cache) |
-| 2 | `npm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Always rebuilds both images (fails without a daemon), then runs the smoke and pack checks; pack rung ~35 s |
-| 3 | `npm run test:e2e` | Manual, pre-release only (needs `.line-auth.json`) | not measured |
+| 0 | `pnpm run verify:changed` | Every edit: lint changed/untracked JS/TS files, rebuild with `tsc -b` when package sources changed, then only the tests affected by the diff vs `origin/main` | ~19 s with changes; ~0.3 s with no changes |
+| 1 | `pnpm run verify` | Before opening or updating a PR | ~40–65 s (warm cache) |
+| 2 | `pnpm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Always rebuilds both images (fails without a daemon), then runs the smoke and pack checks; pack rung ~35 s |
+| 3 | `pnpm run test:e2e` | Manual, pre-release only (needs `.line-auth.json`) | not measured |
 
 `verify:changed` only covers tests inside the changed package: workspace
 packages import each other from compiled `dist`, so a change to exported package
@@ -117,7 +135,7 @@ If `repo-search` exists, use it for where/why questions; fall back to grep
 
 ## Code style
 
-`npm run lint` must pass. Match the conventions of the file you are editing.
+`pnpm run lint` must pass. Match the conventions of the file you are editing.
 
 ## Agent hooks
 
@@ -133,7 +151,7 @@ Claude Code (`.claude/settings.json`) and OpenCode
 ## Hard rules
 
 - Never edit `packages/line-client/assets/ltsm/*` (proprietary LINE artifacts).
-- Never `npm publish` any package — public npm distribution is not approved.
+- Never `npm publish` or `pnpm publish` any package — public npm distribution is not approved.
   Public **container images** are approved: the owner accepted the LINE LTSM
   redistribution risk permanently on 2026-11-16 (see
   `packages/line-client/THIRD_PARTY_NOTICES.md`), and the `Publish Docker`
@@ -147,7 +165,7 @@ Claude Code (`.claude/settings.json`) and OpenCode
 - `docs/ARCHITECTURE.md` — packages, guides, auth, persistence, Docker, test
   details. **Update it in the same PR as any structural change.**
 - `specs/*.md` — reverse-engineered LINE protocol reference.
-- `openspec/specs/` — behavioral source of truth, validated in CI with `npx openspec validate --all --strict`.
+- `openspec/specs/` — behavioral source of truth, validated in CI with `pnpm exec openspec validate --all --strict`.
 - `openspec/changes/` — active designs and implementation plans; new designs go here; keep each change's `handoff.md` current before ending a session (template: `openspec/templates/handoff.md`).
 - `docs/superpowers/specs/` + `docs/superpowers/plans/` — frozen archive; do not add new designs here.
 - `.agents/skills/` + `.claude/skills/` — `openspec-*` skills; the latter links the former for Claude Code.

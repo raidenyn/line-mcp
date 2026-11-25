@@ -2,7 +2,7 @@
 
 An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that exposes your LINE messenger — and, optionally, template-driven parsing of bank notifications delivered over LINE — as tools to an AI assistant such as Claude Code.
 
-It ships as a **modular npm-workspace monorepo** that builds into two runnable servers:
+It ships as a **modular pnpm-workspace monorepo** that builds into two runnable servers:
 
 - **Composed server** (`@raidenyn/server`, the default) — all **ten** tools: five messenger tools plus five bank/transaction tools.
 - **Standalone messenger server** (`@raidenyn/line-mcp`) — the **five** messenger tools only, with no bank code, no bank data, and a smaller dependency and Docker footprint.
@@ -227,12 +227,12 @@ OAuth does not read `Host` or `X-Forwarded-*`: the browser may load `/authorize`
 
 ### Local development
 
-**Prerequisites:** Node.js 24
+**Prerequisites:** Node.js 24 and pnpm 12.18.0 (pinned by `packageManager`; install it with `npm install -g pnpm@12.18.0`)
 
 ```bash
-npm install
-npm run build                # tsc -b — composite build of all six packages
-npm start                    # composed server on http://localhost:3000
+pnpm install --frozen-lockfile   # install exactly pnpm-lock.yaml; builds better-sqlite3's native addon
+pnpm run build               # tsc -b — composite build of all six packages
+pnpm start                   # composed server on http://localhost:3000
 node packages/line-mcp/dist/cli.js   # standalone messenger server
 ```
 
@@ -241,20 +241,20 @@ The composed server reads `BANK_REGEX_TIMEOUT_MS` (milliseconds) to tune the per
 ## Commands
 
 ```bash
-npm run build       # tsc -b — composite build across all six packages
-npm run clean       # tsc -b --clean
-npm start           # run the composed server (packages/server/dist/cli.js)
-npm run lint        # eslint .
-npm run test:unit   # in-process unit / contract / migration + import-boundary tests (no LINE session, no Docker)
-npm run test:smoke  # strict local LINE mock + compiled composed and standalone CLIs, seeded and full OAuth paths (no credentials, no Docker)
-npm run test:e2e    # live LINE e2e (requires .line-auth.json)
+pnpm run build      # tsc -b — composite build across all six packages
+pnpm run clean      # tsc -b --clean
+pnpm start          # run the composed server (packages/server/dist/cli.js)
+pnpm run lint       # eslint .
+pnpm run test:unit  # in-process unit / contract / migration + import-boundary tests (no LINE session, no Docker)
+pnpm run test:smoke # strict local LINE mock + compiled composed and standalone CLIs, seeded and full OAuth paths (no credentials, no Docker)
+pnpm run test:e2e   # live LINE e2e (requires .line-auth.json)
 ```
 
 Extra deterministic gates (run explicitly; also wired into CI):
 
 ```bash
-npx vitest run tests/artifacts/line-client-pack.test.ts   # packed line-client: offline install, WASM, no SQLite
-npx vitest run tests/docker/docker-smoke.test.ts          # both Docker targets: healthz + real MCP tools/list
+pnpm exec vitest run tests/artifacts/line-client-pack.test.ts   # packed line-client: offline install, WASM, no SQLite
+pnpm exec vitest run tests/docker/docker-smoke.test.ts          # both Docker targets: healthz, real MCP tools/list, image layout
 ```
 
 ### Test suites
@@ -270,12 +270,12 @@ The repository ships four distinct test surfaces:
 
 ## CI
 
-`.github/workflows/ci.yml` runs four parallel jobs on pull requests and pushes to `main`:
+`.github/workflows/ci.yml` runs a commit-policy job and four parallel gate jobs on pull requests and pushes to `main`:
 
-- **check** — `npm ci` → lint → `tsc -b` → unit/contract/migration tests → `openspec validate --all --strict` → import-boundary test → `npm ls --all`.
-- **smoke** — `npm ci` → `npm run test:smoke`: builds the workspace once, then runs both compiled CLI targets against the strict local LINE mock. No credentials, no Docker.
+- **check** — `pnpm install --frozen-lockfile` → lint → `tsc -b` → unit/contract/migration tests → `openspec validate --all --strict` → import-boundary test → peer-dependency check (`scripts/check-peers.mjs`).
+- **smoke** — `pnpm install --frozen-lockfile` → `pnpm run test:smoke`: builds the workspace once, then runs both compiled CLI targets against the strict local LINE mock. No credentials, no Docker.
 - **pack-line-client** — real `npm pack` → clean offline install outside the checkout → JS load + real WASM HMAC → TS compile → asserts no `better-sqlite3`.
-- **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip.
+- **docker** — build both targets → smoke each container over a real MCP `tools/list` roundtrip → check each image's layout (no dangling links, no dev-only packages, no `bank-mcp`/`server` in the standalone image).
 
 **Docker publication** is a separate workflow, `Publish Docker` (`.github/workflows/publish-docker.yml`). It never runs on a push, a merge, a tag, or a published Release. Release images are published only by the `Release` workflow (`.github/workflows/release.yml`), which calls it as a reusable workflow (`workflow_call`) at the commit it planned; each release's notes then carry the pull command, digest reference, and package page for both images. The only other entry point is the `publish-docker` label on a same-repository pull request: that PR head is published as `pr-<number>` plus `sha-<short>` and nothing else, the `ghcr-publish` deployment needs the owner's approval, and fork PRs are refused. It authenticates with the built-in `GITHUB_TOKEN` under `packages: write` — no personal access token — and never pushes anywhere but `ghcr.io`. The first-publication visibility flip and the rest of the operator steps are in [docs/RELEASING.md](docs/RELEASING.md).
 

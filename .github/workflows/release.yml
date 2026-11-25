@@ -98,14 +98,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
       - name: Install dependencies
         shell: bash
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Verify current main
         shell: bash
@@ -137,7 +139,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
-        run: npm run release:plan
+        run: pnpm run release:plan
 
       # semantic-release reports no release when the local branch is behind the
       # remote, so a no-release result is only trusted when main has not moved.

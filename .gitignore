@@ -50,6 +50,9 @@ web_modules/
 # Optional npm cache directory
 .npm
 
+# This repository uses pnpm (pnpm-lock.yaml); never commit an npm lockfile
+package-lock.json
+
 # Optional eslint cache
 .eslintcache
 

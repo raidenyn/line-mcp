@@ -6,7 +6,8 @@
 **Agent permissions**
 
 - The committed policy is `.claude/settings.json`. It only allow-lists the
-  lint, build, unit and smoke commands plus read-only git/openspec inspection;
+  pnpm forms of the lint, build, unit and smoke commands (`pnpm run …`,
+  `pnpm exec vitest run <safe root>`) plus read-only git/openspec inspection;
   it declares no `ask` or `deny` rules, so agents are not stopped for pushes,
   PRs, e2e runs or file access. The hard rules in `AGENTS.md` still apply.
 - Personal overrides belong in the untracked `.claude/settings.local.json`;

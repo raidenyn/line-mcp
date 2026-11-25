@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { parse } from 'yaml';
 
 /**
  * Enforces the workspace dependency graph from issue #75 (modular-workspaces).
@@ -109,18 +110,24 @@ function importedWorkspacePackages(pkgDir: string): Set<string> {
 }
 
 describe('workspace root', () => {
-  it('is configured as a private npm workspace containing packages/*', () => {
+  it('is configured as a private pnpm workspace containing packages/*', () => {
     const rootManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'));
     expect(rootManifest.private).toBe(true);
-    expect(rootManifest.workspaces).toEqual(['packages/*']);
+    expect(rootManifest.workspaces).toBeUndefined();
+    const workspaceFile = path.join(ROOT, 'pnpm-workspace.yaml');
+    expect(fs.existsSync(workspaceFile)).toBe(true);
+    const workspace = parse(fs.readFileSync(workspaceFile, 'utf-8')) as { packages?: string[] };
+    expect(workspace.packages).toEqual(['packages/*']);
   });
 
-  it('has no package-local lockfiles (single root package-lock.json)', () => {
+  it('has a single root pnpm-lock.yaml', () => {
     for (const dir of PACKAGE_DIRS) {
-      const lockPath = path.join(PACKAGES_DIR, dir, 'package-lock.json');
-      expect(fs.existsSync(lockPath)).toBe(false);
+      for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json']) {
+        expect(fs.existsSync(path.join(PACKAGES_DIR, dir, lockfile)), `${dir}/${lockfile}`).toBe(false);
+      }
     }
-    expect(fs.existsSync(path.join(ROOT, 'package-lock.json'))).toBe(true);
+    expect(fs.existsSync(path.join(ROOT, 'pnpm-lock.yaml'))).toBe(true);
+    expect(fs.existsSync(path.join(ROOT, 'package-lock.json'))).toBe(false);
   });
 });
 

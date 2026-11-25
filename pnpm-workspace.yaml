@@ -1,0 +1,16 @@
+packages:
+  - packages/*
+
+# Dependency build scripts run only for the packages reviewed here. An install
+# that meets any other build script fails (strictDepBuilds), so a new native
+# dependency has to be added on purpose. fsevents is macOS-only and not needed.
+allowBuilds:
+  better-sqlite3: true
+  fsevents: false
+
+# `pnpm run` / `pnpm exec` never install implicitly; installs are explicit.
+verifyDepsBeforeRun: false
+
+# Do not link workspace packages into node_modules/.pnpm/node_modules: the
+# standalone Docker image ships only part of packages/, so those links dangle.
+hoistWorkspacePackages: false

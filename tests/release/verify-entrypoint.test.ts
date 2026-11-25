@@ -19,12 +19,12 @@ const scripts = packageJson.scripts;
 
 describe('verification entrypoints', () => {
   it('runs lint, exactly one build, and the in-process suites in verify', () => {
-    expect(scripts.verify).toContain('npm run lint');
-    expect(scripts.verify.match(/npm run build/g)).toHaveLength(1);
-    // The single build must go through the npm script, not an inline second one.
+    expect(scripts.verify).toContain('pnpm run lint');
+    expect(scripts.verify.match(/pnpm run build/g)).toHaveLength(1);
+    // The single build must go through the package script, not an inline second one.
     expect(scripts.verify).not.toContain('tsc -b');
     // #118 made strict OpenSpec validation part of the pre-PR gate.
-    expect(scripts.verify).toContain('npx openspec validate --all --strict');
+    expect(scripts.verify).toContain('pnpm exec openspec validate --all --strict');
 
     const tests = scripts.verify.slice(scripts.verify.indexOf('vitest run'));
     expect(tests).toContain('--reporter=dot');
@@ -38,7 +38,7 @@ describe('verification entrypoints', () => {
   });
 
   it('adds the docker and packaging rungs only in verify:all', () => {
-    expect(scripts['verify:all']).toContain('npm run verify');
+    expect(scripts['verify:all']).toContain('pnpm run verify');
     // The smoke test skips itself without a daemon, so the rung must build first.
     expect(scripts['verify:all']).toContain('docker build --target server');
     expect(scripts['verify:all']).toContain('docker build --target line-mcp');
@@ -50,6 +50,11 @@ describe('verification entrypoints', () => {
   it('keeps the changed-file logic in a script, not a shell one-liner', () => {
     expect(scripts['verify:changed']).toBe('node scripts/verify-changed.mjs');
     expect(existsSync('scripts/verify-changed.mjs')).toBe(true);
+    expect(readFileSync('scripts/verify-changed.mjs', 'utf8')).not.toMatch(/\bnpx\b/);
+  });
+
+  it('builds once before the smoke suite', () => {
+    expect(scripts['test:smoke']).toBe('pnpm run build && vitest run tests/smoke');
   });
 
   it('pins Node 24 for local and CI installs', () => {
@@ -73,8 +78,8 @@ describe('verification entrypoints', () => {
   it('documents the verification ladder and its measured rungs', () => {
     const guide = readFileSync('AGENTS.md', 'utf8');
     expect(guide).toContain('Verification ladder');
-    expect(guide).toMatch(/npm run verify(?![:\w])/);
-    for (const command of ['npm run verify:changed', 'npm run verify:all', 'npm run test:e2e']) {
+    expect(guide).toMatch(/pnpm run verify(?![:\w])/);
+    for (const command of ['pnpm install', 'pnpm run verify:changed', 'pnpm run verify:all', 'pnpm run test:e2e']) {
       expect(guide).toContain(command);
     }
     expect(guide).toContain('Measured');

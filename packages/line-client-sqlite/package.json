@@ -17,7 +17,7 @@
   ],
   "type": "commonjs",
   "dependencies": {
-    "@raidenyn/line-client": "^0.1.0",
+    "@raidenyn/line-client": "workspace:^",
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {

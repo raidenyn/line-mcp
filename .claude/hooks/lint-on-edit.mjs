@@ -95,7 +95,7 @@ export function formatErrors(json, file, maxLines = MAX_LINES) {
   const room = maxLines - 1;
   if (body.length <= room) return [header, ...body];
   const shown = body.slice(0, room - 1);
-  return [header, ...shown, `… ${body.length - shown.length} more; run \`npx eslint ${file}\``];
+  return [header, ...shown, `… ${body.length - shown.length} more; run \`pnpm exec eslint ${file}\``];
 }
 
 /**
@@ -108,10 +108,10 @@ export function lintFile(file, root = REPO_ROOT) {
   const path = resolve(root, file);
   if (!existsSync(path)) return { errors: [], fixed: false };
   const before = readFileSync(path, 'utf8');
-  // The local binary avoids npx start-up and lets the timeout kill ESLint
-  // itself rather than an npx parent that leaves it holding the pipe.
+  // The local binary avoids pnpm start-up and lets the timeout kill ESLint
+  // itself rather than a pnpm parent that leaves it holding the pipe.
   const local = resolve(root, 'node_modules/.bin/eslint');
-  const [command, prefix] = existsSync(local) ? [local, []] : ['npx', ['--no-install', 'eslint']];
+  const [command, prefix] = existsSync(local) ? [local, []] : ['pnpm', ['exec', 'eslint']];
   const result = spawnSync(command, [...prefix, '--fix', '--format', 'json', '--', file], {
     cwd: root,
     encoding: 'utf8',

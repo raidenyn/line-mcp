@@ -104,7 +104,7 @@ function main() {
   const lintTargets = selectLintTargets(tracked, untracked).filter((file) => existsSync(file));
   if (lintTargets.length > 0) {
     console.log(`verify:changed: linting ${lintTargets.length} changed file(s)`);
-    const lintStatus = run('npx', ['--no-install', 'eslint', ...lintTargets]);
+    const lintStatus = run('pnpm', ['exec', 'eslint', ...lintTargets]);
     if (lintStatus !== 0) process.exit(lintStatus);
 
     // Workspace packages resolve each other through compiled dist, so Vitest's
@@ -112,11 +112,11 @@ function main() {
     // tests that load a built package would run against a stale dist.
     if (selectPackageSources(lintTargets).length > 0) {
       console.log('verify:changed: package sources changed; rebuilding dist (tsc -b)');
-      const buildStatus = run('npx', ['--no-install', 'tsc', '-b']);
+      const buildStatus = run('pnpm', ['exec', 'tsc', '-b']);
       if (buildStatus !== 0) process.exit(buildStatus);
       console.error(
         'verify:changed: note: other packages consume compiled dist, ' +
-          'so run `npm run verify` before the PR to cover cross-package tests',
+          'so run `pnpm run verify` before the PR to cover cross-package tests',
       );
     }
   } else {
@@ -124,8 +124,8 @@ function main() {
   }
 
   process.exit(
-    run('npx', [
-      '--no-install',
+    run('pnpm', [
+      'exec',
       'vitest',
       'run',
       '--changed',

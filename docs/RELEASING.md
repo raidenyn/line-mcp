@@ -54,7 +54,7 @@ an older head.
 | Stage | What it does |
 | ----- | ------------ |
 | `authorize` | Refuses every actor but the repository owner (compared case-insensitively) and every ref but `refs/heads/main`. The `plan`, `draft`, and `publish` jobs repeat it because "re-run failed jobs" does not re-run a job that already succeeded. |
-| `plan` | Runs `npm run release:plan`, a semantic-release dry run that creates no tag. It writes the next `vX.Y.Z`, its notes, and the planned commit. **`No releasable commits` is a successful no-op**: nothing is created. |
+| `plan` | Runs `pnpm run release:plan` after a frozen, scripts-disabled `pnpm install`, a semantic-release dry run that creates no tag. It writes the next `vX.Y.Z`, its notes, and the planned commit. **`No releasable commits` is a successful no-op**: nothing is created. |
 | `draft` | Creates a GitHub **draft** release titled with the tag, targeted at the planned commit, with the generated notes. A draft creates no git tag. A stale draft for the same tag is deleted and replaced, so a retry starts clean; a published release with that tag, or an existing remote tag, fails the run. |
 | `images` | Calls the reusable `Publish Docker` workflow (`.github/workflows/publish-docker.yml`, `workflow_call`) to build both images at the planned commit and push the version tags. |
 | `publish` | Logs in to GHCR with `GITHUB_TOKEN`, reads both image digests, appends one `## Docker images` section (pull command, digest reference, and package page per image) to the notes, then publishes the draft with `gh release edit --draft=false`. Publishing the draft is what creates the git tag, and the job verifies the tag resolves to the planned commit. |

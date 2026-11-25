@@ -142,6 +142,7 @@ describe('release workflow shape', () => {
     expect(job('plan').steps?.map((candidate) => candidate.name ?? candidate.uses)).toEqual([
       'Authorize the owner on main',
       'actions/checkout@v7',
+      'pnpm/action-setup@v6',
       'actions/setup-node@v7',
       'Install dependencies',
       'Verify current main',
@@ -151,7 +152,7 @@ describe('release workflow shape', () => {
       'Upload the release notes',
     ]);
 
-    expect(step('plan', 'Install dependencies').run).toBe('npm ci --ignore-scripts');
+    expect(step('plan', 'Install dependencies').run).toBe('pnpm install --frozen-lockfile --ignore-scripts');
     expect(step('plan', 'Verify current main').run).toContain('refs/remotes/origin/main');
     expect(step('plan', 'Verify current main').run).toContain('Dispatch a new Release run');
     const baseline = step('plan', 'Verify baseline tag exists');
@@ -162,7 +163,7 @@ describe('release workflow shape', () => {
   it('plans with the release planner and keeps the token in that step only', () => {
     const plan = step('plan', 'Plan the release');
     expect(plan.id).toBe('plan');
-    expect(plan.run).toBe('npm run release:plan');
+    expect(plan.run).toBe('pnpm run release:plan');
     expect(plan.env).toEqual({
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
       RELEASE_NOTES_FILE: '${{ runner.temp }}/release-notes.md',
@@ -285,17 +286,18 @@ describe('release workflow shape', () => {
     expect(release.run).toContain('## Docker images');
   });
 
-  it('never dispatches, pushes, commits, or publishes to npm', () => {
+  it('never dispatches, pushes, commits, or publishes a package', () => {
     const runs = runSteps();
     expect(runs.length).toBeGreaterThan(0);
     for (const { jobName, step: candidate } of runs) {
       const run = candidate.run ?? '';
       const where = `${jobName}: ${candidate.name}`;
       expect(run, where).not.toContain('repository_dispatch');
-      expect(run, where).not.toMatch(/^npm run release$/m);
+      expect(run, where).not.toMatch(/^p?npm run release$/m);
       expect(run, where).not.toContain('git push');
       expect(run, where).not.toContain('git commit');
       expect(run, where).not.toContain('npm publish');
+      expect(run, where).not.toContain('pnpm publish');
     }
     expect(source).not.toContain('repository_dispatch');
   });

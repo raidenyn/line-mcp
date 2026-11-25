@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 const root = process.cwd();
 
 function lint(message: string) {
-  return spawnSync('npm', ['run', '--silent', 'commitlint', '--'], {
+  return spawnSync('pnpm', ['exec', 'commitlint'], {
     cwd: root,
     encoding: 'utf8',
     input: message,

@@ -74,7 +74,7 @@ const DIST_CLI = path.join(PACKAGE_ROOT, 'dist', 'cli.js');
 describe('@raidenyn/line-mcp package import — no side effects', () => {
   it('requiring the compiled package root creates no files, opens no listeners, and exits promptly', () => {
     if (!fs.existsSync(DIST_INDEX)) {
-      throw new Error(`${DIST_INDEX} does not exist — run \`npm run build\` before this test`);
+      throw new Error(`${DIST_INDEX} does not exist — run \`pnpm run build\` before this test`);
     }
     const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-import-check-'));
     try {
@@ -108,7 +108,7 @@ describe('compiled CLI — start and stop', () => {
 
   it('starts listening on an ephemeral port and shuts down cleanly on SIGTERM', async () => {
     if (!fs.existsSync(DIST_CLI)) {
-      throw new Error(`${DIST_CLI} does not exist — run \`npm run build\` before this test`);
+      throw new Error(`${DIST_CLI} does not exist — run \`pnpm run build\` before this test`);
     }
     tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'line-mcp-cli-'));
 

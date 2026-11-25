@@ -58,12 +58,12 @@ async function waitForServer(baseUrl: string, timeoutMs = 30_000): Promise<void>
 }
 
 // This suite spawns the real composed server (issue #75, Task 11:
-// packages/server/src/cli.ts — the same entry point `npm start` runs) against
+// packages/server/src/cli.ts — the same entry point `pnpm start` runs) against
 // a genuine LINE account (via .line-auth.json). Startup-order and
 // old-volume-migration coverage now lives in packages/server/src/startup.test.ts,
 // which runs in-process against the composed server's own createServer()
 // factory and needs neither a real LINE account nor a spawned child process —
-// it is part of `npm run test:unit` and does not require this suite's setup.
+// it is part of `pnpm run test:unit` and does not require this suite's setup.
 describe('LINE MCP server e2e (real account)', () => {
   beforeAll(async () => {
     authJson = fs.readFileSync(path.join(PROJECT_ROOT, '.line-auth.json'), 'utf8');
@@ -74,8 +74,8 @@ describe('LINE MCP server e2e (real account)', () => {
     isolatedDataDir = mkdtemp('line-mcp-e2e-data-');
 
     serverProcess = spawn(
-      'npx',
-      ['ts-node', path.join(PROJECT_ROOT, 'packages', 'server', 'src', 'cli.ts')],
+      'pnpm',
+      ['exec', 'ts-node', path.join(PROJECT_ROOT, 'packages', 'server', 'src', 'cli.ts')],
       {
         cwd: PROJECT_ROOT,
         env: {
@@ -114,7 +114,7 @@ describe('LINE MCP server e2e (real account)', () => {
     }
     await transport?.close().catch(() => {});
     try {
-      // Kill the whole process group (npx → ts-node → node) so nothing lingers on the port
+      // Kill the whole process group (pnpm → ts-node → node) so nothing lingers on the port
       process.kill(-serverProcess.pid!, 'SIGTERM');
     } catch {
       serverProcess.kill();

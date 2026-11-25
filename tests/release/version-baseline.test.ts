@@ -21,24 +21,15 @@ describe('0.1.0 version baseline', () => {
     expect(manifest.version).toBe('0.1.0');
   });
 
-  it.each(manifests)('%s uses the baseline internal ranges', (path) => {
+  it.each(manifests)('%s links internal packages with the workspace protocol', (path) => {
     const manifest = JSON.parse(readFileSync(path, 'utf8')) as {
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
-    for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
-      if (workspaceNames.has(name)) expect(range).toBe('^0.1.0');
-    }
-  });
-
-  it('records root and workspace versions in the lockfile', () => {
-    const lock = JSON.parse(readFileSync('package-lock.json', 'utf8')) as {
-      version: string;
-      packages: Record<string, { version?: string }>;
-    };
-    expect(lock.version).toBe('0.1.0');
-    expect(lock.packages[''].version).toBe('0.1.0');
-    for (const path of manifests.slice(1)) {
-      expect(lock.packages[path.replace('/package.json', '')].version).toBe('0.1.0');
+    for (const section of [manifest.dependencies, manifest.devDependencies]) {
+      for (const [name, range] of Object.entries(section ?? {})) {
+        if (workspaceNames.has(name)) expect(range, `${path} ${name}`).toBe('workspace:^');
+      }
     }
   });
 });

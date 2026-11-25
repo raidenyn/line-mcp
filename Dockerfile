@@ -8,19 +8,27 @@
 #   * line-mcp — the standalone messenger-only server (five tools).
 #                `docker build --target line-mcp .`
 #
-# Both targets share ONE builder stage that runs `npm ci` + the composite
-# `tsc -b` once, then prunes dev dependencies. The runtime stages copy only the
-# pruned production `node_modules` (which already carries better-sqlite3's
-# glibc-built native addon) plus each target's own compiled package closure.
+# Both targets share ONE builder stage that runs a frozen `pnpm install` + the
+# composite `tsc -b` once, then prunes dev dependencies. The runtime stages copy
+# only the pruned production `node_modules` (pnpm's `.pnpm` virtual store with
+# relative symlinks, which already carries better-sqlite3's glibc-built native
+# addon) plus each target's own compiled package closure.
 
 # ─── Builder: full toolchain, builds all six workspace packages ──────────────
 FROM node:24 AS builder
 WORKDIR /app
 
+# Must equal the root package.json "packageManager" pin (a release test checks
+# it). Installed with npm rather than corepack, which Node 25+ no longer ships.
+ARG PNPM_VERSION=12.18.0
+# CI=true lets pnpm recreate node_modules without a TTY prompt.
+ENV CI=true
+RUN npm install -g pnpm@${PNPM_VERSION}
+
 # Copy the root manifest + lockfile and EVERY workspace manifest before any
 # source, so the dependency-install layer is keyed on manifests alone and only
 # busts when a package.json or the lockfile changes — not on every source edit.
-COPY package.json package-lock.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/line-client/package.json         packages/line-client/package.json
 COPY packages/line-client-sqlite/package.json  packages/line-client-sqlite/package.json
 COPY packages/mcp-runtime/package.json         packages/mcp-runtime/package.json
@@ -29,18 +37,19 @@ COPY packages/bank-mcp/package.json            packages/bank-mcp/package.json
 COPY packages/server/package.json              packages/server/package.json
 
 # Installs every workspace's deps (prod + dev) and compiles better-sqlite3's
-# native addon against this stage's glibc + Node 24 ABI.
-RUN npm ci
+# native addon (the only allowlisted build script) against this stage's glibc +
+# Node 24 ABI.
+RUN pnpm install --frozen-lockfile
 
 # Sources + TS project config, then one composite build across all six packages.
 COPY tsconfig.base.json tsconfig.json ./
 COPY packages ./packages
-RUN npm run build
+RUN pnpm run build
 
 # Reduce the installed tree to production dependencies only. The compiled
 # better-sqlite3 addon is a production dependency (of line-client-sqlite and
 # bank-mcp) and survives; typescript/vitest/eslint/ts-node/@types do not.
-RUN npm prune --omit=dev
+RUN pnpm prune --prod
 
 # Strip everything the runtime never loads from each package directory
 # (TypeScript sources, test files, build info, pack-time helper scripts),
@@ -61,7 +70,8 @@ ENV DATA_DIR=/data
 ENV BASE_PATH=/
 
 # Pruned production node_modules (includes the compiled better-sqlite3 addon
-# and the workspace symlinks under node_modules/@raidenyn/*).
+# and the workspace symlinks under node_modules/@raidenyn/*). Each package's own
+# node_modules (symlinks into /app/node_modules/.pnpm) travels with packages/.
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 

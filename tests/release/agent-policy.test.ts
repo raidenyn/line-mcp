@@ -23,6 +23,29 @@ describe('agent permission policy', () => {
     expect(settings.permissions?.deny).toBeUndefined();
   });
 
+  it('allow-lists the pnpm forms of the safe commands, never a broad vitest run', () => {
+    const allow = settings.permissions?.allow ?? [];
+    expect(allow).not.toContain('Bash(pnpm exec vitest run *)');
+    expect(allow).not.toContain('Bash(npx vitest run *)');
+    expect(allow.some(rule => rule.includes('e2e'))).toBe(false);
+    expect(allow).toEqual(
+      expect.arrayContaining([
+        'Bash(pnpm exec vitest run packages*)',
+        'Bash(pnpm exec vitest run tests/architecture*)',
+        'Bash(pnpm exec vitest run tests/release*)',
+        'Bash(pnpm exec vitest run tests/smoke*)',
+        'Bash(pnpm exec vitest run tests/artifacts*)',
+        'Bash(pnpm exec vitest run tests/docker*)',
+        'Bash(pnpm run lint*)',
+        'Bash(pnpm run build*)',
+        'Bash(pnpm run test:unit*)',
+        'Bash(pnpm run test:smoke*)',
+        'Bash(pnpm run verify*)',
+        'Bash(pnpm exec eslint *)',
+      ]),
+    );
+  });
+
   it('does not track personal settings overrides', () => {
     const tracked = execFileSync(
       'git',
