@@ -90,10 +90,15 @@ document. It reports four things:
    npm records no peer-context identity, so per-parent-version sets are the
    finest level the two lockfiles can be compared at. That limitation is
    accepted.
-4. **Deliberate manifest edges** (D3/D4) are listed separately, so they are
+4. **Deliberate manifest edges** (D3/D4) are checked separately, so they are
    not mistaken for drift: root dev dependencies on `@raidenyn/line-mcp` and
    `@raidenyn/server`, and the `server` dev dependency on `better-sqlite3`.
-   The parity run happens before those edits.
+   The tool runs twice.
+   - Right after `pnpm import`, before those edits.
+   - Again on the lockfile that ships. That run must show the same inventory
+     and package edges, plus exactly those three importer edges. Workspace
+     links are compared by their resolved target path, and `better-sqlite3`
+     must resolve to the already-locked 12.11.1.
 
 **Result on pnpm 12.18.0** (run on 2026-11-25 against the current
 `package-lock.json`, before the manifest additions):

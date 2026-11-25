@@ -81,6 +81,14 @@
   - Add `@raidenyn/line-mcp` and `@raidenyn/server` (`workspace:^`) to the root `devDependencies`.
   - Add `"better-sqlite3": "^12.11.1"` to the `packages/server` `devDependencies`, the same range as the other packages.
   - Run `pnpm install`. It runs over the existing npm `node_modules`, so confirm that it replaces the tree.
+- [ ] **Step 4c: Parity of the shipped lockfile.** Run the Step 4 command again. Expected:
+  - the same inventory and package-edge lines as Step 4;
+  - exactly these three importer-edge lines:
+    - `. @raidenyn/line-mcp: npm=- pnpm=link:packages/line-mcp`
+    - `. @raidenyn/server: npm=- pnpm=link:packages/server`
+    - `packages/server better-sqlite3: npm=- pnpm=12.11.1`
+
+  This output was verified in a bench copy on 2026-11-25. Copy it into `apply.md`. Any other line stops the work.
 - [ ] **Step 5:** `git rm package-lock.json`, and add `package-lock.json` under the npm section of `.gitignore`.
 - [ ] **Step 6:** Run `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`, then the in-memory SQLite probe from tasks.md 2.2. Expected: PASS, and the probe exits 0.
 - [ ] **Step 7: Commit:** `build(deps): switch the workspace to pnpm`.
@@ -206,9 +214,9 @@
   - In the doc case, AGENTS.md matches `/pnpm run verify(?![:\w])/` and contains `pnpm run verify:changed`, `pnpm run verify:all`, `pnpm run test:e2e` and `pnpm install`.
   - Add `npm-sweep.test.ts` as specified in tasks.md 8.1.
     - It exports `findUnexpected(matches: string[], allowed: ReadonlySet<string>): string[]`, which strips the `:<line>:` part of each `file:line:text` match and returns those not in `allowed`.
-    - The case `accepts allowlisted lines and rejects new legacy commands` calls it with the allowlisted entries plus `README.md:1:npm run build` and `docs/x.md:2:npx vitest`, and expects exactly the last two back.
+    - The case `accepts allowlisted lines and rejects new legacy commands` calls it with the allowlisted entries plus two synthetic lines. The lines are built from separate tokens, so the test file itself never matches the grep: `` `README.md:1:${['np', 'm'].join('')} run build` `` and `` `docs/x.md:2:${['np', 'x'].join('')} vitest` ``. It expects exactly those two back.
     - The case `finds no unexpected npm commands` runs `spawnSync('git', ['grep', '-nE', PATTERN, '--', '.', ...EXCLUDES])`. Status `1` passes; status `0` requires `findUnexpected(...)` to be `[]`; any other status fails.
-    - Run it once to collect the matches; only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
+    - Run it once with the test file staged (`git add tests/release/npm-sweep.test.ts`), so the file is included in the grep. Only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
 - [ ] **Step 2:** Run `pnpm exec vitest run tests/release/verify-entrypoint.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - AGENTS.md:

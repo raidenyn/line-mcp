@@ -1,11 +1,13 @@
 // Throwaway lockfile parity check: package-lock.json (npm) vs pnpm-lock.yaml.
 // Usage: node pnpm-parity.mjs <checkout-with-yaml-dep> <package-lock.json> <pnpm-lock.yaml>
+import console from 'node:console';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import process from 'node:process';
 
 const [checkout, npmLockPath, pnpmLockPath] = process.argv.slice(2);
-const YAML = createRequire(path.join(checkout, 'package.json'))('yaml');
+const YAML = createRequire(path.resolve(checkout, 'package.json'))('yaml');
 
 const npmLock = JSON.parse(readFileSync(npmLockPath, 'utf8'));
 const docs = YAML.parseAllDocuments(readFileSync(pnpmLockPath, 'utf8'));
@@ -31,7 +33,7 @@ function resolveNpm(from, name) {
     const cand = base ? `${base}/node_modules/${name}` : `node_modules/${name}`;
     if (pkgs[cand]) {
       const e = pkgs[cand];
-      if (e.link) return `link:${pkgs[e.resolved]?.name ?? e.resolved}`;
+      if (e.link) return `link:${e.resolved}`;
       return e.version;
     }
     if (!base) return null;
@@ -66,7 +68,10 @@ for (const [imp, e] of Object.entries(pnpmLock.importers ?? {})) {
   for (const sec of SECTIONS) {
     for (const [child, d] of Object.entries(e[sec] ?? {})) {
       const v = String(d.version);
-      pnpmImporterEdges.set(`${imp} ${child}`, v.startsWith('link:') ? `link:${child}` : stripPeers(v));
+      const linked = v.startsWith('link:')
+        ? `link:${path.posix.normalize(path.posix.join(imp === '.' ? '' : imp, v.slice('link:'.length)))}`
+        : stripPeers(v);
+      pnpmImporterEdges.set(`${imp} ${child}`, linked);
     }
   }
 }

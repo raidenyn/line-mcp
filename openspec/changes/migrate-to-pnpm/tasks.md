@@ -31,6 +31,7 @@
   - add root dev dependencies `@raidenyn/line-mcp` and `@raidenyn/server`;
   - add `better-sqlite3` as a `packages/server` dev dependency;
   - run `pnpm install` over the existing npm `node_modules`;
+  - run the parity tool again on the lockfile that will ship. It must show the same inventory and package edges, plus exactly the three deliberate importer edges (`@raidenyn/line-mcp` and `@raidenyn/server` at the root, and `better-sqlite3@12.11.1` in `packages/server`). Record the output in `apply.md`;
   - only then `git rm package-lock.json` and ignore it.
   Verify: `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts && (cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
 - [ ] 2.3 Check a fresh install from a clean export, separately from the in-place migration: `git archive HEAD` into a directory under `~/.cache` (the same filesystem as the store). Record the timing in `apply.md`.
@@ -110,7 +111,7 @@
   - the negative assertions in `tests/release/package-manager.test.ts` (the workflow `npm (ci|run|ls)`/`npx` pattern and the Dockerfile `npm ci` check);
   - the sweep test's own pattern.
 
-  The filtering is an exported pure function, `findUnexpected(matches, allowed)`. A unit case proves that it accepts the allowlisted lines and rejects a synthetic `README.md:npm run build` and `docs/x.md:npx vitest`.
+  The filtering is an exported pure function, `findUnexpected(matches, allowed)`. A unit case proves that it accepts the allowlisted lines and rejects two synthetic legacy commands. They are built from separate tokens, so the test file does not match its own grep. The sweep is run with the new test file staged.
   Verify: `pnpm exec vitest run tests/release && pnpm exec openspec validate --all --strict`
 
 ## 9. Final gate (design D14)
