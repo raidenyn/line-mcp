@@ -7,7 +7,7 @@
 
 ## State
 
-- Current task: verify → finalize (all 9 tasks done; owner approved one PR despite the size)
+- Current task: none — PR #163 open; archive after approval
 - Head commit: `2e01765` on `feat/openspec-issue-131`
 - Tasks: 9 of 9 complete
 
