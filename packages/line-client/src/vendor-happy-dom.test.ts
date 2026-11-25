@@ -46,6 +46,15 @@ function pnpmLayout(): string {
   return pkg;
 }
 
+function isReadable(file: string): boolean {
+  try {
+    fs.readFileSync(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function vendor(pkg: string) {
   return spawnSync(process.execPath, [path.join(pkg, 'scripts', 'vendor-happy-dom.js')], {
     cwd: pkg,
@@ -70,7 +79,7 @@ describe('vendor-happy-dom under a pnpm layout', () => {
     // dep-b resolves (its package.json is readable) but copying it fails.
     const depBFile = path.join(root!, 'store', 'node_modules', 'dep-b', 'index.js');
     fs.chmodSync(depBFile, 0o000);
-    if (spawnSync('cat', [depBFile]).status === 0) return; // running as root: permissions cannot simulate the failure
+    if (isReadable(depBFile)) return; // running as root: permissions cannot simulate the failure
     expect(vendor(pkg).status).not.toBe(0);
     expect(fs.lstatSync(path.join(pkg, 'node_modules', 'happy-dom')).isSymbolicLink()).toBe(true);
 

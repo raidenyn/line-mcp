@@ -15,7 +15,7 @@
 
 Every command ran under `. ~/.cache/pnpm-env.sh`, which puts Node 24 first, sets `NODE_OPTIONS=--dns-result-order=ipv4first`, and has pnpm 12.18.0 on `PATH`.
 
-- `pnpm run verify`: PASS (63 files, 974 tests).
+- `pnpm run verify`: PASS (64 files, 976 tests).
 - `pnpm exec vitest run --reporter=dot tests/artifacts/line-client-pack.test.ts`: PASS (7/7).
 - `node scripts/check-peers.mjs`: `peer dependencies OK`.
 - `node openspec/changes/migrate-to-pnpm/tools/lockfile-parity.mjs . ~/.cache/package-lock.baseline.json pnpm-lock.yaml`: matches design D2, plus the three deliberate importer edges.
