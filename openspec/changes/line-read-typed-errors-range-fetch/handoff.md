@@ -7,9 +7,9 @@
 
 ## State
 
-- Current task: paused before plan Task 4 (tasks.md 3.1), waiting for the owner's decision on the size checkpoint (plan Task 3 Step 6 tripped)
-- Head commit: `82c6850` on `feat/openspec-issue-131` (plus this handoff/tasks commit)
-- Tasks: 4 of 9 complete (1.1, 1.2, 2.1, 2.2)
+- Current task: verify → finalize (all 9 tasks done; owner approved one PR despite the size)
+- Head commit: `2e01765` on `feat/openspec-issue-131`
+- Tasks: 9 of 9 complete
 
 ## Verified
 
@@ -19,10 +19,12 @@
 
 ## Remaining
 
-- Plan Tasks 4–7 (tasks.md 3.1, 3.2, 4.1, 5.1, 5.2), then verify, finalize, independent review, draft PR, archive.
+- openspec-verify-change, finalize (finalize.md), push + draft PR (owner approval), post review findings inline, mark ready, archive.
 - SDD ledger: `.superpowers/sdd/plan/progress.md` (git-ignored).
 
 ## Risks
 
-- Size: packages diff is +1145/−33 (non-test source ~341 lines, tests ~837) against the issue's ~450 target and ~675 stop. Owner decides: split or continue.
+- Size: ~+1445/−45 outside openspec against the issue's ~450 target; owner chose one PR (2026-11-25).
 - Internal deviation: `walkHistory` and the page fetchers take `read?: { signal? }` instead of `signal?` so a typed read without a signal still uses the typed `request()` path (accepted by the Task 3 review).
+- `npm run verify` passes except 9 `oauth-router.test.ts` ECONNREFUSED tests that also fail on `origin/main` here (environment).
+- The mock acceptance test reads the built `dist`; `verify:changed` does not build first (discovered work).
