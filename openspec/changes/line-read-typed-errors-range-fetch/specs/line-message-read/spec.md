@@ -23,7 +23,7 @@ The `message` of a `LineReadError` SHALL be chosen from fixed texts, with only r
 - **THEN** classification returns `unavailable` without throwing
 
 ### Requirement: Session failures are session_expired
-An HTTP 401 from LINE, missing authentication, a login still in progress, and a failed login whose cause is not transient SHALL be classified as `session_expired`. The range fetch SHALL NOT wait for a login in progress and SHALL send no history request in that case.
+An HTTP 401 from LINE (except a 401 that follows a token refresh failing with HTTP 5xx or 429 in the same read, which is `unavailable`), missing authentication, a login still in progress, and a failed login whose cause is not transient SHALL be classified as `session_expired`. The range fetch SHALL NOT wait for a login in progress and SHALL send no history request in that case.
 
 #### Scenario: Authentication failure from LINE
 - **WHEN** the LINE mock answers a message fetch with HTTP 401 for the access token in use
@@ -83,11 +83,11 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 - **THEN** `coverage` is `complete`
 
 #### Scenario: Range reaching before the start of history
-- **WHEN** the requested `sinceMs` is older than the chat's oldest message
+- **WHEN** the requested `sinceMs` is older than the chat's oldest message and the walk reaches that message without a safety stop (its last page is empty, holds only the boundary message, or is short with new, older messages)
 - **THEN** the messages from the oldest message up to `untilMs` are returned, `coverage` is `history_end` and `oldestReachedMs` is the oldest message's creation time
 
 #### Scenario: Progress-guard stop keeps received messages
-- **WHEN** a previous page returns fresh messages with the same creation time as the current oldest
+- **WHEN** a previous page returns fresh messages none of which is strictly older than the current oldest (for example all with the same creation time)
 - **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
 
 #### Scenario: Safety stops are truncated

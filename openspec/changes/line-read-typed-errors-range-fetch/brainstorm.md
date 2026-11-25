@@ -102,6 +102,10 @@ Alternative A (approved by the user on 2026-11-24):
   package through `tests/support/line-client-built.ts` (the architecture gate
   rejects a self-import under `src`); the abort listener is registered before
   the work starts.
+- Refined after Sol review round 7: the abort listener uses `addAbortListener`;
+  the 401-after-refresh-outage exception is stated in the session requirement;
+  `history_end` at the start of history requires no safety stop; size checks
+  count staged new files against the merge base.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the

@@ -159,7 +159,9 @@ must be ≥ 2 because LINE's previous page includes its boundary.
 3. runs the work — `authenticateForRead()`, the walk, keep
    `sinceMs <= createdTime <= untilMs`, `resolveContactNames(mids, signal)`,
    map — and races it against the signal's `abort` event. The abort
-   listener is registered before the work starts, because the work can run
+   listener is registered with `node:events` `addAbortListener` (it fires
+   even if an earlier listener calls `stopImmediatePropagation()`; disposed
+   in `finally`) before the work starts, because the work can run
    synchronously into the injected `fetch` (token refresh) and abort there;
    the race also re-checks `signal.aborted` right after registering;
 4. cancellation checkpoints stop the losing work from issuing new requests:
