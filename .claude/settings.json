@@ -21,30 +21,6 @@
       "Bash(git log*)",
       "Bash(openspec list*)",
       "Bash(openspec validate*)"
-    ],
-    "ask": [
-      "Bash(git push*)",
-      "Bash(gh pr create*)",
-      "Bash(gh pr merge*)",
-      "Bash(docker push*)",
-      "Bash(npm run test:e2e*)",
-      "Bash(npx vitest run *e2e*)"
-    ],
-    "deny": [
-      "Read(/.line-auth.json)",
-      "Read(/.line-mcp-tokens.json)",
-      "Read(/data/**)",
-      "Read(/.env*)",
-      "Read(/.line-mcp-secret)",
-      "Read(/auth/**)",
-      "Read(/line-qr.png)",
-      "Edit(/packages/line-client/assets/ltsm/**)",
-      "Bash(npm publish*)",
-      "Bash(git push --force*)",
-      "Bash(git push -f*)",
-      "Bash(git push * --force*)",
-      "Bash(git push * -f*)",
-      "Bash(git push *+*)"
     ]
   },
   "hooks": {
