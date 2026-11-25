@@ -15,6 +15,10 @@ import { execFileSync } from 'child_process';
  * dev node_modules) is self-contained, carries no SQLite dependency, and
  * really works.
  *
+ * The workspace itself is installed with pnpm, but this gate deliberately
+ * keeps using npm to pack, install and inspect the tarball: it stands in for
+ * an external npm consumer.
+ *
  * This is a packing/consumption smoke test only — it is NOT a publish, and
  * must never run `npm publish` (see THIRD_PARTY_NOTICES.md: public
  * publication of the bundled LTSM assets is explicitly not approved).
@@ -27,7 +31,7 @@ const TSC_BIN = path.join(ROOT, 'node_modules', '.bin', 'tsc');
 // This dev sandbox's user-level ~/.npmrc sets a restrictive `allow-scripts`
 // policy (an npm/rfcs#868-style supply-chain guard). npm propagates that
 // setting into every child process it spawns as npm_config_allow_scripts —
-// including the `npx vitest` process running this very test — so a nested
+// including a vitest process started through npm or npx — so a nested
 // `npm install` here inherits it and refuses outright with EALLOWSCRIPTS
 // ("--allow-scripts is not allowed in project-scoped installs"), even though
 // we never pass --allow-scripts ourselves. Stripping the inherited env var
@@ -67,7 +71,7 @@ describe('line-client packed-consumer artifact gate', () => {
     // real, runnable happy-dom + its transitive deps into this package's own
     // node_modules — see packages/line-client/scripts/vendor-happy-dom.js —
     // which is what lets bundledDependencies actually bundle something real
-    // instead of the empty set you'd get under plain workspace hoisting).
+    // instead of pnpm's symlink, which npm pack cannot bundle).
     const rawJson = execFileSync(
       'npm',
       ['pack', '--json', '--pack-destination', packDestDir],

@@ -45,7 +45,7 @@
 
 ## 4. happy-dom vendoring under pnpm (spec: packed artifact stays npm-consumable; design D9, D10)
 
-- [ ] 4.1 Confirm that the pack test fails under the pnpm layout. Then resolve through `fs.realpathSync` in `packages/line-client/scripts/vendor-happy-dom.js`, keep the dereferenced real copies, and update the layout comments in the script and the test. Re-run the pack after restoring pnpm's symlink (`rm -rf packages/line-client/node_modules && pnpm install --frozen-lockfile`, then assert that `happy-dom` is a symlink). Compare a checksum of the store's happy-dom files before and after both packs.
+- [x] 4.1 Confirm that the pack test fails under the pnpm layout. Then resolve through `fs.realpathSync` in `packages/line-client/scripts/vendor-happy-dom.js`, keep the dereferenced real copies, and update the layout comments in the script and the test. Re-run the pack after restoring pnpm's symlink (`rm -rf packages/line-client/node_modules && pnpm install --frozen-lockfile`, then assert that `happy-dom` is a symlink). Compare a checksum of the store's happy-dom files before and after both packs.
   Verify: `pnpm exec vitest run tests/artifacts/line-client-pack.test.ts && rm -rf packages/line-client/node_modules && pnpm install --frozen-lockfile && test -L packages/line-client/node_modules/happy-dom && pnpm exec vitest run tests/artifacts/line-client-pack.test.ts`
 
 ## 5. Hooks and agent policy (spec: agent permissions and hooks use pnpm; design D11–D13)
