@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { createServer, type AddressInfo } from 'node:net';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 // Built package via a re-export outside src (design D5): one signer instance.
 import { createLineClient, fetchMessageRange, type Message } from '../../../tests/support/line-client-built';
 import { createMockLineServer, type MockLineServer } from '../../../tests/support/mock-line-server/server';
@@ -108,9 +109,12 @@ describe.sequential('fetchMessageRange against the LINE mock', () => {
   });
 
   it('reports unavailable when LINE cannot be reached', async () => {
-    const dead = createMockLineServer({ port: 0, controlToken: 't' });
-    const { origin: deadOrigin } = await dead.start();
-    await dead.stop({ verify: false });
+    // A listener that resets every connection: a real network failure with no
+    // window for another process to take a released port.
+    const dead = createServer(socket => socket.resetAndDestroy());
+    await new Promise<void>(resolve => dead.listen(0, '127.0.0.1', resolve));
+    const deadOrigin = `http://127.0.0.1:${(dead.address() as AddressInfo).port}`;
+    onTestFinished(() => new Promise<void>(resolve => dead.close(() => resolve())));
     const before = ids(cache.getMessages(owner, MOCK_GROUP_MID));
     const spy = vi.fn<typeof globalThis.fetch>((input, init) => globalThis.fetch(input, init));
     const unreachable = createLineClient(
