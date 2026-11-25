@@ -35,12 +35,12 @@
   - run the parity tool again on the lockfile that will ship. It must show the same inventory and package edges, plus exactly the three deliberate importer edges (`@raidenyn/line-mcp` and `@raidenyn/server` at the root, and `better-sqlite3@12.11.1` in `packages/server`). Record the output in `apply.md`;
   - only then `git rm package-lock.json` and ignore it.
   Verify: `pnpm install --frozen-lockfile && test ! -e node_modules/.package-lock.json && test ! -e node_modules/debug && test ! -e node_modules/@raidenyn/bank-mcp && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts && (cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
-- [ ] 2.3 Check a fresh install from a clean export, separately from the in-place migration: `git archive HEAD` into a directory under `~/.cache` (the same filesystem as the store). Record the timing in `apply.md`.
+- [x] 2.3 Check a fresh install from a clean export, separately from the in-place migration: `git archive HEAD` into a directory under `~/.cache` (the same filesystem as the store). Record the timing in `apply.md`.
   Verify: `rm -rf "$HOME/.cache/pnpm-fresh" && mkdir -p "$HOME/.cache/pnpm-fresh" && git archive HEAD | tar -x -C "$HOME/.cache/pnpm-fresh" && (cd "$HOME/.cache/pnpm-fresh" && time pnpm install --frozen-lockfile && pnpm run build && cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
 
 ## 3. Verification entrypoints (design D6)
 
-- [ ] 3.1 Update the script assertions in `tests/release/verify-entrypoint.test.ts` to the pnpm forms. Then change the `verify`, `verify:all` and `test:smoke` scripts in `package.json`, and the `npx --no-install` calls and hint text in `scripts/verify-changed.mjs`.
+- [x] 3.1 Update the script assertions in `tests/release/verify-entrypoint.test.ts` to the pnpm forms. Then change the `verify`, `verify:all` and `test:smoke` scripts in `package.json`, and the `npx --no-install` calls and hint text in `scripts/verify-changed.mjs`.
   Verify: `pnpm exec vitest run tests/release/verify-entrypoint.test.ts && pnpm run verify:changed`
 
 ## 4. happy-dom vendoring under pnpm (spec: packed artifact stays npm-consumable; design D9, D10)
