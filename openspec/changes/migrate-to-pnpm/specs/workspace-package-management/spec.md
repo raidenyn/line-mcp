@@ -35,7 +35,7 @@ only `vitest`.
 
 #### Scenario: Internal ranges use the workspace protocol
 
-- **WHEN** any manifest depends on an `@raidenyn/*` workspace package
+- **WHEN** any manifest lists an `@raidenyn/*` workspace package in `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies`
 - **THEN** the range is `workspace:^`
 
 #### Scenario: Root tests resolve workspace packages they import
@@ -48,6 +48,21 @@ only `vitest`.
 
 - **WHEN** a source or test file under `packages/<name>/src` imports a bare specifier that is not a Node built-in or listed shared test tooling
 - **THEN** `packages/<name>/package.json` declares it in `dependencies`, `devDependencies` or `peerDependencies`
+
+#### Scenario: Root-level imports are declared by the root
+
+- **WHEN** a file under `tests/` or `scripts/`, or `vitest.config.ts` or `eslint.config.js`, imports a bare specifier that is not a Node built-in
+- **THEN** the root `package.json` declares it in `dependencies` or `devDependencies`
+
+### Requirement: Peer dependencies are satisfied
+
+CI MUST fail when any workspace importer has an unmet, missing or conflicting
+peer dependency according to the lockfile.
+
+#### Scenario: Peer problem fails CI
+
+- **WHEN** `pnpm peers check --lockfile-only --json` reports a non-empty `bad`, `missing` or `conflicts` entry for any importer
+- **THEN** the `check` job's peer dependency step exits non-zero and prints the offending entries
 
 ### Requirement: Installs are reproducible from the lockfile
 

@@ -49,38 +49,38 @@
 - Delete: `package-lock.json`
 
 **Interfaces:**
-- Produces: `tests/release/package-manager.test.ts` with top-level `const rootManifest`, `const pnpmVersion = rootManifest.packageManager.replace(/^pnpm@/, '')`, `const workspaceConfig = parse(readFileSync('pnpm-workspace.yaml','utf8'))`, and `describe('package manager')`. Tasks 6 and 7 add `it` blocks to it.
+- Produces: `tests/release/package-manager.test.ts`, with `describe('package manager')` and these lazy helpers (no file reads at module top level): `readJson(path: string): any`, `readRootManifest()`, `readWorkspaceConfig(): Record<string, unknown> | undefined` (`undefined` when the file is missing), `pinnedPnpmVersion(): string | undefined`, and `bareImports(file: string): string[]` (via `ts.preProcessFile(text, true, true)`: takes `importedFiles[].fileName`, drops relative and absolute paths, and reduces each to its package name, `@scope/name` or `name`). Tasks 6 and 7 add `it` blocks and reuse these helpers.
 
 - [ ] **Step 1: Write the failing tests** in `package-manager.test.ts`:
   - `pins an exact pnpm version`: `packageManager` matches `/^pnpm@\d+\.\d+\.\d+$/`.
   - `tracks only the pnpm lockfile`: `pnpm-lock.yaml` exists; `git ls-files` matching `/(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock)$/` is `[]`.
-  - `declares the workspace, build allowlist and no implicit installs`: `workspaceConfig` `toMatchObject({ packages: ['packages/*'], allowBuilds: { 'better-sqlite3': true, fsevents: false }, verifyDepsBeforeRun: false })`, and the `allowBuilds` keys are exactly those two.
-  - `links internal packages with the workspace protocol`: every `@raidenyn/*` key in any manifest's `dependencies` or `devDependencies` is `'workspace:^'`.
-  - `declares every workspace package imported by root tests and scripts`: `@raidenyn/<name>` specifiers (from `from '…'`, `import('…')` and `require('…')`) under `tests/` and `scripts/` are keys of the root `dependencies` or `devDependencies`.
-  - `declares every bare import in the package that makes it`: for each `packages/<dir>/src/**/*.ts`, collect bare specifiers. Reduce each to its package name (`@scope/name` or `name`). Skip `node:`-prefixed specifiers, names in `builtinModules`, and `SHARED_TEST_TOOLING = ['vitest']`. Expect each remaining name in that package's `dependencies`, `devDependencies` or `peerDependencies`. The message names the file and the specifier.
+  - `declares the workspace, build allowlist and no implicit installs`: `readWorkspaceConfig()` `toMatchObject({ packages: ['packages/*'], allowBuilds: { 'better-sqlite3': true, fsevents: false }, verifyDepsBeforeRun: false })`, and the `allowBuilds` keys are exactly those two.
+  - `links internal packages with the workspace protocol`: every `@raidenyn/*` key in any manifest's `dependencies`, `devDependencies`, `peerDependencies` or `optionalDependencies` is `'workspace:^'`.
+  - `declares every root-level bare import in the root manifest`: for `tests/**/*.{ts,mjs,js}`, `scripts/**/*.{mjs,js}`, `vitest.config.ts` and `eslint.config.js`, every name from `bareImports` is a key of the root `dependencies` or `devDependencies`. Skip `node:`-prefixed names and `builtinModules`.
+  - `declares every bare import in the package that makes it`: for each `packages/<dir>/src/**/*.ts`, every name from `bareImports` is in that package's `dependencies`, `devDependencies` or `peerDependencies`. Skip built-ins and `SHARED_TEST_TOOLING = ['vitest']`. The message names the file and the specifier.
+  - `bareImports` reads real module specifiers only; comments are ignored by construction, so the commented `@raidenyn/x` examples in `import-boundaries.test.ts` are not counted.
 
   In `import-boundaries.test.ts`:
   - The root case becomes `is configured as a private pnpm workspace containing packages/*`: `workspaces` is `undefined`, and `pnpm-workspace.yaml` `packages` is `['packages/*']`.
   - The lockfile case becomes `has a single root pnpm-lock.yaml`: no package-local `pnpm-lock.yaml` or `package-lock.json`, a root `pnpm-lock.yaml`, and no root `package-lock.json`.
 
   In `version-baseline.test.ts`: internal ranges are `'workspace:^'` in `dependencies` and `devDependencies`. Delete the lockfile-version case.
-- [ ] **Step 2:** Run `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`. Expected: FAIL, including `packages/server … better-sqlite3`.
+- [ ] **Step 2:** Run `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`. Expected: every new case reports an assertion failure, including `packages/server … better-sqlite3`. There must be no file-level "Failed to load"/collection error; if there is one, move the offending read into its test.
 - [ ] **Step 3: Migrate.**
   - Write `pnpm-workspace.yaml` per Global Constraints.
   - Root: remove `workspaces`, add `packageManager`, and add `@raidenyn/line-mcp` and `@raidenyn/server` (`workspace:^`) to `devDependencies`. Existing root `@raidenyn/*` dependencies become `workspace:^`.
   - Packages: change internal ranges to `workspace:^`. `packages/server` `devDependencies` gains `"better-sqlite3": "^12.11.1"`, the same range as the other packages.
   - Run `pnpm import && pnpm install`. It runs over the existing npm `node_modules`, so confirm that it replaces the tree.
-- [ ] **Step 4: Parity.** Write `$HOME/.cache/pnpm-parity.mjs`. It is not committed.
-  - Inputs: the baseline `package-lock.json` and `pnpm-lock.yaml`.
-  - npm set: every `packages` key starting `node_modules/` without `link: true`, as `name@version`, where `name` is the part after the last `node_modules/`.
-  - pnpm set: parse every document with `yaml`'s `parseAllDocuments`, take the last one, and use its `packages` keys with any `(…)` peer suffix stripped.
-  - Print `only-npm` and `only-pnpm` lists.
+- [ ] **Step 4: Parity.** Write `$HOME/.cache/pnpm-parity.mjs` (not committed). Run it as `node $HOME/.cache/pnpm-parity.mjs <checkout> <baseline-lock>`.
+  - Load `yaml` with `createRequire(path.join(checkout, 'package.json'))('yaml')`.
+  - Compute both inventories and both edge sets exactly as design D2 specifies, then print `inventory only-npm`, `inventory only-pnpm`, `bundled (npm)`, `edges only-npm` and `edges only-pnpm`.
+  - The npm edge resolver is `resolve(fromPath, name)`: try `${fromPath}/node_modules/${name}`, then strip one `/node_modules/<pkg>` segment at a time, ending at `node_modules/${name}`. Importer paths `""` and `packages/<dir>` start the walk.
 
-  Run it and copy the lists into `apply.md`, with a reason for each entry (for example a platform-only optional dependency, or pnpm's deduplication). If any entry is an unexplained version change, stop: pin it back by editing the lockfile through `pnpm update <pkg>@<old-version>` or report it.
+  Copy the lists into `apply.md` with a reason per entry. If any edge or inventory difference is an unexplained version change, stop and report it to the owner. Do not patch it.
 - [ ] **Step 5:** `git rm package-lock.json`, and add `package-lock.json` under the npm section of `.gitignore`.
 - [ ] **Step 6:** Run `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`, then the in-memory SQLite probe from tasks.md 2.2. Expected: PASS, and the probe exits 0.
 - [ ] **Step 7: Commit:** `build(deps): switch the workspace to pnpm`.
-- [ ] **Step 8: Fresh install.** Run tasks.md 2.3's Verify command, and record the `time` output in `apply.md`. Expected: about 1 s with a warm store, and the build succeeds.
+- [ ] **Step 8: Fresh install.** Run tasks.md 2.3's Verify command, and record the `time` output in `apply.md`. Expected: about 1 s with a warm store; the build succeeds and the in-memory SQLite query exits 0.
 
 ### Task 3: Verification entrypoints
 
@@ -113,7 +113,7 @@
 
 ### Task 5: Hooks and agent policy
 
-**Files:** Modify `.claude/settings.json`, `tests/release/agent-policy.test.ts`, `.husky/commit-msg`, `tests/release/commit-policy.test.ts:7`, `.claude/hooks/lint-on-edit.mjs:98,111-114`, `tests/harness/lint-on-edit.test.ts` (only if it asserts the hint), `tests/e2e.test.ts:60-78,117`, `packages/line-mcp/src/standalone.test.ts:77,111`, `tests/docker/docker-smoke.test.ts:25`.
+**Files:** Modify `.claude/settings.json`, `tests/release/agent-policy.test.ts`, `.husky/commit-msg`, `tests/release/commit-policy.test.ts:7`, `.claude/hooks/lint-on-edit.mjs:98,111-114`, `tests/harness/lint-on-edit.test.ts` (only if it asserts the hint), `tests/e2e.test.ts:60-78,117`, `packages/line-mcp/src/standalone.test.ts:77,111`, `tests/docker/docker-smoke.test.ts:25`, `tests/release/openspec-tasks.test.ts:57-90` (fixtures `npm run test:unit` → `pnpm run test:unit`).
 
 - [ ] **Step 1: Test.** Changes to `agent-policy.test.ts`:
   - ask contains `'Bash(pnpm run test:e2e*)'`, `'Bash(pnpm exec vitest run *e2e*)'`, `'Bash(npm run test:e2e*)'` and `'Bash(npx vitest run *e2e*)'`;
@@ -127,7 +127,8 @@
   - `settings.json`: match the test.
   - `.husky/commit-msg`: `pnpm exec commitlint --edit "$1"`.
   - `lint-on-edit.mjs`: fallback `['pnpm', ['exec', 'eslint']]`, hint ``run `pnpm exec eslint ${file}` ``, and the comment wording updated.
-  - `e2e.test.ts`: `spawn('pnpm', ['exec', 'ts-node', …])`, comments `pnpm start` and `(pnpm → ts-node → node)`.
+  - `e2e.test.ts`: `spawn('pnpm', ['exec', 'ts-node', …])`, comments `pnpm start`, `pnpm run test:unit` (line 66) and `(pnpm → ts-node → node)`.
+  - `openspec-tasks.test.ts`: the fixture strings say `pnpm run test:unit`.
   - `standalone.test.ts`: errors say ``run `pnpm run build` ``.
   - `docker-smoke.test.ts`: the comment says `pnpm run test:unit`.
 - [ ] **Step 4:** Run tasks.md 5.1–5.3's Verify commands. Expected: PASS, and the hook exits 0.
@@ -135,7 +136,10 @@
 
 ### Task 6: CI and release workflows
 
-**Files:** Modify `.github/workflows/ci.yml` (jobs `commit-policy`, `check`, `pack-line-client`, `docker`, `smoke`, plus the trailing e2e comment), `.github/workflows/release.yml:95-140`, `tests/release/release-workflow.test.ts:140-170,288-300`, `tests/release/package-manager.test.ts`.
+**Files:** Create `scripts/check-peers.mjs`, `tests/release/check-peers.test.ts`. Modify `.github/workflows/ci.yml` (jobs `commit-policy`, `check`, `pack-line-client`, `docker`, `smoke`, plus the trailing e2e comment), `.github/workflows/release.yml:95-140`, `tests/release/release-workflow.test.ts:140-170,288-300`, `tests/release/package-manager.test.ts`.
+
+**Interfaces:**
+- Produces: `scripts/check-peers.mjs` exports `findPeerProblems(report: Record<string, { bad: object; missing: object; conflicts: unknown[] }>): string[]`, which returns one line per problem as `<importer>: <field> <detail>`. When run directly (the `import.meta.url` guard, as in `verify-changed.mjs`), it spawns `pnpm peers check --lockfile-only --json`, prints the problems and exits 1 if there are any, otherwise prints `peer dependencies OK`. It exits 2 if pnpm fails or prints invalid JSON.
 
 - [ ] **Step 1: Test.**
   - In `release-workflow.test.ts`:
@@ -144,17 +148,23 @@
     - the negative case adds `not.toMatch(/^pnpm run release$/m)`, `not.toContain('pnpm publish')` and `not.toContain('npm publish')`.
   - In `package-manager.test.ts`, add the case `sets up pinned pnpm before node and installs frozen in every job`:
     - parse `ci.yml` and `release.yml` with `yaml`;
-    - for each job with an `actions/setup-node@v7` step: an earlier step `uses: pnpm/action-setup@v6` with no `with.version`; `with.cache === 'pnpm'`;
-    - exactly one step `run` equals `pnpm install --frozen-lockfile`, or for `release.yml` job `plan`, `pnpm install --frozen-lockfile --ignore-scripts`;
-    - no step `run` matches `/(^|[^p])\bnpm (ci|run|ls)\b|\bnpx\b/`.
+    - the jobs that contain `actions/setup-node@v7` are exactly `ci.yml` {`commit-policy`, `check`, `pack-line-client`, `docker`, `smoke`} and `release.yml` {`plan`};
+    - in each: an earlier step `uses: pnpm/action-setup@v6` with `with` undefined, and setup-node `with.cache === 'pnpm'`;
+    - the steps whose `run` matches `/\bpnpm install\b/` number exactly one, and that `run.trim()` equals `pnpm install --frozen-lockfile` (`… --ignore-scripts` for `plan`);
+    - no step `run` matches `/(^|[^p])\bnpm (ci|run|ls)\b|\bnpx\b/`;
+    - `check` has a step named `Peer dependency check` with `run: node scripts/check-peers.mjs`.
+  - In `check-peers.test.ts`, `findPeerProblems`:
+    - an all-empty seven-importer report gives `[]`;
+    - `{ '.': { bad: { x: {} }, missing: {}, conflicts: [] } }` gives one entry starting `.: bad`;
+    - the same holds for `missing` and for a non-empty `conflicts`.
 - [ ] **Step 2:** Run `pnpm exec vitest run tests/release`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - Each job: insert `- uses: pnpm/action-setup@v6` after checkout, set `cache: pnpm`, and install as asserted.
   - Commitlint steps: `pnpm exec commitlint <args>` and `| pnpm exec commitlint`.
   - Other commands: `pnpm run X` and `pnpm exec X`.
-  - Delete the `Dependency-closure check` step, and drop it from the `check` comment. The e2e comment says `pnpm run test:e2e`.
+  - Replace the `Dependency-closure check` step with `- name: Peer dependency check` / `run: node scripts/check-peers.mjs`, and update the `check` comment. The e2e comment says `pnpm run test:e2e`.
   - `release.yml`: the same setup, with `--ignore-scripts`.
-- [ ] **Step 4:** Run `pnpm exec vitest run tests/release`. Expected: PASS.
+- [ ] **Step 4:** Run tasks.md 6.1's Verify command. Expected: PASS, and `peer dependencies OK`.
 - [ ] **Step 5: Commit:** `ci: install and run with pnpm`.
 
 ### Task 7: Docker builder
@@ -186,9 +196,11 @@
 
 ### Task 8: Documentation
 
-**Files:** Modify `AGENTS.md`, `CLAUDE.md`, `README.md`, `docs/ARCHITECTURE.md`, `docs/RELEASING.md`, `tests/release/verify-entrypoint.test.ts:74-80`.
+**Files:** Create `tests/release/npm-sweep.test.ts`. Modify `AGENTS.md`, `CLAUDE.md`, `README.md`, `docs/ARCHITECTURE.md`, `docs/RELEASING.md`, `tests/release/verify-entrypoint.test.ts:74-80`.
 
-- [ ] **Step 1: Test.** In the doc case, AGENTS.md matches `/pnpm run verify(?![:\w])/` and contains `pnpm run verify:changed`, `pnpm run verify:all`, `pnpm run test:e2e` and `pnpm install`.
+- [ ] **Step 1: Tests.**
+  - In the doc case, AGENTS.md matches `/pnpm run verify(?![:\w])/` and contains `pnpm run verify:changed`, `pnpm run verify:all`, `pnpm run test:e2e` and `pnpm install`.
+  - Add `npm-sweep.test.ts` as specified in tasks.md 8.1. It runs `spawnSync('git', ['grep', '-nE', PATTERN, '--', '.', ...EXCLUDES])`; status `1` means pass, and a status outside `{0,1}` fails. It strips the `:<line>:` part of each match and expects every match in `ALLOWED`, a `Set` of `file:text` strings. Run it once to collect the matches; only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
 - [ ] **Step 2:** Run `pnpm exec vitest run tests/release/verify-entrypoint.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - AGENTS.md:
@@ -202,11 +214,11 @@
   - README.md: install and dev blocks, `pnpm exec vitest run …`, CI job bullets (frozen install, no `npm ls`), workspace wording. Keep the npm registry policy and the `npm pack` consumer wording.
   - docs/ARCHITECTURE.md: workspace sentence, Docker builder paragraph (`pnpm install --frozen-lockfile`, `pnpm prune --prod`, the layout checks), `pnpm exec openspec`, ladder and test-runner lines.
   - docs/RELEASING.md: `pnpm run release:plan`.
-- [ ] **Step 4:** Run tasks.md 8.1's Verify command. Expected: PASS, and the grep finds nothing.
+- [ ] **Step 4:** Run tasks.md 8.1's Verify command. Expected: PASS, with the sweep showing only allowlisted matches.
 - [ ] **Step 5: Commit:** `docs: document the pnpm workflow`.
 
 ### Task 9: Final gate
 
 - [ ] **Step 1:** Run tasks.md 9.1's Verify command under the Task 1 environment. Expected: PASS. If anything fails, record it in `apply.md`, run each remaining check on its own, and do not call the gate green.
 - [ ] **Step 2:** Record the results in `apply.md`, and update `handoff.md` from `openspec/templates/handoff.md`.
-- [ ] **Step 3:** Push and open the draft PR (titled `build(deps): migrate the workspace to pnpm`). Then wait for CI: `check`, `smoke`, `pack-line-client`, `docker` and `commit-policy` must all be green before review findings are posted and the PR is marked ready.
+- [ ] **Step 3:** Push and open the draft PR (titled `build(deps): migrate the workspace to pnpm`). Its description states the owner-approved Docker-gate exception (design D14, 2026-11-25). Then wait for CI: `check`, `smoke`, `pack-line-client`, `docker` and `commit-policy` must all be green before review findings are posted and the PR is marked ready.

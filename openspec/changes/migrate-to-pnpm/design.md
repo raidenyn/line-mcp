@@ -66,19 +66,34 @@ That default is kept on purpose and documented in AGENTS.md.
 
 **D2. Lockfile from `pnpm import`, with a parity check.** `pnpm import`
 re-resolves the tree, using the versions in `package-lock.json` as preferences,
-so parity is checked rather than assumed. A throwaway script in the session
-scratchpad (not committed) compares the full external `name@version` set,
-including transitive dependencies:
-- From `package-lock.json`, it takes every `packages` key under
-  `node_modules/`, minus entries with `link: true`.
-- From `pnpm-lock.yaml`, it takes the last YAML document's `packages` keys,
-  with any peer suffix `(…)` stripped. The pinned `packageManager` can add a
-  leading document.
+so parity is checked rather than assumed. A throwaway script (not committed)
+compares two things.
 
-Every difference is listed in `apply.md` with a reason. The npm lockfile is
-deleted only after the list is empty, or every remaining entry is explained as
-a platform-only or deduplication difference. `.gitignore` then ignores
-`package-lock.json`.
+1. **Inventory.** The external `name@version` sets on each side.
+   - npm: `package-lock.json` `packages` entries under `node_modules/`,
+     without `link: true`. Entries with `inBundle: true` are classified
+     separately, because pnpm does not list bundled packages.
+   - pnpm: the last YAML document's `packages` keys, with any peer suffix
+     `(…)` stripped. The pinned `packageManager` can add a leading document.
+2. **Resolved edges.** `parent → dependency@version` pairs, so a parent that
+   moved to another version already present elsewhere is still caught.
+   - npm: for each importer (`""` and `packages/<dir>`) and each package
+     entry, every name in `dependencies`, `optionalDependencies` and
+     `peerDependencies` is resolved with Node's lookup over the lockfile
+     paths: `<path>/node_modules/<name>`, then each ancestor.
+   - pnpm: `importers.<id>.{dependencies,devDependencies,optionalDependencies}.<name>.version`,
+     and `snapshots.<key>.{dependencies,optionalDependencies}`, with peer
+     suffixes stripped. Workspace `link:` edges are compared by target
+     package name.
+
+The script runs with `node` from the checkout, and loads `yaml` through
+`createRequire(<checkout>/package.json)`. Every inventory or edge difference
+is listed in `apply.md` with a reason: platform-only optional dependency,
+bundled entry, or peer auto-install. The npm lockfile is deleted only when no
+unexplained difference remains. An unexplained transitive drift stops the work
+and is reported to the owner. It is not patched with ad hoc `pnpm update`
+calls; a fix, if one is wanted, is a reviewed parent-scoped `overrides` entry.
+`.gitignore` then ignores `package-lock.json`.
 
 **D3. Isolated (default) `node_modules` layout.** Not `node-linker=hoisted`
 (see brainstorm, Alternative B). Undeclared imports become failures, which is
@@ -87,6 +102,12 @@ their imports: a package can still resolve anything in the root's
 `node_modules` by walking up the directory tree. A release test therefore
 checks that each package's bare imports are declared by that package, with an
 explicit shared-test-tooling exception (`vitest`, declared once at the root).
+Specifiers are taken from TypeScript's `ts.preProcessFile` (imports, exports,
+`import()`, and `require` calls; comments ignored), not a text scan. The same
+check covers root-level code (`tests/**`, `scripts/**`, `vitest.config.ts`,
+`eslint.config.js`) against the root manifest, and internal ranges in
+`dependencies`, `devDependencies`, `peerDependencies` and
+`optionalDependencies`.
 Imports found today:
 - `packages/server` tests import `better-sqlite3` without declaring it, so it
   becomes a server dev dependency.
@@ -142,18 +163,30 @@ User-facing scripts keep their names (`verify`, `test:unit`, …). Docs say
 `pnpm run verify`, and `pnpm verify` also works.
 
 **D7. CI.** Each job that installs dependencies adds `pnpm/action-setup@v6`
-(no `version` input, so it reads `packageManager`) before `actions/setup-node@v7`
-with `cache: pnpm`, then `pnpm install --frozen-lockfile`. The `check` job's
-`npm ls --all` "dependency-closure check" is replaced by
-`pnpm install --frozen-lockfile` (lockfile and manifests must agree) together
-with the isolated layout, which fails the build and tests on undeclared imports.
-The step is removed, not translated: `pnpm ls` does not fail on the problems
-`npm ls` reported. The release `plan` job keeps `--ignore-scripts`; its step
-list gains `pnpm/action-setup@v6`.
+before `actions/setup-node@v7` with `cache: pnpm`, then
+`pnpm install --frozen-lockfile`. The action gets no `version` input, so it
+reads `packageManager`, and no `run_install` input, so it does not install by
+itself. The release `plan` job keeps `--ignore-scripts`, and its step list
+gains `pnpm/action-setup@v6`.
 
-A release test asserts the exact install command in every job that sets up
-Node: `pnpm install --frozen-lockfile`, and in the release plan job
-`pnpm install --frozen-lockfile --ignore-scripts`. The negative assertions in
+The `check` job's `npm ls --all` dependency-closure check is replaced by two
+signals:
+- the frozen install (lockfile and manifests agree) together with the
+  declared-import guard (D3), which cover missing and extraneous dependencies;
+- a `Peer dependency check` step running `node scripts/check-peers.mjs`, which
+  covers invalid peers. A frozen install skips peer diagnostics.
+
+`scripts/check-peers.mjs` runs `pnpm peers check --lockfile-only --json`. It
+exits 1, printing the offending entries, when any importer has a non-empty
+`bad` or `missing` object or a non-empty `conflicts` array. Verified on
+12.18.0: the command reports all seven importers with empty fields today.
+
+A release test asserts the install steps exactly. The set of jobs that set up
+Node is `ci.yml` {`commit-policy`, `check`, `pack-line-client`, `docker`,
+`smoke`} and `release.yml` {`plan`}. Each has exactly one step whose `run`
+mentions `pnpm install` (`--ignore-scripts` added for `plan`), and that step's
+`run` equals the expected command after trimming. The `pnpm/action-setup` step
+has no `with` block. The negative assertions in
 `release-workflow.test.ts` (no publish, no release run) extend to
 `pnpm publish` and `pnpm run release`.
 
@@ -257,9 +290,12 @@ Docker daemon.
   fails, the full gate is not green: the failure is recorded, and each
   downstream check is run on its own.
 - The Docker rung (image builds, Docker smoke with the layout cases) runs in
-  CI's `docker` job on the draft PR. Locally the implementer runs
-  `pnpm run verify` and the pack test separately, and states that the Docker
-  checks ran only in CI. The PR is not marked ready until that job is green.
+  CI's `docker` job on the draft PR. This is a recorded one-off exception to
+  the AGENTS.md rule that `verify:all` passes before a PR is opened; the owner
+  approved it on 2026-11-25 because no Docker daemon is available. Before the
+  draft opens, the implementer runs every non-Docker part of `verify:all`
+  locally: `pnpm run verify` and the pack test. The PR stays draft until the
+  `docker` job is green, and the PR description states the exception.
 
 ## Risks / Trade-offs
 

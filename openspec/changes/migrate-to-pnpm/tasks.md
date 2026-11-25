@@ -15,12 +15,13 @@
   - an exact `packageManager` pin;
   - the pnpm lockfile, with no npm, shrinkwrap or yarn lockfile tracked;
   - `pnpm-workspace.yaml` (`packages`, `allowBuilds` exactly `better-sqlite3: true, fsevents: false`, `verifyDepsBeforeRun: false`);
-  - `workspace:^` internal ranges;
-  - root-declared `@raidenyn/*` imports in `tests/` and `scripts/`;
-  - per-package declared bare imports, with only `vitest` as shared test tooling.
+  - `workspace:^` internal ranges in all four dependency sections;
+  - declared bare imports per package and at the root, parsed with `ts.preProcessFile`, with only `vitest` as shared test tooling.
+
+  Every file read happens inside its own test, and a missing file fails that test's assertion. Nothing is read at module top level, so the red run reports assertion failures, not a collection error.
 
   Also update `tests/architecture/import-boundaries.test.ts` (pnpm workspace root, single `pnpm-lock.yaml`) and `tests/release/version-baseline.test.ts` (`workspace:^`, manifest-only versions).
-  Verify: `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts` (expected red; the failures name the pin, lockfile, workspace, ranges and `server`'s undeclared `better-sqlite3`)
+  Verify: `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts` (expected red with assertion failures naming the pin, lockfile, workspace file, ranges and `packages/server`'s undeclared `better-sqlite3`; there must be no "Failed to load"/collection error)
 - [ ] 2.2 Migrate the manifests:
   - add `pnpm-workspace.yaml`;
   - add the `packageManager` pin and drop `workspaces`;
@@ -29,10 +30,10 @@
   - add `better-sqlite3` as a `packages/server` dev dependency;
   - run `pnpm import`, then `pnpm install` over the existing npm `node_modules`.
 
-  Run the lockfile parity script (design D2) and record every difference with its reason in `apply.md`. Only then `git rm package-lock.json` and ignore it.
+  Run the lockfile parity script (design D2: inventory plus resolved edges) and record every difference with its reason in `apply.md`. If an unexplained drift remains, stop and report it to the owner. Only then `git rm package-lock.json` and ignore it.
   Verify: `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts && (cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
 - [ ] 2.3 Check a fresh install from a clean export, separately from the in-place migration: `git archive HEAD` into a directory under `~/.cache` (the same filesystem as the store). Record the timing in `apply.md`.
-  Verify: `rm -rf "$HOME/.cache/pnpm-fresh" && mkdir -p "$HOME/.cache/pnpm-fresh" && git archive HEAD | tar -x -C "$HOME/.cache/pnpm-fresh" && (cd "$HOME/.cache/pnpm-fresh" && time pnpm install --frozen-lockfile && pnpm run build)`
+  Verify: `rm -rf "$HOME/.cache/pnpm-fresh" && mkdir -p "$HOME/.cache/pnpm-fresh" && git archive HEAD | tar -x -C "$HOME/.cache/pnpm-fresh" && (cd "$HOME/.cache/pnpm-fresh" && time pnpm install --frozen-lockfile && pnpm run build && cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
 
 ## 3. Verification entrypoints (design D6)
 
@@ -56,17 +57,26 @@
   Verify: `pnpm exec vitest run tests/release/agent-policy.test.ts`
 - [ ] 5.2 Switch `.husky/commit-msg` and `tests/release/commit-policy.test.ts` to `pnpm exec commitlint`.
   Verify: `pnpm exec vitest run tests/release/commit-policy.test.ts && printf 'feat: ok\n' > "$HOME/.cache/pnpm-msg" && sh .husky/commit-msg "$HOME/.cache/pnpm-msg"`
-- [ ] 5.3 Change the lint-on-edit hook's fallback and hint to `pnpm exec eslint` (with assertions in `tests/harness/lint-on-edit.test.ts` if it covers them). Change `tests/e2e.test.ts` to start the server with `pnpm exec ts-node`, and update its comments. Update the stale npm text in the `packages/line-mcp/src/standalone.test.ts` error messages and in the `tests/docker/docker-smoke.test.ts` comments.
-  Verify: `pnpm exec vitest run tests/harness packages/line-mcp/src/standalone.test.ts`
+- [ ] 5.3 Change the lint-on-edit hook's fallback and hint to `pnpm exec eslint` (with assertions in `tests/harness/lint-on-edit.test.ts` if it covers them). Change `tests/e2e.test.ts` to start the server with `pnpm exec ts-node`, and update its comments. Update the stale npm text in the `packages/line-mcp/src/standalone.test.ts` error messages, the `tests/docker/docker-smoke.test.ts` comments, the `npm run test:unit` comment in `tests/e2e.test.ts`, and the `npm run test:unit` fixtures in `tests/release/openspec-tasks.test.ts`.
+  Verify: `pnpm exec vitest run tests/harness tests/release/openspec-tasks.test.ts packages/line-mcp/src/standalone.test.ts`
 
 ## 6. CI and release workflows (spec: frozen installs; design D7)
 
 - [ ] 6.1 Extend the release tests first:
   - `tests/release/release-workflow.test.ts`: the plan job's step list with `pnpm/action-setup@v6`, its exact install and plan commands, and the negative assertions extended to `pnpm publish` and `pnpm run release`.
-  - `tests/release/package-manager.test.ts`: in every `ci.yml` and `release.yml` job that sets up Node, `pnpm/action-setup@v6` comes first with no `version` input, the cache is `cache: pnpm`, and the install command is exactly `pnpm install --frozen-lockfile` (`--ignore-scripts` added in the release plan job); no `npm ci`, `npm run`, `npm ls` or `npx` remains in any `run`.
+  - `tests/release/package-manager.test.ts`, for both workflows:
+    - the set of jobs that set up Node is exactly `commit-policy`, `check`, `pack-line-client`, `docker`, `smoke` (CI) and `plan` (release);
+    - in each, `pnpm/action-setup@v6` comes first and has no `with` block, and the cache is `cache: pnpm`;
+    - exactly one step `run` mentions `pnpm install`, and it equals `pnpm install --frozen-lockfile` (`--ignore-scripts` added for `plan`);
+    - no `npm ci`, `npm run`, `npm ls` or `npx` remains in any `run`;
+    - the `check` job runs `node scripts/check-peers.mjs`.
+  - New `tests/release/check-peers.test.ts` for the exported `findPeerProblems(report)`: an all-empty report gives `[]`; reports with a non-empty `bad`, `missing` or `conflicts` each give entries naming the importer.
 
-  Then update both workflows: the commitlint steps use `pnpm exec commitlint`, the `npm ls --all` step is removed, and the CI comments are updated.
-  Verify: `pnpm exec vitest run tests/release`
+  Then add `scripts/check-peers.mjs` (design D7) and update both workflows:
+  - the commitlint steps use `pnpm exec commitlint`;
+  - `npm ls --all` is replaced by the `Peer dependency check` step;
+  - the CI comments are updated.
+  Verify: `pnpm exec vitest run tests/release && node scripts/check-peers.mjs`
 
 ## 7. Docker builder (spec: Docker builder pin, production-only image; design D8)
 
@@ -87,9 +97,19 @@
   - `docs/RELEASING.md`.
 
   Keep the npm registry policy wording and the `npm pack` consumer wording.
-  Verify: `pnpm exec vitest run tests/release && pnpm exec openspec validate --all --strict && ! git grep -nE '(^|[^p])\bnpm (ci|run|ls|start)\b|\bnpx\b' -- . ':!openspec/changes/archive/**' ':!openspec/archived/**' ':!docs/superpowers/**' ':!openspec/changes/migrate-to-pnpm/**' ':!specs/**' ':!tests/artifacts/line-client-pack.test.ts' ':!tests/release/release-workflow.test.ts' ':!packages/line-client/assets/**'`
+  Add `tests/release/npm-sweep.test.ts`. It runs
+  `git grep -nE '(^|[^p])\bnpm (ci|run|ls|start)\b|\bnpx\b'` over the tree,
+  excluding the archives, `docs/superpowers/`, `openspec/changes/`, `specs/`
+  and the LTSM assets. Exit code 1 (no matches) passes; any code other than
+  0 or 1 fails. Each match must equal an entry of an exact allowlist, written
+  as `file:text` without line numbers:
+  - the npm/npx e2e ask rules in `.claude/settings.json` and `tests/release/agent-policy.test.ts`;
+  - the npm consumer commands in `tests/artifacts/line-client-pack.test.ts`;
+  - the negative assertions in `tests/release/release-workflow.test.ts`;
+  - the sweep test's own pattern.
+  Verify: `pnpm exec vitest run tests/release && pnpm exec openspec validate --all --strict`
 
 ## 9. Final gate (design D14)
 
-- [ ] 9.1 Run the local pre-PR gate and the pack check under the preflight environment, and record the results in `apply.md`. Open the PR as a draft. The Docker rung is complete only when CI's `docker` job (image builds, smoke and layout cases) is green on it.
+- [ ] 9.1 Run the local pre-PR gate and the pack check under the preflight environment, and record the results in `apply.md`. Open the PR as a draft, and state in its description the owner-approved exception (design D14, 2026-11-25): the Docker rung runs in CI. The Docker rung is complete only when CI's `docker` job (image builds, smoke and layout cases) is green.
   Verify: `pnpm run verify && pnpm exec vitest run --reporter=dot tests/artifacts/line-client-pack.test.ts`
