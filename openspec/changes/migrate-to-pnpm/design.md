@@ -66,34 +66,58 @@ That default is kept on purpose and documented in AGENTS.md.
 
 **D2. Lockfile from `pnpm import`, with a parity check.** `pnpm import`
 re-resolves the tree, using the versions in `package-lock.json` as preferences,
-so parity is checked rather than assumed. A throwaway script (not committed)
-compares two things.
+so parity is checked rather than assumed. The check is
+`tools/lockfile-parity.mjs` in this change folder, run as
+`node tools/lockfile-parity.mjs <dir-with-yaml-installed> <package-lock.json> <pnpm-lock.yaml>`.
+It loads `yaml` through `createRequire`, and it reads the last YAML document
+of `pnpm-lock.yaml`, because the pinned `packageManager` can add a leading
+document. It reports four things:
 
-1. **Inventory.** The external `name@version` sets on each side.
-   - npm: `package-lock.json` `packages` entries under `node_modules/`,
-     without `link: true`. Entries with `inBundle: true` are classified
-     separately, because pnpm does not list bundled packages.
-   - pnpm: the last YAML document's `packages` keys, with any peer suffix
-     `(…)` stripped. The pinned `packageManager` can add a leading document.
-2. **Resolved edges.** `parent → dependency@version` pairs, so a parent that
-   moved to another version already present elsewhere is still caught.
-   - npm: for each importer (`""` and `packages/<dir>`) and each package
-     entry, every name in `dependencies`, `optionalDependencies` and
-     `peerDependencies` is resolved with Node's lookup over the lockfile
-     paths: `<path>/node_modules/<name>`, then each ancestor.
-   - pnpm: `importers.<id>.{dependencies,devDependencies,optionalDependencies}.<name>.version`,
-     and `snapshots.<key>.{dependencies,optionalDependencies}`, with peer
-     suffixes stripped. Workspace `link:` edges are compared by target
-     package name.
+1. **Inventory**: the `name@version` sets from both lockfiles. Entries with
+   `inBundle: true` are listed separately, because pnpm does not record
+   bundled packages.
+2. **Importer edges**: for each importer and each dependency, including
+   `devDependencies`, `optionalDependencies` and `peerDependencies`, the
+   resolved version on each side.
+   - npm: the version found by Node's lookup over the lockfile paths.
+   - pnpm: `importers.<id>.<section>.<name>.version`, with workspace links
+     compared by name.
+3. **Package edges** in parent context: for each `parent@version` and child,
+   the set of child versions across every instance of that parent.
+   - npm: Node's lookup from each instance path.
+   - pnpm: `snapshots`, with peer suffixes stripped.
 
-The script runs with `node` from the checkout, and loads `yaml` through
-`createRequire(<checkout>/package.json)`. Every inventory or edge difference
-is listed in `apply.md` with a reason: platform-only optional dependency,
-bundled entry, or peer auto-install. The npm lockfile is deleted only when no
-unexplained difference remains. An unexplained transitive drift stops the work
-and is reported to the owner. It is not patched with ad hoc `pnpm update`
-calls; a fix, if one is wanted, is a reviewed parent-scoped `overrides` entry.
-`.gitignore` then ignores `package-lock.json`.
+   npm records no peer-context identity, so per-parent-version sets are the
+   finest level the two lockfiles can be compared at. That limitation is
+   accepted.
+4. **Deliberate manifest edges** (D3/D4) are listed separately, so they are
+   not mistaken for drift: root dev dependencies on `@raidenyn/line-mcp` and
+   `@raidenyn/server`, and the `server` dev dependency on `better-sqlite3`.
+   The parity run happens before those edits.
+
+**Result on pnpm 12.18.0** (run on 2026-11-25 against the current
+`package-lock.json`, before the manifest additions):
+- importer edges: no differences;
+- inventory: only `ansi-regex@6.2.2` and `content-type@2.0.0` disappear;
+- package edges: four parents were deduplicated onto a version already
+  locked elsewhere and within their declared ranges:
+  - `type-is@2.1.0` and `@octokit/request@10.0.11`: `content-type` 2.0.0 →
+    2.1.0. 2.1.0 is already used by `body-parser`. `type-is` is a production
+    dependency of `express`.
+  - `marked-terminal@7.3.0` and `strip-ansi@7.2.0`: `ansi-regex` 6.2.2 →
+    6.6.0. 6.6.0 is already locked. These are release tooling only.
+- also different, as expected:
+  - `debug@4.4.3 → supports-color@7.2.0`: pnpm links an optional peer that is
+    already present;
+  - 65 edges under `npm@11.18.0`: its bundled dependencies, which pnpm does
+    not list.
+
+These dedupe changes are accepted as the migration's only dependency drift,
+and `apply.md` records them. Any further difference in the implementation run
+(for example after the lockfile changes again) stops the work, and is reported
+to the owner rather than patched. A fix, if one is wanted, is a reviewed
+parent-scoped `overrides` entry. After the check, `package-lock.json` is
+deleted and `.gitignore` ignores it.
 
 **D3. Isolated (default) `node_modules` layout.** Not `node-linker=hoisted`
 (see brainstorm, Alternative B). Undeclared imports become failures, which is

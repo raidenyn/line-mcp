@@ -4,10 +4,10 @@
   - `export PATH="$HOME/.cache/node24/bin:$PATH"`, with Node 24 from the official tarball;
   - `export NODE_OPTIONS=--dns-result-order=ipv4first`;
   - pnpm 12.18.0 on `PATH` (`npm install -g pnpm@12.18.0`, with a user prefix if the global one is not writable);
-  - an npm baseline: `npm ci` on the unmodified tree, then `./node_modules/.bin/vitest run --reporter=dot packages tests/architecture tests/release tests/harness` all green.
+  - an npm baseline: `npm ci && npm run build` on the unmodified tree, then the suites below all green.
 
   Record the baseline and the environment in `apply.md`.
-  Verify: `node -v | grep -q '^v24\.' && pnpm --version | grep -qx '12.18.0' && ./node_modules/.bin/vitest run --reporter=dot packages tests/architecture tests/release tests/harness`
+  Verify: `node -v | grep -q '^v24\.' && pnpm --version | grep -qx '12.18.0' && npm ci && npm run build && ./node_modules/.bin/vitest run --reporter=dot packages tests/architecture tests/release tests/harness tests/smoke`
 
 ## 2. Package manager foundation (specs: pinned manager, workspace protocol, build allowlist; design D1–D5)
 
@@ -26,11 +26,12 @@
   - add `pnpm-workspace.yaml`;
   - add the `packageManager` pin and drop `workspaces`;
   - change internal ranges to `workspace:^`;
+  - run `pnpm import`;
+  - run `tools/lockfile-parity.mjs` (design D2) at this point, before the additions below. Record its output in `apply.md`. It must match the D2 result: only the four accepted dedupes, the optional-peer link and the bundled `npm` edges. Anything else stops the work and goes to the owner;
   - add root dev dependencies `@raidenyn/line-mcp` and `@raidenyn/server`;
   - add `better-sqlite3` as a `packages/server` dev dependency;
-  - run `pnpm import`, then `pnpm install` over the existing npm `node_modules`.
-
-  Run the lockfile parity script (design D2: inventory plus resolved edges) and record every difference with its reason in `apply.md`. If an unexplained drift remains, stop and report it to the owner. Only then `git rm package-lock.json` and ignore it.
+  - run `pnpm install` over the existing npm `node_modules`;
+  - only then `git rm package-lock.json` and ignore it.
   Verify: `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts && (cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
 - [ ] 2.3 Check a fresh install from a clean export, separately from the in-place migration: `git archive HEAD` into a directory under `~/.cache` (the same filesystem as the store). Record the timing in `apply.md`.
   Verify: `rm -rf "$HOME/.cache/pnpm-fresh" && mkdir -p "$HOME/.cache/pnpm-fresh" && git archive HEAD | tar -x -C "$HOME/.cache/pnpm-fresh" && (cd "$HOME/.cache/pnpm-fresh" && time pnpm install --frozen-lockfile && pnpm run build && cd packages/line-client-sqlite && node -e "const D=require('better-sqlite3');if(new D(':memory:').prepare('select 1 x').get().x!==1)process.exit(1)")`
@@ -103,10 +104,13 @@
   and the LTSM assets. Exit code 1 (no matches) passes; any code other than
   0 or 1 fails. Each match must equal an entry of an exact allowlist, written
   as `file:text` without line numbers:
-  - the npm/npx e2e ask rules in `.claude/settings.json` and `tests/release/agent-policy.test.ts`;
+  - the npm/npx e2e ask rules in `.claude/settings.json` and `tests/release/agent-policy.test.ts`, and that test's negative assertion for `Bash(npx vitest run *)`;
   - the npm consumer commands in `tests/artifacts/line-client-pack.test.ts`;
   - the negative assertions in `tests/release/release-workflow.test.ts`;
+  - the negative assertions in `tests/release/package-manager.test.ts` (the workflow `npm (ci|run|ls)`/`npx` pattern and the Dockerfile `npm ci` check);
   - the sweep test's own pattern.
+
+  The filtering is an exported pure function, `findUnexpected(matches, allowed)`. A unit case proves that it accepts the allowlisted lines and rejects a synthetic `README.md:npm run build` and `docs/x.md:npx vitest`.
   Verify: `pnpm exec vitest run tests/release && pnpm exec openspec validate --all --strict`
 
 ## 9. Final gate (design D14)

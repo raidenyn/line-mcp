@@ -38,7 +38,7 @@
 
 - [ ] **Step 1:** If `~/.cache/node24/bin/node` is missing, download the latest v24 Linux x64 tarball from `https://nodejs.org/dist/` into `~/.cache/node24` (strip one component). Then `export PATH="$HOME/.cache/node24/bin:$PATH" NODE_OPTIONS=--dns-result-order=ipv4first`.
 - [ ] **Step 2:** If `pnpm --version` is not `12.18.0`, run `npm install -g pnpm@12.18.0`, with `--prefix ~/.local` if `/usr` is not writable.
-- [ ] **Step 3:** On the unmodified tree, run `npm ci && npm run build && ./node_modules/.bin/vitest run --reporter=dot packages tests/architecture tests/release tests/harness tests/smoke`. Expected: all green, including `oauth-router.test.ts`. Save `cp package-lock.json "$HOME/.cache/package-lock.baseline.json"`.
+- [ ] **Step 3:** On the unmodified tree, run tasks.md 1.1's Verify command (it includes `npm ci && npm run build` and the suites `packages tests/architecture tests/release tests/harness tests/smoke`). Expected: all green, including `oauth-router.test.ts`. Save `cp package-lock.json "$HOME/.cache/package-lock.baseline.json"`.
 - [ ] **Step 4:** Write `apply.md` with the Node, npm and pnpm versions, the `NODE_OPTIONS` reason (design D14), and the baseline result.
 
 ### Task 2: Package manager foundation
@@ -49,7 +49,7 @@
 - Delete: `package-lock.json`
 
 **Interfaces:**
-- Produces: `tests/release/package-manager.test.ts`, with `describe('package manager')` and these lazy helpers (no file reads at module top level): `readJson(path: string): any`, `readRootManifest()`, `readWorkspaceConfig(): Record<string, unknown> | undefined` (`undefined` when the file is missing), `pinnedPnpmVersion(): string | undefined`, and `bareImports(file: string): string[]` (via `ts.preProcessFile(text, true, true)`: takes `importedFiles[].fileName`, drops relative and absolute paths, and reduces each to its package name, `@scope/name` or `name`). Tasks 6 and 7 add `it` blocks and reuse these helpers.
+- Produces: `tests/release/package-manager.test.ts`, with `describe('package manager')` and these lazy helpers (no file reads at module top level): `readJson<T>(path: string): T` (parses as `unknown` and casts to a declared manifest/config type; no `any`), `readRootManifest()`, `readWorkspaceConfig(): Record<string, unknown> | undefined` (`undefined` when the file is missing), `pinnedPnpmVersion(): string | undefined`, and `bareImports(file: string): string[]` (via `ts.preProcessFile(text, true, true)`: takes `importedFiles[].fileName`, drops relative and absolute paths, and reduces each to its package name, `@scope/name` or `name`). Tasks 6 and 7 add `it` blocks and reuse these helpers.
 
 - [ ] **Step 1: Write the failing tests** in `package-manager.test.ts`:
   - `pins an exact pnpm version`: `packageManager` matches `/^pnpm@\d+\.\d+\.\d+$/`.
@@ -66,17 +66,21 @@
 
   In `version-baseline.test.ts`: internal ranges are `'workspace:^'` in `dependencies` and `devDependencies`. Delete the lockfile-version case.
 - [ ] **Step 2:** Run `./node_modules/.bin/vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`. Expected: every new case reports an assertion failure, including `packages/server … better-sqlite3`. There must be no file-level "Failed to load"/collection error; if there is one, move the offending read into its test.
-- [ ] **Step 3: Migrate.**
+- [ ] **Step 3: Convert and import.**
   - Write `pnpm-workspace.yaml` per Global Constraints.
-  - Root: remove `workspaces`, add `packageManager`, and add `@raidenyn/line-mcp` and `@raidenyn/server` (`workspace:^`) to `devDependencies`. Existing root `@raidenyn/*` dependencies become `workspace:^`.
-  - Packages: change internal ranges to `workspace:^`. `packages/server` `devDependencies` gains `"better-sqlite3": "^12.11.1"`, the same range as the other packages.
-  - Run `pnpm import && pnpm install`. It runs over the existing npm `node_modules`, so confirm that it replaces the tree.
-- [ ] **Step 4: Parity.** Write `$HOME/.cache/pnpm-parity.mjs` (not committed). Run it as `node $HOME/.cache/pnpm-parity.mjs <checkout> <baseline-lock>`.
-  - Load `yaml` with `createRequire(path.join(checkout, 'package.json'))('yaml')`.
-  - Compute both inventories and both edge sets exactly as design D2 specifies, then print `inventory only-npm`, `inventory only-pnpm`, `bundled (npm)`, `edges only-npm` and `edges only-pnpm`.
-  - The npm edge resolver is `resolve(fromPath, name)`: try `${fromPath}/node_modules/${name}`, then strip one `/node_modules/<pkg>` segment at a time, ending at `node_modules/${name}`. Importer paths `""` and `packages/<dir>` start the walk.
+  - Root: remove `workspaces`, add `packageManager`, and change the existing `@raidenyn/*` dependencies to `workspace:^`.
+  - Packages: change internal ranges to `workspace:^`.
+  - Run `pnpm import`. Make no other manifest change yet.
+- [ ] **Step 4: Parity.** Run `node openspec/changes/migrate-to-pnpm/tools/lockfile-parity.mjs . "$HOME/.cache/package-lock.baseline.json" pnpm-lock.yaml`. Expected: the D2 result.
+  - no importer-edge differences;
+  - inventory only-npm: `ansi-regex@6.2.2` and `content-type@2.0.0`;
+  - package-edge differences: only the four accepted dedupes, `debug@4.4.3 supports-color`, and the `npm@11.18.0 …` bundled edges.
 
-  Copy the lists into `apply.md` with a reason per entry. If any edge or inventory difference is an unexplained version change, stop and report it to the owner. Do not patch it.
+  Copy the output into `apply.md`. Any other line stops the work and is reported to the owner. Do not patch it.
+- [ ] **Step 4b: Deliberate additions.**
+  - Add `@raidenyn/line-mcp` and `@raidenyn/server` (`workspace:^`) to the root `devDependencies`.
+  - Add `"better-sqlite3": "^12.11.1"` to the `packages/server` `devDependencies`, the same range as the other packages.
+  - Run `pnpm install`. It runs over the existing npm `node_modules`, so confirm that it replaces the tree.
 - [ ] **Step 5:** `git rm package-lock.json`, and add `package-lock.json` under the npm section of `.gitignore`.
 - [ ] **Step 6:** Run `pnpm install --frozen-lockfile && pnpm run build && pnpm exec vitest run tests/release/package-manager.test.ts tests/architecture/import-boundaries.test.ts tests/release/version-baseline.test.ts`, then the in-memory SQLite probe from tasks.md 2.2. Expected: PASS, and the probe exits 0.
 - [ ] **Step 7: Commit:** `build(deps): switch the workspace to pnpm`.
@@ -200,7 +204,11 @@
 
 - [ ] **Step 1: Tests.**
   - In the doc case, AGENTS.md matches `/pnpm run verify(?![:\w])/` and contains `pnpm run verify:changed`, `pnpm run verify:all`, `pnpm run test:e2e` and `pnpm install`.
-  - Add `npm-sweep.test.ts` as specified in tasks.md 8.1. It runs `spawnSync('git', ['grep', '-nE', PATTERN, '--', '.', ...EXCLUDES])`; status `1` means pass, and a status outside `{0,1}` fails. It strips the `:<line>:` part of each match and expects every match in `ALLOWED`, a `Set` of `file:text` strings. Run it once to collect the matches; only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
+  - Add `npm-sweep.test.ts` as specified in tasks.md 8.1.
+    - It exports `findUnexpected(matches: string[], allowed: ReadonlySet<string>): string[]`, which strips the `:<line>:` part of each `file:line:text` match and returns those not in `allowed`.
+    - The case `accepts allowlisted lines and rejects new legacy commands` calls it with the allowlisted entries plus `README.md:1:npm run build` and `docs/x.md:2:npx vitest`, and expects exactly the last two back.
+    - The case `finds no unexpected npm commands` runs `spawnSync('git', ['grep', '-nE', PATTERN, '--', '.', ...EXCLUDES])`. Status `1` passes; status `0` requires `findUnexpected(...)` to be `[]`; any other status fails.
+    - Run it once to collect the matches; only the intentional lines listed in tasks.md 8.1 may go into `ALLOWED`.
 - [ ] **Step 2:** Run `pnpm exec vitest run tests/release/verify-entrypoint.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
   - AGENTS.md:
