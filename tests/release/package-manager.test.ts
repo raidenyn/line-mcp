@@ -152,4 +152,52 @@ describe('package manager', () => {
     });
     expect(problems).toEqual([]);
   });
+
+  it('sets up pinned pnpm before node and installs frozen in every job', () => {
+    type Step = { name?: string; uses?: string; run?: string; with?: Record<string, unknown> };
+    type Workflow = { jobs: Record<string, { steps?: Step[] }> };
+    const expected: Record<string, Record<string, string>> = {
+      '.github/workflows/ci.yml': {
+        'commit-policy': 'pnpm install --frozen-lockfile',
+        check: 'pnpm install --frozen-lockfile',
+        'pack-line-client': 'pnpm install --frozen-lockfile',
+        docker: 'pnpm install --frozen-lockfile',
+        smoke: 'pnpm install --frozen-lockfile',
+      },
+      '.github/workflows/release.yml': {
+        plan: 'pnpm install --frozen-lockfile --ignore-scripts',
+      },
+    };
+    const legacy = /(^|[^p])\bnpm (ci|run|ls)\b|\bnpx\b/;
+
+    for (const [file, jobs] of Object.entries(expected)) {
+      const workflow = parse(readFileSync(file, 'utf8')) as Workflow;
+      const nodeJobs = Object.entries(workflow.jobs)
+        .filter(([, job]) => (job.steps ?? []).some((step) => step.uses === 'actions/setup-node@v7'))
+        .map(([name]) => name)
+        .sort();
+      expect(nodeJobs, file).toEqual(Object.keys(jobs).sort());
+
+      for (const [name, install] of Object.entries(jobs)) {
+        const steps = workflow.jobs[name].steps ?? [];
+        const where = `${file} ${name}`;
+        const pnpmSetup = steps.findIndex((step) => step.uses === 'pnpm/action-setup@v6');
+        const nodeSetup = steps.findIndex((step) => step.uses === 'actions/setup-node@v7');
+        expect(pnpmSetup, where).toBeGreaterThanOrEqual(0);
+        expect(pnpmSetup, where).toBeLessThan(nodeSetup);
+        expect(steps[pnpmSetup].with, where).toBeUndefined();
+        expect(steps[nodeSetup].with?.cache, where).toBe('pnpm');
+
+        const installs = steps.filter((step) => /\bpnpm install\b/.test(step.run ?? ''));
+        expect(installs, where).toHaveLength(1);
+        expect(installs[0].run?.trim(), where).toBe(install);
+        for (const step of steps) expect(step.run ?? '', `${where}: ${step.name}`).not.toMatch(legacy);
+      }
+    }
+
+    const check = parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as Workflow;
+    expect(check.jobs.check.steps).toContainEqual(
+      expect.objectContaining({ name: 'Peer dependency check', run: 'node scripts/check-peers.mjs' }),
+    );
+  });
 });

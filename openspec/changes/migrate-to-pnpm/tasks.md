@@ -65,7 +65,7 @@
 
 ## 6. CI and release workflows (spec: frozen installs; design D7)
 
-- [ ] 6.1 Extend the release tests first:
+- [x] 6.1 Extend the release tests first:
   - `tests/release/release-workflow.test.ts`: the plan job's step list with `pnpm/action-setup@v6`, its exact install and plan commands, and the negative assertions extended to `pnpm publish` and `pnpm run release`.
   - `tests/release/package-manager.test.ts`, for both workflows:
     - the set of jobs that set up Node is exactly `commit-policy`, `check`, `pack-line-client`, `docker`, `smoke` (CI) and `plan` (release);

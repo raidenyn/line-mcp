@@ -22,34 +22,36 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Validate PR commits
         if: github.event_name == 'pull_request'
-        run: npm run commitlint -- --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
+        run: pnpm exec commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
 
       - name: Validate PR title
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: printf '%s\n' "$PR_TITLE" | npm run commitlint
+        run: printf '%s\n' "$PR_TITLE" | pnpm exec commitlint
 
       - name: Validate pushed commits
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        run: npm run commitlint -- --from "${{ github.event.before }}" --to "${{ github.sha }}" --verbose
+        run: pnpm exec commitlint --from "${{ github.event.before }}" --to "${{ github.sha }}" --verbose
 
       - name: Validate initial pushed commit
         if: github.event_name == 'push' && github.event.before == '0000000000000000000000000000000000000000'
-        run: git show -s --format=%B "${{ github.sha }}" | npm run commitlint
+        run: git show -s --format=%B "${{ github.sha }}" | pnpm exec commitlint
 
   # Deterministic, merge-blocking gate: lint, composite build, the full
   # unit/contract/migration suite, strict OpenSpec validation, the package
-  # import-boundary test, and a dependency-closure check. Requires no LINE credentials and no Docker.
+  # import-boundary test, and a peer-dependency check. Requires no LINE credentials and no Docker.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -103,30 +105,32 @@ jobs:
             --log-opts="$log_opts" \
             --verbose
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
 
       - name: Build (tsc -b, all six packages)
-        run: npm run build
+        run: pnpm run build
 
       - name: Unit / contract / migration tests
-        run: npm run test:unit
+        run: pnpm run test:unit
 
       - name: Validate OpenSpec specs (strict)
-        run: npx openspec validate --all --strict
+        run: pnpm exec openspec validate --all --strict
 
       - name: Package import-boundary test
-        run: npx vitest run tests/architecture/import-boundaries.test.ts
+        run: pnpm exec vitest run tests/architecture/import-boundaries.test.ts
 
-      - name: Dependency-closure check
-        run: npm ls --all
+      - name: Peer dependency check
+        run: node scripts/check-peers.mjs
 
   # Artifact gate for @raidenyn/line-client: a real `npm pack`, a clean offline
   # install into a directory outside the checkout, a TypeScript compile against
@@ -139,18 +143,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Build (needed for pack + the consumer tsc compile)
-        run: npm run build
+        run: pnpm run build
 
       - name: Pack / install / load / compile / WASM / no-SQLite
-        run: npx vitest run tests/artifacts/line-client-pack.test.ts
+        run: pnpm exec vitest run tests/artifacts/line-client-pack.test.ts
 
   # Docker gate: build both runtime targets and smoke each running container
   # over a real MCP tools/list roundtrip (composed = ten tools, standalone =
@@ -160,15 +166,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Build (the smoke test mints a token via the built @raidenyn/mcp-runtime)
-        run: npm run build
+        run: pnpm run build
 
       - name: Build composed server image
         run: docker build --target server -t line-mcp-server:test .
@@ -177,9 +185,9 @@ jobs:
         run: docker build --target line-mcp -t line-mcp-standalone:test .
 
       - name: Smoke both containers (healthz + real MCP tools/list)
-        run: npx vitest run tests/docker/docker-smoke.test.ts
+        run: pnpm exec vitest run tests/docker/docker-smoke.test.ts
 
-  # Mock-backed LINE smoke gate: runs `npm run test:smoke`, which builds the
+  # Mock-backed LINE smoke gate: runs `pnpm run test:smoke`, which builds the
   # workspace once and then exercises both compiled CLI targets (the composed
   # server and the standalone line-mcp server) against a strict, in-process LINE
   # gateway mock. Covers seeded-credential and full-OAuth (PKCE/PIN/certificate
@@ -191,16 +199,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
+          cache: pnpm
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Mock-backed LINE smoke tests
-        run: npm run test:smoke
+        run: pnpm run test:smoke
 
-  # NOTE: the live LINE end-to-end suite (`npm run test:e2e`) is deliberately
+  # NOTE: the live LINE end-to-end suite (`pnpm run test:e2e`) is deliberately
   # NOT part of this PR-blocking workflow. It requires a real `.line-auth.json`
   # LINE session and is run manually as a pre-release check (see README.md).
