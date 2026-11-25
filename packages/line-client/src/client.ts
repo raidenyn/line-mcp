@@ -59,7 +59,7 @@ interface RawMessage {
   contentMetadata?: Record<string, string>;
 }
 
-class LineHttpError extends Error {
+export class LineHttpError extends Error {
   constructor(
     readonly status: number,
     readonly path: string,
@@ -74,7 +74,7 @@ class LineHttpError extends Error {
   }
 }
 
-class LineApiError extends Error {
+export class LineApiError extends Error {
   constructor(
     readonly code: number,
     readonly path: string,
@@ -82,6 +82,118 @@ class LineApiError extends Error {
   ) {
     super(`LINE API error ${code} on ${path}`);
   }
+}
+
+export type LineReadErrorKind = 'session_expired' | 'unavailable';
+export interface LineReadError {
+  kind: LineReadErrorKind;
+  message: string;
+  cause?: unknown;
+}
+export type RangeCoverage = 'complete' | 'history_end' | 'truncated';
+export interface MessageRange {
+  messages: Message[];
+  coverage: RangeCoverage;
+  oldestReachedMs: number | null;
+}
+export type LineReadResult =
+  | { ok: true; value: MessageRange }
+  | { ok: false; error: LineReadError };
+export interface MessageRangeOptions {
+  signal?: AbortSignal;
+}
+
+// Internal: thrown when the client has no usable session. `cause` carries the
+// underlying failure when a login attempt failed.
+export class LineNotAuthenticatedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'LineNotAuthenticatedError';
+    if (options && 'cause' in options) {
+      Object.defineProperty(this, 'cause', {
+        value: options.cause,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+}
+
+const SESSION_EXPIRED_MESSAGE = 'LINE session expired; log in again';
+
+function lineReadError(kind: LineReadErrorKind, message: string, cause?: unknown): LineReadError {
+  const result: LineReadError = { kind, message };
+  if (cause !== undefined) {
+    Object.defineProperty(result, 'cause', {
+      value: cause,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return result;
+}
+
+function isTransientFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return true;
+  if (err instanceof Error && err.name === 'AbortError') return true;
+  if (err instanceof LineHttpError) {
+    return Number.isInteger(err.status) && (err.status >= 500 || err.status === 429);
+  }
+  return false;
+}
+
+/**
+ * Map any failure from a LINE read into a typed result. Never throws and never
+ * copies text from `err` into `message`.
+ */
+export function classifyLineReadError(
+  err: unknown,
+  context?: { refreshFailedTransiently?: boolean },
+): LineReadError {
+  try {
+    if (err instanceof LineNotAuthenticatedError) {
+      const cause = (err as { cause?: unknown }).cause;
+      if (cause !== undefined && isTransientFailure(cause)) {
+        return lineReadError(
+          'unavailable',
+          classifyLineReadError(cause, context).message,
+          err,
+        );
+      }
+      return lineReadError('session_expired', SESSION_EXPIRED_MESSAGE, err);
+    }
+    if (err instanceof LineHttpError) {
+      if (err.status === 401) {
+        return context?.refreshFailedTransiently
+          ? lineReadError('unavailable', 'LINE unavailable: token refresh failed', err)
+          : lineReadError('session_expired', SESSION_EXPIRED_MESSAGE, err);
+      }
+      return lineReadError(
+        'unavailable',
+        Number.isInteger(err.status)
+          ? `LINE unavailable: HTTP ${err.status}`
+          : 'LINE unavailable: HTTP error',
+        err,
+      );
+    }
+    if (err instanceof LineApiError) {
+      return lineReadError(
+        'unavailable',
+        Number.isInteger(err.code)
+          ? `LINE unavailable: LINE error ${err.code}`
+          : 'LINE unavailable: LINE error',
+        err,
+      );
+    }
+    if (err instanceof TypeError) {
+      return lineReadError('unavailable', 'LINE unavailable: network error', err);
+    }
+  } catch {
+    // fall through to the generic result
+  }
+  return lineReadError('unavailable', 'LINE unavailable: unexpected error', err);
 }
 
 export class LineClient {

@@ -8,7 +8,14 @@ vi.mock('./signer', () => ({
   signForAccount: vi.fn().mockResolvedValue('fake-hmac'),
 }));
 
-import { LineClient, AuthData } from './client';
+import {
+  LineClient,
+  AuthData,
+  LineHttpError,
+  LineApiError,
+  LineNotAuthenticatedError,
+  classifyLineReadError,
+} from './client';
 import { createLineClient } from './index';
 import { getHmac } from './signer';
 
@@ -1010,5 +1017,98 @@ describe('LineClient gateway base URL', () => {
     await client.getImageBuffer('http://127.0.0.1:19191/fixture.jpg');
 
     expect(fetchFn).toHaveBeenCalledExactlyOnceWith('http://127.0.0.1:19191/fixture.jpg');
+  });
+});
+
+describe('classifyLineReadError', () => {
+  const EXPIRED = 'LINE session expired; log in again';
+  const proxy = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error('boom');
+      },
+      getPrototypeOf() {
+        throw new Error('boom');
+      },
+    },
+  );
+
+  it.each<[string, () => unknown, { refreshFailedTransiently?: boolean } | undefined, string, string]>([
+    ['401', () => new LineHttpError(401, '/p'), undefined, 'session_expired', EXPIRED],
+    [
+      '401 transient refresh',
+      () => new LineHttpError(401, '/p'),
+      { refreshFailedTransiently: true },
+      'unavailable',
+      'LINE unavailable: token refresh failed',
+    ],
+    ['500', () => new LineHttpError(500, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 500'],
+    ['503', () => new LineHttpError(503, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 503'],
+    ['429', () => new LineHttpError(429, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 429'],
+    ['400', () => new LineHttpError(400, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 400'],
+    ['403', () => new LineHttpError(403, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 403'],
+    ['404', () => new LineHttpError(404, '/p'), undefined, 'unavailable', 'LINE unavailable: HTTP 404'],
+    [
+      'non-integer status',
+      () => new LineHttpError('eyJsecret' as unknown as number, '/p'),
+      undefined,
+      'unavailable',
+      'LINE unavailable: HTTP error',
+    ],
+    ['api error', () => new LineApiError(10051, '/p'), undefined, 'unavailable', 'LINE unavailable: LINE error 10051'],
+    [
+      'api error non-integer',
+      () => new LineApiError('eyJsecret' as unknown as number, '/p'),
+      undefined,
+      'unavailable',
+      'LINE unavailable: LINE error',
+    ],
+    ['TypeError', () => new TypeError('fetch failed'), undefined, 'unavailable', 'LINE unavailable: network error'],
+    ['not authenticated', () => new LineNotAuthenticatedError('Not authenticated'), undefined, 'session_expired', EXPIRED],
+    ['login in progress', () => new LineNotAuthenticatedError('Login in progress'), undefined, 'session_expired', EXPIRED],
+    [
+      'NotAuth cause 500',
+      () => new LineNotAuthenticatedError('x', { cause: new LineHttpError(500, '/p') }),
+      undefined,
+      'unavailable',
+      'LINE unavailable: HTTP 500',
+    ],
+    [
+      'NotAuth cause TypeError',
+      () => new LineNotAuthenticatedError('x', { cause: new TypeError() }),
+      undefined,
+      'unavailable',
+      'LINE unavailable: network error',
+    ],
+    [
+      'NotAuth cause 400',
+      () => new LineNotAuthenticatedError('x', { cause: new LineHttpError(400, '/p') }),
+      undefined,
+      'session_expired',
+      EXPIRED,
+    ],
+    ['SyntaxError', () => new SyntaxError('x'), undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['string', () => 'a string', undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['undefined', () => undefined, undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['null-proto', () => Object.create(null), undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+    ['throwing proxy', () => proxy, undefined, 'unavailable', 'LINE unavailable: unexpected error'],
+  ])('%s', (_name, make, context, kind, message) => {
+    const err = make();
+    const result = classifyLineReadError(err, context);
+    expect(result.kind).toBe(kind);
+    expect(result.message).toBe(message);
+    expect(result.cause).toBe(err);
+  });
+
+  it('never copies error text into message', () => {
+    const result = classifyLineReadError(new Error('Bearer eyJsecret.token'));
+    expect(result.message).not.toContain('eyJsecret');
+  });
+
+  it('cause is not serialized', () => {
+    const result = classifyLineReadError(new LineApiError('eyJsecret' as unknown as number, '/p'));
+    expect(JSON.stringify(result)).not.toContain('eyJsecret');
+    expect(Object.keys(result)).not.toContain('cause');
   });
 });
