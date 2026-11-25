@@ -5,7 +5,20 @@
 // (in ./signer) is lazy and only initializes on the first real signing call.
 
 export { LineClient } from './client';
-export type { AuthData, Chat, Message } from './client';
+export type {
+  AuthData,
+  Chat,
+  Message,
+  LineReadError,
+  LineReadErrorKind,
+  LineReadResult,
+  MessageRange,
+  MessageRangeOptions,
+  RangeCoverage,
+} from './client';
+
+export { fetchMessageRange } from './message-range';
+export type { MessageRangeRequest } from './message-range';
 
 export { parseExportFile, parseExportHeader } from './export-parser';
 
@@ -15,7 +28,7 @@ export type { StorageKeyMaterial, HmacInput } from './signer';
 export { withMessageCache } from './cached-message-reader';
 export type { MessageReader, MessageCache, ImportMessagesResult } from './cached-message-reader';
 
-import { LineClient, type AuthData, type Message } from './client';
+import { LineClient, type AuthData, type Message, type LineReadResult, type MessageRangeOptions } from './client';
 import type { MessageReader } from './cached-message-reader';
 
 /**
@@ -39,6 +52,19 @@ export interface LineApiClient extends MessageReader {
   getImageBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }>;
 }
 
+/**
+ * LineApiClient plus the typed bounded-range read. Kept separate so existing
+ * structural implementations of LineApiClient stay valid.
+ */
+export interface LineReadClient extends LineApiClient {
+  getMessagesBetween(
+    chatMid: string,
+    sinceMs: number,
+    untilMs: number,
+    options?: MessageRangeOptions,
+  ): Promise<LineReadResult>;
+}
+
 export interface LineClientOptions {
   fetch?: typeof globalThis.fetch;
   onAuthRefreshed?: (snapshot: Readonly<AuthData>) => void | Promise<void>;
@@ -46,12 +72,12 @@ export interface LineClientOptions {
 }
 
 /**
- * Builds the public LineApiClient surface on top of a LineClient instance.
+ * Builds the public LineReadClient surface on top of a LineClient instance.
  * `auth` is cloned by LineClient itself (see client.ts), and refreshed
  * credentials are surfaced to `options.onAuthRefreshed` as an immutable
  * snapshot rather than by mutating the `auth` the caller passed in.
  */
-export function createLineClient(auth: AuthData | null, options: LineClientOptions = {}): LineApiClient {
+export function createLineClient(auth: AuthData | null, options: LineClientOptions = {}): LineReadClient {
   const inner = new LineClient(
     auth,
     options.fetch ?? globalThis.fetch,
@@ -74,6 +100,8 @@ export function createLineClient(auth: AuthData | null, options: LineClientOptio
     // lets this interface satisfy the generic MessageReader shape.
     getMessagesInRange: (chatMid: string, sinceMs: number, pageSize?: number) =>
       inner.getMessagesInRange(chatMid, sinceMs, true, pageSize),
+    getMessagesBetween: (chatMid, sinceMs, untilMs, opts) =>
+      inner.getMessagesBetween(chatMid, sinceMs, untilMs, opts),
     getImageBuffer: (url: string) => inner.getImageBuffer(url),
   };
 }

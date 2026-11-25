@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { addAbortListener } from 'node:events';
 import { getHmac, initStorageKey, signForAccount } from './signer';
 
 const DEFAULT_LINE_API_BASE_URL = 'https://line-chrome-gw.line-apps.com';
@@ -59,7 +60,7 @@ interface RawMessage {
   contentMetadata?: Record<string, string>;
 }
 
-class LineHttpError extends Error {
+export class LineHttpError extends Error {
   constructor(
     readonly status: number,
     readonly path: string,
@@ -74,7 +75,7 @@ class LineHttpError extends Error {
   }
 }
 
-class LineApiError extends Error {
+export class LineApiError extends Error {
   constructor(
     readonly code: number,
     readonly path: string,
@@ -83,6 +84,117 @@ class LineApiError extends Error {
     super(`LINE API error ${code} on ${path}`);
   }
 }
+
+export type LineReadErrorKind = 'session_expired' | 'unavailable';
+export interface LineReadError {
+  kind: LineReadErrorKind;
+  message: string;
+  cause?: unknown;
+}
+export type RangeCoverage = 'complete' | 'history_end' | 'truncated';
+export interface MessageRange {
+  messages: Message[];
+  coverage: RangeCoverage;
+  oldestReachedMs: number | null;
+}
+export type LineReadResult =
+  | { ok: true; value: MessageRange }
+  | { ok: false; error: LineReadError };
+export interface MessageRangeOptions {
+  signal?: AbortSignal;
+}
+
+// Internal: outcome of a token refresh, shared with callers that joined it.
+type RefreshLockResult =
+  | { data: { accessToken: string; refreshToken?: string } }
+  | { failedStatus: number };
+
+// Internal: thrown when the client has no usable session. `cause` carries the
+// underlying failure when a login attempt failed.
+export class LineNotAuthenticatedError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'LineNotAuthenticatedError';
+    if (options && 'cause' in options) {
+      Object.defineProperty(this, 'cause', {
+        value: options.cause,
+        enumerable: false,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+}
+
+const SESSION_EXPIRED_MESSAGE = 'LINE session expired; log in again';
+
+function lineReadError(kind: LineReadErrorKind, message: string, cause?: unknown): LineReadError {
+  const result: LineReadError = { kind, message };
+  if (cause !== undefined) {
+    Object.defineProperty(result, 'cause', {
+      value: cause,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return result;
+}
+
+function isTransientStatus(status: number): boolean {
+  return Number.isInteger(status) && (status >= 500 || status === 429);
+}
+
+/**
+ * Map any failure from a LINE read into a typed result. Never throws and never
+ * copies text from `err` into `message`.
+ */
+export function classifyLineReadError(
+  err: unknown,
+  context?: { refreshFailedTransiently?: boolean },
+): LineReadError {
+  try {
+    if (err instanceof LineNotAuthenticatedError) {
+      return lineReadError('session_expired', SESSION_EXPIRED_MESSAGE, err);
+    }
+    if (err instanceof LineHttpError) {
+      if (err.status === 401) {
+        return context?.refreshFailedTransiently
+          ? lineReadError('unavailable', 'LINE unavailable: token refresh failed', err)
+          : lineReadError('session_expired', SESSION_EXPIRED_MESSAGE, err);
+      }
+      return lineReadError(
+        'unavailable',
+        Number.isInteger(err.status)
+          ? `LINE unavailable: HTTP ${err.status}`
+          : 'LINE unavailable: HTTP error',
+        err,
+      );
+    }
+    if (err instanceof LineApiError) {
+      return lineReadError(
+        'unavailable',
+        Number.isInteger(err.code)
+          ? `LINE unavailable: LINE error ${err.code}`
+          : 'LINE unavailable: LINE error',
+        err,
+      );
+    }
+    if (err instanceof TypeError) {
+      return lineReadError('unavailable', 'LINE unavailable: network error', err);
+    }
+  } catch {
+    // fall through to the generic result
+  }
+  return lineReadError('unavailable', 'LINE unavailable: unexpected error', err);
+}
+
+function abortedReadResult(): LineReadResult {
+  return { ok: false, error: lineReadError('unavailable', 'LINE unavailable: aborted') };
+}
+
+// Request option set only by the typed read (getMessagesBetween), see request().
+type ReadRequest = { signal?: AbortSignal };
 
 export class LineClient {
   private auth: AuthData | null = null;
@@ -101,9 +213,14 @@ export class LineClient {
   private loginAbortController: AbortController | null = null;
   private loginGeneration = 0;
   private readonly lineApiBaseUrl: string;
+  // Page size of the getMessagesBetween walk; must be >= 2 because LINE's
+  // previous page includes its boundary message. Tests override it.
+  private rangePageSize = 200;
 
   // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
-  private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
+  // The promise resolves to the outcome of the refresh, so callers that join an
+  // in-flight refresh learn whether it succeeded (and with which HTTP status it failed).
+  private static readonly refreshLocks = new Map<string, Promise<RefreshLockResult>>();
 
   constructor(
     auth?: AuthData | null,
@@ -151,7 +268,16 @@ export class LineClient {
   private async request<T>(
     path: string,
     args: unknown[],
-    opts: { longPoll?: boolean; sessionId?: string; signal?: AbortSignal; unauthenticated?: boolean } = {},
+    opts: {
+      longPoll?: boolean;
+      sessionId?: string;
+      signal?: AbortSignal;
+      unauthenticated?: boolean;
+      // Typed read: send the token that was signed as x-line-access (a
+      // refresh by an overlapping read during signing must not change it),
+      // and stop before fetch when read.signal has aborted.
+      read?: ReadRequest;
+    } = {},
   ): Promise<T> {
     const body = JSON.stringify(args);
     const accessToken = opts.unauthenticated ? '' : this.auth?.accessToken ?? '';
@@ -180,19 +306,21 @@ export class LineClient {
       ...BASE_HEADERS,
       'x-hmac': hmac,
     };
-    if (!opts.unauthenticated && this.auth?.accessToken) {
-      headers['x-line-access'] = this.auth.accessToken;
+    const headerToken = opts.read ? accessToken : this.auth?.accessToken;
+    if (!opts.unauthenticated && headerToken) {
+      headers['x-line-access'] = headerToken;
     }
     if (opts.longPoll) {
       headers['x-lst'] = '150000';
       if (opts.sessionId) headers['x-line-session-id'] = opts.sessionId;
     }
 
+    opts.read?.signal?.throwIfAborted();
     const response = await this.fetchFn(this.lineApiBaseUrl + path, {
       method: 'POST',
       headers,
       body,
-      signal: opts.signal,
+      signal: opts.read ? opts.read.signal : opts.signal,
     });
 
     if (!response.ok) {
@@ -236,39 +364,49 @@ export class LineClient {
   }
 
   private async refreshIfExpired(): Promise<void> {
-    if (!this.auth) return;
+    await this.refreshOutcome();
+  }
+
+  // Refreshes the access token when the JWT expires within 24 h. Best-effort: a
+  // non-2xx answer is reported as `failedStatus`, never thrown; a rejected fetch
+  // still propagates. The outcome is returned to the caller only — never stored
+  // on the instance — so each caller classifies its own read.
+  private async refreshOutcome(): Promise<{ failedStatus: number | null }> {
+    if (!this.auth) return { failedStatus: null };
     const exp = this.jwtExp();
-    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return;
+    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return { failedStatus: null };
 
     const mid = this.auth.mid;
     const auth = this.auth;
 
+    let result: RefreshLockResult;
     if (!LineClient.refreshLocks.has(mid)) {
-      const p = (async () => {
+      const p = (async (): Promise<RefreshLockResult> => {
         const response = await this.fetchFn(`${this.lineApiBaseUrl}/api/auth/tokenRefresh`, {
           method: 'POST',
           headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: auth.refreshToken }),
         });
-        if (!response.ok) return null;
+        if (!response.ok) return { failedStatus: response.status };
         const data = await response.json() as { accessToken: string; refreshToken?: string };
         auth.accessToken = data.accessToken;
         if (data.refreshToken) auth.refreshToken = data.refreshToken;
         // Pass an immutable snapshot rather than relying on the caller having
         // kept a reference to the (now-mutated) internal `auth` object.
         await this.onTokenRefreshed?.({ ...auth });
-        return data;
+        return { data };
       })().finally(() => { LineClient.refreshLocks.delete(mid); });
       LineClient.refreshLocks.set(mid, p);
-      await p;
+      result = await p;
     } else {
       // Another concurrent request is refreshing — wait and apply the result
-      const data = await LineClient.refreshLocks.get(mid)!;
-      if (data) {
-        this.auth.accessToken = data.accessToken;
-        if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
+      result = await LineClient.refreshLocks.get(mid)!;
+      if ('data' in result) {
+        this.auth.accessToken = result.data.accessToken;
+        if (result.data.refreshToken) this.auth.refreshToken = result.data.refreshToken;
       }
     }
+    return 'failedStatus' in result ? { failedStatus: result.failedStatus } : { failedStatus: null };
   }
 
   private async ensureAuthenticated(): Promise<void> {
@@ -301,6 +439,19 @@ export class LineClient {
     // ensure-then-sign pair of queued operations that a concurrent request for
     // another account could interleave with.
     await this.refreshIfExpired();
+  }
+
+  // Authentication for the typed read (design D3). Unlike ensureAuthenticated it
+  // never waits for a pending login, and it returns the token-refresh outcome to
+  // this caller instead of storing it on the instance.
+  private async authenticateForRead(): Promise<{ refreshFailedStatus: number | null }> {
+    if (this.pendingLogin) throw new LineNotAuthenticatedError('Login in progress');
+    if (this.pendingLoginError) {
+      throw new LineNotAuthenticatedError('Login failed', { cause: this.pendingLoginError });
+    }
+    if (!this.auth) throw new LineNotAuthenticatedError('Not authenticated');
+    const { failedStatus } = await this.refreshOutcome();
+    return { refreshFailedStatus: failedStatus };
   }
 
   async login(certificate?: string): Promise<{ qrUrl: string }> {
@@ -587,6 +738,7 @@ export class LineClient {
 
   private async fetchContactsV2(
     mids: string[],
+    read?: ReadRequest,
   ): Promise<Array<{ mid: string; displayName: string; pictureStatus?: string }>> {
     const batches: string[][] = [];
     for (let i = 0; i < mids.length; i += 50) {
@@ -596,7 +748,7 @@ export class LineClient {
       batches.map(async (batch) => {
         const data = await this.request<{
           contacts: Record<string, { contact: { mid: string; displayName: string; pictureStatus?: string } }>;
-        }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }]);
+        }>('/api/talk/thrift/Talk/TalkService/getContactsV2', [{ targetUserMids: batch }], { read });
         return Object.values(data.contacts ?? {})
           .filter((entry) => entry?.contact != null)
           .map((entry) => ({
@@ -609,10 +761,11 @@ export class LineClient {
     return batchResults.flat();
   }
 
-  private async fetchRawPage(chatMid: string, count: number): Promise<RawMessage[]> {
+  private async fetchRawPage(chatMid: string, count: number, read?: ReadRequest): Promise<RawMessage[]> {
     return this.request<RawMessage[]>(
       '/api/talk/thrift/Talk/TalkService/getRecentMessagesV2',
       [chatMid, count],
+      { read },
     );
   }
 
@@ -620,17 +773,19 @@ export class LineClient {
     chatMid: string,
     endMessageId: { messageId: string; deliveredTime: string },
     count: number,
+    read?: ReadRequest,
   ): Promise<RawMessage[]> {
     return this.request<RawMessage[]>(
       '/api/talk/thrift/Talk/TalkService/getPreviousMessagesV2WithRequest',
       [{ messageBoxId: chatMid, endMessageId, messagesCount: count }, 1],
+      { read },
     );
   }
 
-  private async resolveContactNames(mids: string[]): Promise<void> {
+  private async resolveContactNames(mids: string[], read?: ReadRequest): Promise<void> {
     const unknownMids = [...new Set(mids)].filter(mid => !this.contactNameCache.has(mid));
     if (unknownMids.length > 0) {
-      const resolved = await this.fetchContactsV2(unknownMids);
+      const resolved = await this.fetchContactsV2(unknownMids, read);
       for (const c of resolved) this.contactNameCache.set(c.mid, c.displayName);
     }
   }
@@ -669,9 +824,31 @@ export class LineClient {
   ): Promise<Message[]> {
     await this.ensureAuthenticated();
 
-    const MAX_ITERATIONS = 1000;
+    const { raw: allRaw } = await this.walkHistory(chatMid, sinceMs, pageSize, { keepNonAdvancing: false });
 
-    const firstPage = await this.fetchRawPage(chatMid, pageSize);
+    const filtered = allRaw.filter(m => parseInt(m.createdTime, 10) >= sinceMs);
+
+    if (resolveNames) {
+      await this.resolveContactNames(filtered.map(m => m.from));
+    }
+
+    return this.mapRawMessages(filtered);
+  }
+
+  // Walks the history backwards from the newest message until it passes
+  // sinceMs, LINE serves nothing older, or a safety stop (progress guard,
+  // replay, iteration cap) ends it. `read` is set only by the typed read.
+  private async walkHistory(
+    chatMid: string,
+    sinceMs: number,
+    pageSize: number,
+    opts: { read?: ReadRequest; keepNonAdvancing: boolean },
+  ): Promise<{ raw: RawMessage[]; stop: 'reached_since' | 'history_end' | 'truncated' }> {
+    const MAX_ITERATIONS = 1000;
+    const signal = opts.read?.signal;
+
+    signal?.throwIfAborted();
+    const firstPage = await this.fetchRawPage(chatMid, pageSize, opts.read);
     const page0 = firstPage ?? [];
 
     // Dedupe by message id. A Set is seeded from the first page so that any
@@ -682,6 +859,9 @@ export class LineClient {
 
     let currentPage = page0;
     let iterations = 0;
+    // Stop reason decided by the last previous page; null when the loop
+    // condition (short page or iteration cap) ended the walk.
+    let pageStop: 'history_end' | 'truncated' | null = null;
     while (currentPage.length >= pageSize && iterations < MAX_ITERATIONS) {
       iterations++;
 
@@ -691,10 +871,12 @@ export class LineClient {
       const oldestTime = parseInt(oldest.createdTime, 10);
       if (oldestTime < sinceMs) break;
 
+      signal?.throwIfAborted();
       const prevPage = await this.fetchPreviousRawPage(
         chatMid,
         { messageId: oldest.id, deliveredTime: oldest.deliveredTime ?? oldest.createdTime },
         pageSize,
+        opts.read,
       );
       const page = prevPage ?? [];
 
@@ -705,14 +887,26 @@ export class LineClient {
       // messages must move strictly backwards relative to the current
       // page's oldest. If the API re-uses the boundary (fresh is empty) or
       // returns a full page pinned to the same millisecond (clock tie),
-      // there is no forward progress and we break — discarding the non-
-      // advancing messages — to avoid a non-terminating loop.
-      if (fresh.length === 0) break;
+      // there is no forward progress and we break to avoid a non-terminating
+      // loop. An empty page or one holding only the boundary is the end of
+      // served history; any other replay is a safety stop.
+      if (fresh.length === 0) {
+        pageStop = page.length === 0 || (page.length === 1 && page[0].id === oldest.id)
+          ? 'history_end'
+          : 'truncated';
+        break;
+      }
       const freshOldestTime = fresh.reduce((min, m) => {
         const t = parseInt(m.createdTime, 10);
         return t < min ? t : min;
       }, Infinity);
-      if (freshOldestTime >= oldestTime) break;
+      if (freshOldestTime >= oldestTime) {
+        // getMessagesInRange discards the non-advancing messages; the typed
+        // read keeps what it received before stopping.
+        if (opts.keepNonAdvancing) allRaw.push(...fresh);
+        pageStop = 'truncated';
+        break;
+      }
 
       for (const m of fresh) seenIds.add(m.id);
       allRaw.push(...fresh);
@@ -720,13 +914,84 @@ export class LineClient {
       currentPage = page;
     }
 
-    const filtered = allRaw.filter(m => parseInt(m.createdTime, 10) >= sinceMs);
+    if (allRaw.some(m => parseInt(m.createdTime, 10) < sinceMs)) return { raw: allRaw, stop: 'reached_since' };
+    if (pageStop) return { raw: allRaw, stop: pageStop };
+    // The loop condition ended the walk: a short page is the end of history;
+    // a full, advancing page at the iteration cap needed another request.
+    return { raw: allRaw, stop: currentPage.length < pageSize ? 'history_end' : 'truncated' };
+  }
 
-    if (resolveNames) {
-      await this.resolveContactNames(filtered.map(m => m.from));
+  /**
+   * Fetches every message created within [sinceMs, untilMs] (inclusive) and
+   * reports how far back the walk reached. LINE, authentication, network and
+   * abort failures resolve to `{ ok: false, error }`; invalid bounds reject
+   * with a RangeError before any request.
+   */
+  async getMessagesBetween(
+    chatMid: string,
+    sinceMs: number,
+    untilMs: number,
+    options: MessageRangeOptions = {},
+  ): Promise<LineReadResult> {
+    if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs) || sinceMs < 0 || sinceMs > untilMs) {
+      throw new RangeError('getMessagesBetween requires finite bounds with 0 <= sinceMs <= untilMs');
     }
+    const { signal } = options;
+    if (signal?.aborted) return abortedReadResult();
 
-    return this.mapRawMessages(filtered);
+    // Register before starting the work: the work can reach the injected
+    // fetch synchronously (token refresh) and abort there. addAbortListener
+    // fires even if an earlier listener stops immediate propagation.
+    let resolveAborted!: () => void;
+    const aborted = new Promise<null>(resolve => { resolveAborted = () => resolve(null); });
+    const listener = signal ? addAbortListener(signal, () => resolveAborted()) : undefined;
+    try {
+      if (signal?.aborted) return abortedReadResult();
+
+      // Per-read refresh outcome; never stored on the instance (design D3).
+      let refreshFailedStatus: number | null = null;
+      const read: ReadRequest = { signal };
+      const work = (async (): Promise<MessageRange> => {
+        ({ refreshFailedStatus } = await this.authenticateForRead());
+        signal?.throwIfAborted();
+        const { raw, stop } = await this.walkHistory(chatMid, sinceMs, this.rangePageSize, {
+          read,
+          keepNonAdvancing: true,
+        });
+        const inRange = raw.filter(m => {
+          const t = parseInt(m.createdTime, 10);
+          return t >= sinceMs && t <= untilMs;
+        });
+        signal?.throwIfAborted();
+        await this.resolveContactNames(inRange.map(m => m.from), read);
+        let oldestReachedMs: number | null = null;
+        for (const m of raw) {
+          const t = parseInt(m.createdTime, 10);
+          if (Number.isFinite(t) && (oldestReachedMs === null || t < oldestReachedMs)) oldestReachedMs = t;
+        }
+        return {
+          messages: this.mapRawMessages(inRange),
+          coverage: stop === 'reached_since' ? 'complete' : stop,
+          oldestReachedMs,
+        };
+      })();
+
+      // The losing work finishes or fails silently: its rejection is handled
+      // here and its checkpoints stop it from issuing further requests.
+      const outcome = await Promise.race([
+        work.then(value => ({ value }), (error: unknown) => ({ error })),
+        aborted,
+      ]);
+      // Cancellation has precedence over whatever the work produced.
+      if (signal?.aborted || outcome === null) return abortedReadResult();
+      if ('error' in outcome) {
+        const refreshFailedTransiently = refreshFailedStatus !== null && isTransientStatus(refreshFailedStatus);
+        return { ok: false, error: classifyLineReadError(outcome.error, { refreshFailedTransiently }) };
+      }
+      return { ok: true, value: outcome.value };
+    } finally {
+      listener?.[Symbol.dispose]();
+    }
   }
 
   async getImageBuffer(url: string): Promise<{ buffer: Buffer; mimeType: string }> {

@@ -3,7 +3,7 @@ import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 // Plain ESM without declarations: the inner-loop helper is a script, not part
 // of the TypeScript build.
-import { hasChangedFiles, resolveBase, selectLintTargets } from '../../scripts/verify-changed.mjs';
+import { hasChangedFiles, resolveBase, selectLintTargets, selectPackageSources } from '../../scripts/verify-changed.mjs';
 
 type PackageJson = {
   engines?: Record<string, string>;
@@ -99,6 +99,18 @@ describe('verify:changed selection', () => {
     expect(hasChangedFiles('', '')).toBe(false);
     expect(hasChangedFiles('\0', '\0')).toBe(false);
     expect(hasChangedFiles('README.md\0', '')).toBe(true);
+  });
+
+  it('rebuilds dist only for changed package sources, not tests or scripts', () => {
+    expect(
+      selectPackageSources([
+        'packages/line-client/src/client.ts',
+        'packages/line-client/src/client.test.ts',
+        'packages/line-client/src/x.mock.test.ts',
+        'scripts/tool.mjs',
+        'tests/support/helper.ts',
+      ]),
+    ).toEqual(['packages/line-client/src/client.ts']);
   });
 
   it('resolves origin/main first and falls back to HEAD with a warning flag', () => {

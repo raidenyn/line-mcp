@@ -34,6 +34,19 @@ export function hasChangedFiles(trackedOutput, untrackedOutput) {
   return `${trackedOutput}\0${untrackedOutput}`.split('\0').some((file) => file.length > 0);
 }
 
+/**
+ * Pick the changed package sources (not tests). Tests import packages through
+ * compiled `dist`, so any of these makes `dist` stale until `tsc -b` runs.
+ *
+ * @param {string[]} files
+ * @returns {string[]}
+ */
+export function selectPackageSources(files) {
+  return files.filter(
+    (file) => /^packages\/[^/]+\/src\//.test(file) && !/\.test\.[cm]?[jt]s$/.test(file),
+  );
+}
+
 function git(args) {
   const result = spawnSync('git', args, { encoding: 'utf8' });
   if (result.status !== 0) return null;
@@ -95,13 +108,14 @@ function main() {
     if (lintStatus !== 0) process.exit(lintStatus);
 
     // Workspace packages resolve each other through compiled dist, so Vitest's
-    // import graph cannot reach tests in other packages from a src change.
-    const packageSources = lintTargets.filter(
-      (file) => /^packages\/[^/]+\/src\//.test(file) && !/\.test\.[cm]?[jt]s$/.test(file),
-    );
-    if (packageSources.length > 0) {
+    // import graph cannot reach tests in other packages from a src change, and
+    // tests that load a built package would run against a stale dist.
+    if (selectPackageSources(lintTargets).length > 0) {
+      console.log('verify:changed: package sources changed; rebuilding dist (tsc -b)');
+      const buildStatus = run('npx', ['--no-install', 'tsc', '-b']);
+      if (buildStatus !== 0) process.exit(buildStatus);
       console.error(
-        'verify:changed: note: package sources changed; other packages consume compiled dist, ' +
+        'verify:changed: note: other packages consume compiled dist, ' +
           'so run `npm run verify` before the PR to cover cross-package tests',
       );
     }

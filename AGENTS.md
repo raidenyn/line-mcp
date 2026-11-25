@@ -83,7 +83,7 @@ Other types (refactor, test, ci, build, perf): match the risk row; release/publi
 
 | Rung | Command | When | Measured wall time |
 | --- | --- | --- | --- |
-| 0 | `npm run verify:changed` | Every edit: lint changed/untracked JS/TS files, then only the tests affected by the diff vs `origin/main` | ~19 s with changes; ~0.3 s with no changes |
+| 0 | `npm run verify:changed` | Every edit: lint changed/untracked JS/TS files, rebuild with `tsc -b` when package sources changed, then only the tests affected by the diff vs `origin/main` | ~19 s with changes; ~0.3 s with no changes |
 | 1 | `npm run verify` | Before opening or updating a PR | ~40–65 s (warm cache) |
 | 2 | `npm run verify:all` | `Dockerfile`/`docker-compose.yml` or line-client packaging/vendoring/`assets` changed | Always rebuilds both images (fails without a daemon), then runs the smoke and pack checks; pack rung ~35 s |
 | 3 | `npm run test:e2e` | Manual, pre-release only (needs `.line-auth.json`) | not measured |
