@@ -38,6 +38,14 @@ const baseAuth: AuthData = {
   kdfParameter2: 'k2',
 };
 
+// Auth whose JWT expires in 1 h, so every read triggers a token refresh. Use a
+// unique mid per test: the static refresh lock is keyed by mid.
+function soonAuth(mid: string): AuthData {
+  const soonExp = Math.floor(Date.now() / 1000) + 3600;
+  const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+  return { ...baseAuth, mid, accessToken: soonJwt };
+}
+
 function apiOk(data: unknown): Response {
   return new Response(JSON.stringify({ code: 0, message: 'ok', data }), {
     status: 200,
@@ -684,12 +692,6 @@ describe('LineClient.getMessagesBetween', () => {
 
   const flush = () => new Promise(r => setTimeout(r, 0));
 
-  function soonAuth(mid: string): AuthData {
-    const soonExp = Math.floor(Date.now() / 1000) + 3600;
-    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
-    return { ...baseAuth, mid, accessToken: soonJwt };
-  }
-
   function refreshOk(accessToken = makeFakeJwt()): Response {
     return new Response(JSON.stringify({ accessToken }), {
       status: 200,
@@ -930,11 +932,13 @@ describe('LineClient.getMessagesBetween', () => {
   // ── Errors ────────────────────────────────────────────────
 
   it('maps 401 to session_expired', async () => {
-    const client = new LineClient(baseAuth, makeFetch({ recent: () => httpErr(401) }));
+    const fetchFn = makeFetch({ recent: () => httpErr(401) });
+    const client = new LineClient(baseAuth, fetchFn);
     expect(await client.getMessagesBetween('g1', 0, 5000)).toEqual({
       ok: false,
       error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
     });
+    expect(callsTo(fetchFn, 'tokenRefresh')).toHaveLength(0);
   });
 
   it('maps 500 to unavailable', async () => {
@@ -991,17 +995,6 @@ describe('LineClient.getMessagesBetween', () => {
       ok: false,
       error: { kind: 'unavailable', message: 'LINE unavailable: token refresh failed' },
     });
-  });
-
-  it('401 without refresh is session_expired', async () => {
-    const fetchFn = makeFetch({ recent: () => httpErr(401) });
-    const client = new LineClient(baseAuth, fetchFn);
-    const result = await client.getMessagesBetween('g1', 0, 5000);
-    expect(result).toEqual({
-      ok: false,
-      error: { kind: 'session_expired', message: 'LINE session expired; log in again' },
-    });
-    expect(callsTo(fetchFn, 'tokenRefresh')).toHaveLength(0);
   });
 
   it('overlapping reads keep their own refresh outcome', async () => {
@@ -1080,12 +1073,11 @@ describe('LineClient.getMessagesBetween', () => {
     signerGate.resolve('fake-hmac');
     expect((await a).ok).toBe(true);
 
-    const recent = callsTo(fetchFn, 'getRecentMessagesV2');
-    expect(recent).toHaveLength(2);
-    const aHeaders = recent[1][1]?.headers as Record<string, string>;
+    const headerTokens = callsTo(fetchFn, 'getRecentMessagesV2')
+      .map(([, init]) => (init?.headers as Record<string, string>)['x-line-access']);
     expect(signedToken).toBe(auth.accessToken);
-    expect(aHeaders['x-line-access']).toBe(signedToken);
-    expect(aHeaders['x-line-access']).not.toBe(newToken);
+    // B sent the refreshed token; A must send the token it signed, not B's.
+    expect(headerTokens.sort()).toEqual([signedToken, newToken].sort());
   });
 
   it('fails whole range when a later page fails', async () => {
@@ -1149,10 +1141,16 @@ describe('LineClient.getMessagesBetween', () => {
     expect(callsTo(fetchFn, 'getPreviousMessagesV2WithRequest')).toHaveLength(1);
   });
 
-  it('aborts while signing is blocked', async () => {
+  it.each([
+    { name: 'aborts while signing is blocked', stopPropagation: false },
+    { name: 'abort seen despite stopImmediatePropagation', stopPropagation: true },
+  ])('$name', async ({ stopPropagation }) => {
     const fetchFn = makeFetch();
     const client = new LineClient(baseAuth, fetchFn);
     const controller = new AbortController();
+    if (stopPropagation) {
+      controller.signal.addEventListener('abort', event => event.stopImmediatePropagation());
+    }
     const signerEntered = deferred<void>();
     const signerGate = deferred<string>();
     vi.mocked(signForAccount).mockImplementationOnce(() => {
@@ -1215,28 +1213,6 @@ describe('LineClient.getMessagesBetween', () => {
     expect(callsTo(fetchFn, 'getRecentMessagesV2')).toHaveLength(0);
   });
 
-  it('abort seen despite stopImmediatePropagation', async () => {
-    const fetchFn = makeFetch();
-    const client = new LineClient(baseAuth, fetchFn);
-    const controller = new AbortController();
-    controller.signal.addEventListener('abort', event => event.stopImmediatePropagation());
-    const signerEntered = deferred<void>();
-    const signerGate = deferred<string>();
-    vi.mocked(signForAccount).mockImplementationOnce(() => {
-      signerEntered.resolve();
-      return signerGate.promise;
-    });
-
-    const read = client.getMessagesBetween('g1', 0, 5000, { signal: controller.signal });
-    await signerEntered.promise;
-    controller.abort();
-    expect(await read).toEqual(ABORTED);
-
-    signerGate.resolve('fake-hmac');
-    await flush();
-    expect(fetchFn).not.toHaveBeenCalled();
-  });
-
   it('abort wins over a ready 401', async () => {
     const controller = new AbortController();
     const recentEntered = deferred<void>();
@@ -1294,12 +1270,6 @@ describe('LineClient.getMessagesBetween', () => {
 // ───────────────────────────────────────────────────────────
 
 describe('LineClient — concurrent refresh deduplication', () => {
-  function makeSoonAuth(mid: string): AuthData {
-    const soonExp = Math.floor(Date.now() / 1000) + 3600;
-    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
-    return { ...baseAuth, mid, accessToken: soonJwt };
-  }
-
   function makeRefreshFetch() {
     return vi.fn().mockImplementation((url: string) => {
       if (url.includes('tokenRefresh'))
@@ -1314,7 +1284,7 @@ describe('LineClient — concurrent refresh deduplication', () => {
   }
 
   it('two instances with the same mid fire only one tokenRefresh call', async () => {
-    const auth = makeSoonAuth('concurrent-mid-1');
+    const auth = soonAuth('concurrent-mid-1');
     const mockFetch = makeRefreshFetch();
     const client1 = new LineClient(auth, mockFetch);
     const client2 = new LineClient(auth, mockFetch);
@@ -1326,7 +1296,7 @@ describe('LineClient — concurrent refresh deduplication', () => {
   });
 
   it('calls onTokenRefreshed exactly once after a successful refresh', async () => {
-    const auth = makeSoonAuth('callback-mid-1');
+    const auth = soonAuth('callback-mid-1');
     const mockFetch = makeRefreshFetch();
     const callback = vi.fn();
     const client = new LineClient(auth, mockFetch, callback);

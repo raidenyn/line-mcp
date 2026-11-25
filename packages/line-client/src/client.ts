@@ -141,12 +141,14 @@ function lineReadError(kind: LineReadErrorKind, message: string, cause?: unknown
   return result;
 }
 
+function isTransientStatus(status: number): boolean {
+  return Number.isInteger(status) && (status >= 500 || status === 429);
+}
+
 function isTransientFailure(err: unknown): boolean {
   if (err instanceof TypeError) return true;
   if (err instanceof Error && err.name === 'AbortError') return true;
-  if (err instanceof LineHttpError) {
-    return Number.isInteger(err.status) && (err.status >= 500 || err.status === 429);
-  }
+  if (err instanceof LineHttpError) return isTransientStatus(err.status);
   return false;
 }
 
@@ -962,10 +964,10 @@ export class LineClient {
       if (signal?.aborted) return abortedReadResult();
 
       // Per-read refresh outcome; never stored on the instance (design D3).
-      const auth = { refreshFailedStatus: null as number | null };
+      let refreshFailedStatus: number | null = null;
       const read: ReadRequest = { signal };
       const work = (async (): Promise<MessageRange> => {
-        auth.refreshFailedStatus = (await this.authenticateForRead()).refreshFailedStatus;
+        ({ refreshFailedStatus } = await this.authenticateForRead());
         signal?.throwIfAborted();
         const { raw, stop } = await this.walkHistory(chatMid, sinceMs, this.rangePageSize, {
           read,
@@ -998,8 +1000,7 @@ export class LineClient {
       // Cancellation has precedence over whatever the work produced.
       if (signal?.aborted || outcome === null) return abortedReadResult();
       if ('error' in outcome) {
-        const status = auth.refreshFailedStatus;
-        const refreshFailedTransiently = status !== null && (status >= 500 || status === 429);
+        const refreshFailedTransiently = refreshFailedStatus !== null && isTransientStatus(refreshFailedStatus);
         return { ok: false, error: classifyLineReadError(outcome.error, { refreshFailedTransiently }) };
       }
       return { ok: true, value: outcome.value };
