@@ -158,7 +158,10 @@ must be ≥ 2 because LINE's previous page includes its boundary.
 2. if `signal` is already aborted → returns the abort result, no request;
 3. runs the work — `authenticateForRead()`, the walk, keep
    `sinceMs <= createdTime <= untilMs`, `resolveContactNames(mids, signal)`,
-   map — and races it against the signal's `abort` event;
+   map — and races it against the signal's `abort` event. The abort
+   listener is registered before the work starts, because the work can run
+   synchronously into the injected `fetch` (token refresh) and abort there;
+   the race also re-checks `signal.aborted` right after registering;
 4. cancellation checkpoints stop the losing work from issuing new requests:
    `signal.throwIfAborted()` after `authenticateForRead()`, before each page
    and before the contact lookup; and `request()` gets a new opt-in option
@@ -234,9 +237,15 @@ call). Starting from the oldest cached message would need a stored
   `packages/line-client/src/message-range.mock.test.ts`, signer not mocked.
   The mock's HMAC verifier imports `@raidenyn/line-client` from `dist`, and the
   signer's sandbox can be initialised only once per process, so the test
-  imports `createLineClient` and `fetchMessageRange` from
-  `@raidenyn/line-client` (the built package) too, like
-  `tests/smoke/mock-line-contract.test.ts`. It needs `npm run build` first;
+  loads `createLineClient` and `fetchMessageRange` from the built
+  `@raidenyn/line-client` too, like `tests/smoke/mock-line-contract.test.ts`,
+  but through a re-export module outside the package's `src`
+  (`tests/support/line-client-built.ts`: `export * from '@raidenyn/line-client'`).
+  The architecture gate (`tests/architecture/import-boundaries.test.ts`) scans
+  every `.ts` under `packages/line-client/src` and rejects a self-import of
+  `@raidenyn/line-client`, so the test file must not name that package; the
+  re-export resolves the same `dist` module as the mock's verifier, so one
+  signer instance runs. The architecture test is not changed. It needs `npm run build` first;
   `npm run verify` builds before testing. Test files are excluded from
   `tsc -b`, so the relative import into `tests/support` does not affect the
   build or the packed artifact.

@@ -91,11 +91,11 @@ The range fetch SHALL report `coverage` as `complete` if and only if the walk re
 - **THEN** those messages are included, no further page is requested, and `coverage` is `truncated`
 
 #### Scenario: Safety stops are truncated
-- **WHEN** the walk stops on its progress guard, on a previous page that only replays already-received messages (full or short), or on its iteration cap while the last page was full and advancing
+- **WHEN**, before receiving a message older than `sinceMs`, the walk stops on its progress guard, on a previous page that only replays already-received messages (full or short, other than a page holding only the boundary message), or on its iteration cap while the last page was full and advancing
 - **THEN** `coverage` is `truncated`
 
 #### Scenario: End of served history
-- **WHEN** the last page is empty, holds only the boundary message, or is shorter than the page size with new, older messages
+- **WHEN**, before receiving a message older than `sinceMs`, the last page is empty, holds only the boundary message, or is shorter than the page size with new, older messages
 - **THEN** `coverage` is `history_end`
 
 #### Scenario: Replayed full page

@@ -98,6 +98,10 @@ Alternative A (approved by the user on 2026-11-24):
   `createLineClient`; page size is a private field.
 - Refined after Sol review round 5: the post-signing abort check is an opt-in
   `readSignal` request option, so QR/PIN polling is unchanged.
+- Refined after Sol review round 6: the mock acceptance test loads the built
+  package through `tests/support/line-client-built.ts` (the architecture gate
+  rejects a self-import under `src`); the abort listener is registered before
+  the work starts.
 
 - Result value, not a thrown class (A over B).
 - The range fetch lives in `@raidenyn/line-client`: the walk in `client.ts`, the
