@@ -366,9 +366,11 @@ Docker daemon.
 
 1. One PR switches everything: there is no supported mixed state, and CI must
    be green on pnpm before merge.
-2. After merge, each existing worktree runs `pnpm install` once. A stale npm
-   `node_modules` tree is replaced, and pnpm asks for confirmation or removes
-   it under `CI=true`.
+2. After merge, each existing worktree runs
+   `rm -rf node_modules packages/*/node_modules && pnpm install` once.
+   Installing over the npm tree is not enough, because it leaves undeclared
+   packages and old package-local binaries resolvable. AGENTS.md documents
+   this step.
 3. Rollback: revert the PR. `package-lock.json` returns with it, and
    `npm ci` works again.
 

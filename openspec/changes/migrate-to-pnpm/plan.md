@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-1. **Stale npm `node_modules` in an existing worktree.** pnpm must replace it cleanly. Task 2.2 installs over the npm tree, and Task 2.3 separately installs a clean export.
+1. **Stale npm `node_modules` in an existing worktree.** A pnpm install over an npm tree keeps undeclared entries such as `debug`, the `@raidenyn/bank-mcp` link and old package-local binaries (Sol's bench run). Task 2 Step 4b deletes the npm trees first and asserts that those entries are gone. AGENTS.md (Task 8) documents the same one-time step, and Task 2.3 separately installs a clean export.
 2. **`npm pack` after pnpm restored the happy-dom symlink.** Task 4 asserts the symlink exists before the second pack, and checksums the store's happy-dom files.
 3. **The standalone Docker image under the strict layout.** Task 7 adds layout cases to the Docker smoke: no dangling links, no dev packages, no `bank-mcp` or `server` references. They run in CI's `docker` job.
 4. **Agent commands written the old way** (`npx vitest run tests/e2e.test.ts`). They must still ask. Task 5.1 asserts the npm/npx e2e ask rules remain.
@@ -80,7 +80,9 @@
 - [ ] **Step 4b: Deliberate additions.**
   - Add `@raidenyn/line-mcp` and `@raidenyn/server` (`workspace:^`) to the root `devDependencies`.
   - Add `"better-sqlite3": "^12.11.1"` to the `packages/server` `devDependencies`, the same range as the other packages.
-  - Run `pnpm install`. It runs over the existing npm `node_modules`, so confirm that it replaces the tree.
+  - Run `rm -rf node_modules packages/*/node_modules`. This deletes the npm trees after the parity tool has used their `yaml`.
+  - Run `pnpm install`.
+  - Then run `test ! -e node_modules/.package-lock.json && test ! -e node_modules/debug && test ! -e node_modules/@raidenyn/bank-mcp`. Expected: exit 0.
 - [ ] **Step 4c: Parity of the shipped lockfile.** Run the Step 4 command again. Expected:
   - the same inventory and package-edge lines as Step 4;
   - exactly these three importer-edge lines:
@@ -222,7 +224,7 @@
 - [ ] **Step 3: Implement.**
   - AGENTS.md:
     - command block (`pnpm install` first, `pnpm run …`, `pnpm exec vitest run <file>`);
-    - a Setup paragraph: pnpm 12.18.0 is pinned by `packageManager`; install it with `npm install -g pnpm@12.18.0`; another pnpm version downloads and runs the pinned one (`pmOnFail`); keep the store on the same filesystem as the worktrees;
+    - a Setup paragraph: pnpm 12.18.0 is pinned by `packageManager`; install it with `npm install -g pnpm@12.18.0`; another pnpm version downloads and runs the pinned one (`pmOnFail`); keep the store on the same filesystem as the worktrees; a checkout that still has an npm-installed tree must run `rm -rf node_modules packages/*/node_modules` once before its first `pnpm install`;
     - gates and ladder in pnpm form;
     - hard rule "Never `npm publish` or `pnpm publish` any package";
     - "pnpm-workspace monorepo";
