@@ -17,6 +17,9 @@ export type {
   RangeCoverage,
 } from './client';
 
+export { fetchMessageRange } from './message-range';
+export type { MessageRangeRequest } from './message-range';
+
 export { parseExportFile, parseExportHeader } from './export-parser';
 
 export { signForAccount } from './signer';
