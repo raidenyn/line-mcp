@@ -55,6 +55,11 @@ function httpErr(status: number, body = 'error body'): Response {
   return new Response(body, { status });
 }
 
+type AuthenticateForRead = { authenticateForRead(): Promise<{ refreshFailedStatus: number | null }> };
+function authenticateForRead(client: LineClient): Promise<{ refreshFailedStatus: number | null }> {
+  return (client as unknown as AuthenticateForRead).authenticateForRead();
+}
+
 // ───────────────────────────────────────────────────────────
 // Initial state
 // ───────────────────────────────────────────────────────────
@@ -706,6 +711,42 @@ describe('LineClient — concurrent refresh deduplication', () => {
   });
 });
 
+describe('LineClient — authenticateForRead', () => {
+  it('no auth → LineNotAuthenticatedError', async () => {
+    const mockFetch = vi.fn();
+    const client = new LineClient(null, mockFetch);
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Not authenticated');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('refresh failure is returned to each joined caller', async () => {
+    const soonExp = Math.floor(Date.now() / 1000) + 3600;
+    const soonJwt = `hdr.${Buffer.from(JSON.stringify({ exp: soonExp })).toString('base64url')}.sig`;
+    let resolveRefresh: ((r: Response) => void) | undefined;
+    const mockFetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('tokenRefresh')) {
+        return new Promise<Response>(resolve => { resolveRefresh = resolve; });
+      }
+      return Promise.resolve(apiOk(null));
+    });
+    const client = new LineClient({ ...baseAuth, mid: 'read-refresh-fail-mid', accessToken: soonJwt }, mockFetch);
+
+    const first = authenticateForRead(client);
+    const second = authenticateForRead(client);
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf('function'));
+    resolveRefresh!(httpErr(500));
+
+    await expect(first).resolves.toEqual({ refreshFailedStatus: 500 });
+    await expect(second).resolves.toEqual({ refreshFailedStatus: 500 });
+    const refreshCalls = mockFetch.mock.calls.filter(([url]: string[]) => url.includes('tokenRefresh'));
+    expect(refreshCalls).toHaveLength(1);
+    expect((client as unknown as { auth: AuthData }).auth.accessToken).toBe(soonJwt);
+  });
+});
+
 describe('LineClient QR login', () => {
   function makeLoginFetch(verifyResponse: Response) {
     const calls: Array<{ url: string; body: unknown[]; headers: Record<string, string> }> = [];
@@ -851,6 +892,41 @@ describe('LineClient QR login', () => {
     const logs = stderr.mock.calls.map(([message]) => String(message)).join('');
     expect(logs).not.toContain(remoteErrorText);
     expect(logs).toContain('[LINE] HTTP 500');
+  });
+
+  it('PIN pending → throws without waiting', async () => {
+    const { fetchFn: baseFetch, calls } = makeLoginFetch(apiErr(10051, 'rejected', { code: 2 }));
+    const fetchFn = vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes('checkPinCodeVerified')) {
+        calls.push({ url, body: [], headers: {} });
+        return new Promise<Response>(() => {});
+      }
+      return baseFetch(url, init);
+    });
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('stale-cert');
+    await expect(client.waitForPin()).resolves.toBe('123456');
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Login in progress');
+    expect(calls.some(call => call.url.includes('getRecentMessagesV2'))).toBe(false);
+  });
+
+  it('login failed keeps cause', async () => {
+    const { fetchFn } = makeLoginFetch(httpErr(500));
+    const client = new LineClient(null, fetchFn);
+
+    await client.login('saved-cert');
+    await expect(client.waitForCompletion()).rejects.toThrow('HTTP 500');
+
+    const err = await authenticateForRead(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LineNotAuthenticatedError);
+    expect((err as Error).message).toBe('Login failed');
+    const cause = (err as { cause?: unknown }).cause;
+    expect(cause).toBeInstanceOf(LineHttpError);
+    expect((cause as LineHttpError).status).toBe(500);
   });
 
   it('keeps a newer QR bootstrap unauthenticated when a superseded login completes', async () => {

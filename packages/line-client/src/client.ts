@@ -103,6 +103,11 @@ export interface MessageRangeOptions {
   signal?: AbortSignal;
 }
 
+// Internal: outcome of a token refresh, shared with callers that joined it.
+type RefreshLockResult =
+  | { data: { accessToken: string; refreshToken?: string } }
+  | { failedStatus: number };
+
 // Internal: thrown when the client has no usable session. `cause` carries the
 // underlying failure when a login attempt failed.
 export class LineNotAuthenticatedError extends Error {
@@ -215,7 +220,9 @@ export class LineClient {
   private readonly lineApiBaseUrl: string;
 
   // Shared across all instances — deduplicates concurrent LINE token refreshes per mid
-  private static readonly refreshLocks = new Map<string, Promise<{ accessToken: string; refreshToken?: string } | null>>();
+  // The promise resolves to the outcome of the refresh, so callers that join an
+  // in-flight refresh learn whether it succeeded (and with which HTTP status it failed).
+  private static readonly refreshLocks = new Map<string, Promise<RefreshLockResult>>();
 
   constructor(
     auth?: AuthData | null,
@@ -348,39 +355,49 @@ export class LineClient {
   }
 
   private async refreshIfExpired(): Promise<void> {
-    if (!this.auth) return;
+    await this.refreshOutcome();
+  }
+
+  // Refreshes the access token when the JWT expires within 24 h. Best-effort: a
+  // non-2xx answer is reported as `failedStatus`, never thrown; a rejected fetch
+  // still propagates. The outcome is returned to the caller only — never stored
+  // on the instance — so each caller classifies its own read.
+  private async refreshOutcome(): Promise<{ failedStatus: number | null }> {
+    if (!this.auth) return { failedStatus: null };
     const exp = this.jwtExp();
-    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return;
+    if (exp <= 0 || exp - Date.now() / 1000 >= 86400) return { failedStatus: null };
 
     const mid = this.auth.mid;
     const auth = this.auth;
 
+    let result: RefreshLockResult;
     if (!LineClient.refreshLocks.has(mid)) {
-      const p = (async () => {
+      const p = (async (): Promise<RefreshLockResult> => {
         const response = await this.fetchFn(`${this.lineApiBaseUrl}/api/auth/tokenRefresh`, {
           method: 'POST',
           headers: { ...BASE_HEADERS, 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: auth.refreshToken }),
         });
-        if (!response.ok) return null;
+        if (!response.ok) return { failedStatus: response.status };
         const data = await response.json() as { accessToken: string; refreshToken?: string };
         auth.accessToken = data.accessToken;
         if (data.refreshToken) auth.refreshToken = data.refreshToken;
         // Pass an immutable snapshot rather than relying on the caller having
         // kept a reference to the (now-mutated) internal `auth` object.
         await this.onTokenRefreshed?.({ ...auth });
-        return data;
+        return { data };
       })().finally(() => { LineClient.refreshLocks.delete(mid); });
       LineClient.refreshLocks.set(mid, p);
-      await p;
+      result = await p;
     } else {
       // Another concurrent request is refreshing — wait and apply the result
-      const data = await LineClient.refreshLocks.get(mid)!;
-      if (data) {
-        this.auth.accessToken = data.accessToken;
-        if (data.refreshToken) this.auth.refreshToken = data.refreshToken;
+      result = await LineClient.refreshLocks.get(mid)!;
+      if ('data' in result) {
+        this.auth.accessToken = result.data.accessToken;
+        if (result.data.refreshToken) this.auth.refreshToken = result.data.refreshToken;
       }
     }
+    return 'failedStatus' in result ? { failedStatus: result.failedStatus } : { failedStatus: null };
   }
 
   private async ensureAuthenticated(): Promise<void> {
@@ -413,6 +430,19 @@ export class LineClient {
     // ensure-then-sign pair of queued operations that a concurrent request for
     // another account could interleave with.
     await this.refreshIfExpired();
+  }
+
+  // Authentication for the typed read (design D3). Unlike ensureAuthenticated it
+  // never waits for a pending login, and it returns the token-refresh outcome to
+  // this caller instead of storing it on the instance.
+  private async authenticateForRead(): Promise<{ refreshFailedStatus: number | null }> {
+    if (this.pendingLogin) throw new LineNotAuthenticatedError('Login in progress');
+    if (this.pendingLoginError) {
+      throw new LineNotAuthenticatedError('Login failed', { cause: this.pendingLoginError });
+    }
+    if (!this.auth) throw new LineNotAuthenticatedError('Not authenticated');
+    const { failedStatus } = await this.refreshOutcome();
+    return { refreshFailedStatus: failedStatus };
   }
 
   async login(certificate?: string): Promise<{ qrUrl: string }> {
