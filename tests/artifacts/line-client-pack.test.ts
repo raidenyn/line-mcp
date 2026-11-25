@@ -71,7 +71,10 @@ describe('line-client packed-consumer artifact gate', () => {
     // real, runnable happy-dom + its transitive deps into this package's own
     // node_modules — see packages/line-client/scripts/vendor-happy-dom.js —
     // which is what lets bundledDependencies actually bundle something real
-    // instead of pnpm's symlink, which npm pack cannot bundle).
+    // instead of pnpm's symlink, which npm pack cannot bundle). A local rerun
+    // reuses the copies the previous run vendored, so resolution through pnpm's
+    // symlinked layout is pinned by packages/line-client/src/vendor-happy-dom.test.ts
+    // and by CI's fresh checkout, not by reruns of this gate.
     const rawJson = execFileSync(
       'npm',
       ['pack', '--json', '--pack-destination', packDestDir],

@@ -230,7 +230,7 @@ OAuth does not read `Host` or `X-Forwarded-*`: the browser may load `/authorize`
 **Prerequisites:** Node.js 24 and pnpm 12.18.0 (pinned by `packageManager`; install it with `npm install -g pnpm@12.18.0`)
 
 ```bash
-pnpm install                 # frozen to pnpm-lock.yaml; builds better-sqlite3's native addon
+pnpm install --frozen-lockfile   # install exactly pnpm-lock.yaml; builds better-sqlite3's native addon
 pnpm run build               # tsc -b — composite build of all six packages
 pnpm start                   # composed server on http://localhost:3000
 node packages/line-mcp/dist/cli.js   # standalone messenger server

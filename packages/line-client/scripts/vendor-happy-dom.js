@@ -49,23 +49,36 @@ function resolvePkgDir(name, fromDir) {
   }
 }
 
-function vendor(name, fromDir, seen) {
-  if (seen.has(name)) return;
-  seen.add(name);
-
+// Phase 1: resolve the whole closure without touching anything, so a failure
+// here leaves the tree exactly as pnpm installed it.
+function collect(name, fromDir, plan) {
+  if (plan.has(name)) return;
   const srcDir = fs.realpathSync(resolvePkgDir(name, fromDir));
-  const destDir = path.join(targetModulesDir, ...name.split('/'));
-
-  if (path.resolve(srcDir) !== path.resolve(destDir)) {
-    fs.rmSync(destDir, { recursive: true, force: true });
-    fs.mkdirSync(path.dirname(destDir), { recursive: true });
-    fs.cpSync(srcDir, destDir, { recursive: true, dereference: true });
-  }
-
+  plan.set(name, srcDir);
   const manifest = JSON.parse(fs.readFileSync(path.join(srcDir, 'package.json'), 'utf8'));
   for (const dep of Object.keys(manifest.dependencies ?? {})) {
-    vendor(dep, srcDir, seen);
+    collect(dep, srcDir, plan);
   }
 }
 
-vendor('happy-dom', pkgRoot, new Set());
+// Phase 2: copy each package through a staging directory, dependencies first
+// and happy-dom itself last. Until happy-dom's symlink is replaced, a retry
+// after any failure still resolves the closure from the pnpm store.
+function copyPackage(name, srcDir) {
+  const destDir = path.join(targetModulesDir, ...name.split('/'));
+  const destReal = fs.existsSync(destDir) ? fs.realpathSync(destDir) : path.resolve(destDir);
+  if (srcDir === destReal && !fs.lstatSync(destDir).isSymbolicLink()) return; // already vendored
+
+  const staging = `${destDir}.vendor-tmp`;
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(destDir), { recursive: true });
+  fs.cpSync(srcDir, staging, { recursive: true, dereference: true });
+  fs.rmSync(destDir, { recursive: true, force: true });
+  fs.renameSync(staging, destDir);
+}
+
+const plan = new Map();
+collect('happy-dom', pkgRoot, plan);
+for (const [name, srcDir] of [...plan].reverse()) {
+  copyPackage(name, srcDir);
+}

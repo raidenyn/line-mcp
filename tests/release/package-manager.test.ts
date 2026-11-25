@@ -29,8 +29,9 @@ const DEPENDENCY_SECTIONS: DependencySection[] = [
   'optionalDependencies',
 ];
 
-/** Test tooling the root declares once for every package. */
+/** Test tooling the root declares once for every package; test files only. */
 const SHARED_TEST_TOOLING = ['vitest'];
+const TEST_FILE = /\.test\.[cm]?ts$/;
 
 const BUILTINS = new Set(builtinModules);
 
@@ -135,8 +136,8 @@ describe('package manager', () => {
   it('declares every root-level bare import in the root manifest', () => {
     const root = declared(readRootManifest(), ['dependencies', 'devDependencies']);
     const files = [
-      ...listFiles('tests', /\.(ts|mjs|js)$/),
-      ...listFiles('scripts', /\.(mjs|js)$/),
+      ...listFiles('tests', /\.([cm]?ts|[cm]?js)$/),
+      ...listFiles('scripts', /\.[cm]?js$/),
       'vitest.config.ts',
       'eslint.config.js',
     ];
@@ -147,8 +148,12 @@ describe('package manager', () => {
     const problems = packageDirs().flatMap((dir) => {
       const manifest = readJson<Manifest>(join('packages', dir, 'package.json'));
       const allowed = declared(manifest, ['dependencies', 'devDependencies', 'peerDependencies']);
-      for (const tool of SHARED_TEST_TOOLING) allowed.add(tool);
-      return undeclaredImports(listFiles(join('packages', dir, 'src'), /\.ts$/), allowed);
+      const testAllowed = new Set([...allowed, ...SHARED_TEST_TOOLING]);
+      const files = listFiles(join('packages', dir, 'src'), /\.[cm]?ts$/);
+      return [
+        ...undeclaredImports(files.filter((file) => !TEST_FILE.test(file)), allowed),
+        ...undeclaredImports(files.filter((file) => TEST_FILE.test(file)), testAllowed),
+      ];
     });
     expect(problems).toEqual([]);
   });
@@ -168,7 +173,8 @@ describe('package manager', () => {
         plan: 'pnpm install --frozen-lockfile --ignore-scripts',
       },
     };
-    const legacy = /(^|[^p])\bnpm (ci|run|ls)\b|\bnpx\b/;
+    // Any npm-driven install or command, including a second install step.
+    const legacy = /(^|[^p])\bnpm (ci|run|ls|install|i|add)\b|\bnpx\b|\byarn\b/;
 
     for (const [file, jobs] of Object.entries(expected)) {
       const workflow = parse(readFileSync(file, 'utf8')) as Workflow;
@@ -188,7 +194,7 @@ describe('package manager', () => {
         expect(steps[pnpmSetup].with, where).toBeUndefined();
         expect(steps[nodeSetup].with?.cache, where).toBe('pnpm');
 
-        const installs = steps.filter((step) => /\bpnpm install\b/.test(step.run ?? ''));
+        const installs = steps.filter((step) => /\bpnpm (install|i|add)\b/.test(step.run ?? ''));
         expect(installs, where).toHaveLength(1);
         expect(installs[0].run?.trim(), where).toBe(install);
         for (const step of steps) expect(step.run ?? '', `${where}: ${step.name}`).not.toMatch(legacy);
