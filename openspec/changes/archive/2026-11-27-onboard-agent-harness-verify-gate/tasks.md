@@ -33,5 +33,5 @@
   Verify: `node .agents/harness/hook-runtime/cli.mjs capabilities`
 - [x] 4.2 Claude Code: the same sequence in a throwaway clone; record the Claude Code version and the outputs.
   Verify: `node .agents/harness/hook-runtime/cli.mjs capabilities`
-- [ ] 4.3 Record hook overhead from `trace.jsonl` (per hook process and per no-change turn end), and compare every feature of the old lint and context hooks with the new wiring; report any loss to the owner before the PR is ready.
+- [x] 4.3 Record hook overhead from `trace.jsonl` (per hook process and per no-change turn end), and compare every feature of the old lint and context hooks with the new wiring; report any loss to the owner before the PR is ready.
   Verify: `pnpm run verify`

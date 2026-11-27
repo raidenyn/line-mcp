@@ -1,4 +1,10 @@
-## ADDED Requirements
+# agent-verify-hooks Specification
+
+## Purpose
+
+The agent hooks that run the repo's one verify command on a file edit, a ticked task and turn end, on Claude Code and OpenCode, through the copied agent harness tools, and the session-context hook that stays next to them.
+
+## Requirements
 
 ### Requirement: Copied harness tools
 The repository SHALL hold the agent harness hook runtime in `.agents/harness/hook-runtime/` and the verify gate in
