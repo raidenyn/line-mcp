@@ -65,6 +65,15 @@ describe('composed server — startup order', () => {
       return new OriginalCategoryStore(...args);
     } as unknown as typeof OriginalCategoryStore);
 
+    const OriginalLedgerStore = bankMcpModule.LedgerStore;
+    vi.spyOn(bankMcpModule, 'LedgerStore').mockImplementation(function (
+      this: unknown,
+      ...args: ConstructorParameters<typeof OriginalLedgerStore>
+    ) {
+      events.push('open-ledger-store');
+      return new OriginalLedgerStore(...args);
+    } as unknown as typeof OriginalLedgerStore);
+
     const OriginalRegexExecutor = bankMcpModule.RegexExecutor;
     vi.spyOn(bankMcpModule, 'RegexExecutor').mockImplementation(function (
       this: unknown,
@@ -93,6 +102,7 @@ describe('composed server — startup order', () => {
       'bootstrap-persistence',
       'open-line-cache',
       'open-bank-store',
+      'open-ledger-store',
       'create-regex-executor',
       'start-sync',
       'listen',
@@ -141,6 +151,7 @@ describe('composed server — startup order', () => {
       return executor;
     } as unknown as typeof OriginalRegexExecutor);
     const categoryClose = vi.spyOn(bankMcpModule.CategoryStore.prototype, 'close');
+    const ledgerClose = vi.spyOn(bankMcpModule.LedgerStore.prototype, 'close');
     const cacheClose = vi.spyOn(lineClientSqliteModule.SqliteMessageCache.prototype, 'close');
 
     server = createServer({ dataRoot: tempDataRoot, port: 0 });
@@ -152,8 +163,32 @@ describe('composed server — startup order', () => {
 
     await expect(server.stop()).rejects.toBe(failure);
     expect(categoryClose).toHaveBeenCalledTimes(1);
+    expect(ledgerClose).toHaveBeenCalledTimes(1);
     expect(cacheClose).toHaveBeenCalledTimes(1);
     server = undefined; // resources are already closed
+  });
+
+  it('a failing store close does not leave the others open', async () => {
+    const originalLedgerClose = bankMcpModule.LedgerStore.prototype.close;
+    const failure = new Error('ledger close failed');
+    let calls = 0;
+    vi.spyOn(bankMcpModule.LedgerStore.prototype, 'close').mockImplementation(function (
+      this: InstanceType<typeof bankMcpModule.LedgerStore>,
+    ) {
+      calls += 1;
+      originalLedgerClose.call(this);
+      throw failure;
+    });
+    const categoryClose = vi.spyOn(bankMcpModule.CategoryStore.prototype, 'close');
+    const cacheClose = vi.spyOn(lineClientSqliteModule.SqliteMessageCache.prototype, 'close');
+
+    server = createServer({ dataRoot: tempDataRoot, port: 0 });
+    await server.start();
+    await expect(server.stop()).rejects.toBe(failure);
+    expect(calls).toBe(1);
+    expect(categoryClose).toHaveBeenCalledTimes(1);
+    expect(cacheClose).toHaveBeenCalledTimes(1);
+    server = undefined; // every store is already closed
   });
 });
 

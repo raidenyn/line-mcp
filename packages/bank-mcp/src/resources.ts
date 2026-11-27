@@ -33,9 +33,11 @@ const TOOL_GUIDES: ReadonlyArray<{ name: string; description: string }> = [
   { name: 'manage_categories', description: 'When to use manage_categories, pattern matching rules, global scope vs per-chat templates' },
   { name: 'get_transactions', description: 'When to use get_transactions, why since is critical, auto-loaded templates' },
   { name: 'summarize_transactions', description: 'When to use summarize_transactions, group_by options, final step in transaction workflow' },
+  { name: 'ledger_status', description: 'When to use ledger_status, the setup_required answer, the owner settings and source list' },
+  { name: 'manage_accounts', description: 'When to use manage_accounts, source setup, base currency set once, timezone inheritance, write keys' },
 ];
 
-/** Registers the bank overview (optional) plus the five bank tool guides. */
+/** Registers the bank overview (optional) plus the seven bank tool guides. */
 export function registerBankResources(server: McpServer, options: RegisterBankResourcesOptions = {}): void {
   const { includeOverview = true } = options;
 

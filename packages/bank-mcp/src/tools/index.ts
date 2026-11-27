@@ -6,12 +6,15 @@ import { registerManageCategories } from './manage-categories';
 import { registerSampleMessages } from './sample-messages';
 import { registerGetTransactions } from './get-transactions';
 import { registerSummarizeTransactions } from './summarize-transactions';
+import { registerLedgerStatus } from './ledger-status';
+import { registerManageAccounts } from './manage-accounts';
 
 export type { BankToolDeps } from './deps';
 
 /**
- * Registers all five bank tools (manage_templates, manage_categories,
- * sample_messages, get_transactions, summarize_transactions) against `server`.
+ * Registers all seven bank tools (manage_templates, manage_categories,
+ * sample_messages, get_transactions, summarize_transactions, ledger_status,
+ * manage_accounts) against `server`.
  *
  * `context.principal`/`context.request` are read via property access inside
  * each handler body — never destructured here — so the exact same function
@@ -29,4 +32,6 @@ export function registerBankTools<P extends Principal>(
   registerSampleMessages(server, context, deps);
   registerGetTransactions(server, context, deps);
   registerSummarizeTransactions(server, context, deps);
+  registerLedgerStatus(server, context, deps);
+  registerManageAccounts(server, context, deps);
 }

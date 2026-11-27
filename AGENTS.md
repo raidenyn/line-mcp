@@ -5,7 +5,7 @@ source of truth that `CLAUDE.md` imports. Architecture: `docs/ARCHITECTURE.md`.
 
 This is a **LINE MCP server** — a pnpm-workspace monorepo of six TypeScript
 packages (`packages/*`, `tsc -b`, CommonJS output) building two runnable
-servers: the composed server (`@raidenyn/server`, ten tools) and the
+servers: the composed server (`@raidenyn/server`, twelve tools) and the
 standalone messenger server (`@raidenyn/line-mcp`, five tools).
 
 ## Commands

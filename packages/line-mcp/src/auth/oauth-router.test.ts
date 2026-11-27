@@ -101,6 +101,13 @@ let authStoreDir: string;
 let authStoreDir2: string;
 const BASE_PATH_2 = '/line-mcp';
 
+// A login started by one case can still be persisting its certificate while the
+// next case's beforeEach runs; a plain recursive rm can then hit ENOTEMPTY.
+// Retry the removal briefly instead of leaking the race into the next case.
+function removeStoreDir(dir: string): void {
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+}
+
 async function req(url: string, init?: RequestInit): Promise<{ status: number; body: unknown }> {
   const res = await fetch(url, init);
   const ct = res.headers.get('content-type') ?? '';
@@ -249,14 +256,14 @@ afterAll(() => Promise.all([
   new Promise<void>((resolve) => server.close(() => resolve())),
   new Promise<void>((resolve) => server2.close(() => resolve())),
 ]).then(() => {
-  fs.rmSync(authStoreDir, { recursive: true, force: true });
-  fs.rmSync(authStoreDir2, { recursive: true, force: true });
+  removeStoreDir(authStoreDir);
+  removeStoreDir(authStoreDir2);
 }));
 
 beforeEach(async () => {
-  fs.rmSync(authStoreDir, { recursive: true, force: true });
+  removeStoreDir(authStoreDir);
   fs.mkdirSync(authStoreDir, { recursive: true });
-  fs.rmSync(authStoreDir2, { recursive: true, force: true });
+  removeStoreDir(authStoreDir2);
   fs.mkdirSync(authStoreDir2, { recursive: true });
   const lineModule = await import('@raidenyn/line-client') as unknown as {
     LineClient: ReturnType<typeof vi.fn>;

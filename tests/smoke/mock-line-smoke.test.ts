@@ -61,7 +61,7 @@ const epochSeconds = Math.floor(Date.now() / 1000);
 //                      Drives getPreviousMessagesV2WithRequest via the real
 //                      MCP -> cache wrapper -> LineClient.getMessagesInRange
 //                      production path.
-// The standalone scenario is identical minus the five bank reads (recent:2).
+// The standalone scenario is identical minus the bank reads (recent:2); the ledger tools make no LINE call.
 const SEEDED_COMPOSED_ROUTE_COUNTS = {
   refresh: 1,
   allChatMids: 2,

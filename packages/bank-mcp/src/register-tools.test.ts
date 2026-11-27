@@ -11,6 +11,7 @@ import { TemplateStore } from './template-store';
 import { CategoryStore } from './category-store';
 import { PresetStore } from './preset-store';
 import { RegexExecutor } from './regex-executor';
+import { LedgerStore } from './ledger/ledger-store';
 import { buildAmountWarnings } from './tools/fetch-transactions';
 
 // ─── Minimal fakes ─────────────────────────────────────────────────────────
@@ -18,15 +19,20 @@ import { buildAmountWarnings } from './tools/fetch-transactions';
 // against it, so we can invoke a tool by name without a real MCP transport.
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+type ResourceReader = (uri: URL) => Promise<{
+  contents: Array<{ uri: string; mimeType: string; text: string }>;
+}>;
 
 class FakeServer {
   readonly tools = new Map<string, ToolHandler>();
   readonly resources = new Map<string, string>();
+  readonly readers = new Map<string, ResourceReader>();
   registerTool(name: string, _schema: unknown, handler: ToolHandler): void {
     this.tools.set(name, handler);
   }
-  registerResource(id: string, uri: string, _meta: unknown, _reader: unknown): void {
+  registerResource(id: string, uri: string, _meta: unknown, reader: unknown): void {
     this.resources.set(uri, id);
+    this.readers.set(uri, reader as ResourceReader);
   }
 }
 
@@ -55,6 +61,13 @@ let presetsDir: string;
 let currentPrincipal: Principal;
 let readerCreations: string[];
 let regex: RegexExecutor;
+const ledgers: LedgerStore[] = [];
+
+function makeLedger(): LedgerStore {
+  const store = new LedgerStore(':memory:');
+  ledgers.push(store);
+  return store;
+}
 
 function makeContext(): RequestContext<Principal> {
   return {
@@ -83,6 +96,7 @@ function makeDeps(messagesByPrincipal: Record<string, Message[]> = {
     categories: new CategoryStore(':memory:'),
     presets: new PresetStore(presetsDir), // empty dir → no built-in presets
     regex,
+    ledger: makeLedger(),
   };
 }
 
@@ -95,6 +109,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await regex.close();
+  for (const ledger of ledgers.splice(0)) ledger.close();
   rmSync(templatesDir, { recursive: true, force: true });
   rmSync(presetsDir, { recursive: true, force: true });
 });
@@ -105,11 +120,14 @@ function parsePayload(text: string): unknown {
 }
 
 describe('registerBankTools', () => {
-  it('registers exactly the five bank tools', () => {
+  it('registers exactly the seven bank tools', () => {
     const server = new FakeServer();
     registerBankTools(server as unknown as McpServer, makeContext(), makeDeps());
     expect([...server.tools.keys()].sort()).toEqual(
-      ['get_transactions', 'manage_categories', 'manage_templates', 'sample_messages', 'summarize_transactions'].sort(),
+      [
+        'get_transactions', 'manage_categories', 'manage_templates', 'sample_messages',
+        'summarize_transactions', 'ledger_status', 'manage_accounts',
+      ].sort(),
     );
   });
 
@@ -283,6 +301,7 @@ describe('registerBankTools', () => {
         categories: new CategoryStore(':memory:'),
         presets: new PresetStore(presetsDir),
         regex: executor,
+        ledger: makeLedger(),
       };
     }
 
@@ -460,10 +479,10 @@ describe('registerBankTools', () => {
 });
 
 describe('registerBankResources', () => {
-  it('registers the shared overview plus five tool guides by default', () => {
+  it('registers the shared overview plus seven tool guides by default', () => {
     const server = new FakeServer();
     registerBankResources(server as unknown as McpServer);
-    expect(server.resources.size).toBe(6);
+    expect(server.resources.size).toBe(8);
     expect([...server.resources.keys()]).toContain('line://guide');
   });
 
@@ -471,7 +490,20 @@ describe('registerBankResources', () => {
     const server = new FakeServer();
     registerBankResources(server as unknown as McpServer, { includeOverview: false });
     const uris = [...server.resources.keys()];
-    expect(uris).toHaveLength(5);
+    expect(uris).toHaveLength(7);
     expect(uris).not.toContain('line://guide');
+  });
+
+  it('reads both ledger guides without a missing-file placeholder', async () => {
+    const server = new FakeServer();
+    registerBankResources(server as unknown as McpServer);
+    for (const uri of ['line://guide/tools/ledger_status', 'line://guide/tools/manage_accounts']) {
+      const reader = server.readers.get(uri);
+      expect(reader, uri).toBeDefined();
+      const read = await reader!(new URL(uri));
+      expect(read.contents[0].mimeType).toBe('text/markdown');
+      expect(read.contents[0].text).not.toContain('Guide file not found');
+      expect(read.contents[0].text.length).toBeGreaterThan(100);
+    }
   });
 });

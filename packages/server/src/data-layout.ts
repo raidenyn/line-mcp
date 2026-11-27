@@ -39,7 +39,7 @@ export const pointerPath = (root: string = dataDir()): string => path.join(root,
 
 /**
  * The packaged `docs/guide` directory shipped inside `@raidenyn/server`, holding
- * the composed ten-tool `overview.md`. Sits alongside `dist/` as a sibling of
+ * the composed twelve-tool `overview.md`. Sits alongside `dist/` as a sibling of
  * `package.json`, so `__dirname` resolves it identically under ts-node (from
  * `src/`) and compiled (`dist/`).
  */

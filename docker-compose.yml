@@ -1,5 +1,5 @@
-# Default service is the COMPOSED server (ten tools: five messenger + five
-# bank). The standalone messenger-only server is defined under the "min"
+# Default service is the COMPOSED server (twelve tools: five messenger + seven
+# bank/ledger). The standalone messenger-only server is defined under the "min"
 # profile and MUST use its own data volume — the two servers never share a data
 # root on the same host (the composed server owns bank/category data the
 # standalone server knows nothing about, and the standalone server refuses to

@@ -15,7 +15,14 @@ import {
   type LineToolDeps,
 } from '@raidenyn/line-mcp';
 import type { AuthData } from '@raidenyn/line-client';
-import { CategoryStore, TemplateStore, PresetStore, RegexExecutor, type BankToolDeps } from '@raidenyn/bank-mcp';
+import {
+  CategoryStore,
+  TemplateStore,
+  PresetStore,
+  RegexExecutor,
+  LedgerStore,
+  type BankToolDeps,
+} from '@raidenyn/bank-mcp';
 import { resolveDataLayout } from './data-layout';
 import { bootstrapPersistence, type ActivePersistence } from './persistence-migration';
 import { createServerRequestClientFactory } from './request-client';
@@ -91,6 +98,9 @@ export function createServer(options: ServerOptions): ComposedServer {
   // line cache); retained here so stop() can close it before resolving, the
   // same way cache.close() releases the messages DB.
   let categoryStore: CategoryStore | undefined;
+  // The owner-scoped ledger store: one connection on the same bank.db as the
+  // category store, closed by stop() alongside it.
+  let ledgerStore: LedgerStore | undefined;
   // RegexExecutor owns a small worker pool; retained here so stop() can close
   // it before resolving, releasing the worker threads cleanly across repeated
   // start/stop cycles (e.g. tests).
@@ -126,6 +136,10 @@ export function createServer(options: ServerOptions): ComposedServer {
       cache = new SqliteMessageCache({ dbPath: active.lineDbPath });
       const categories = new CategoryStore(active.bankDbPath);
       categoryStore = categories;
+      // The ledger applies its ordered schema steps on open. Assign it at once
+      // so a later failure in start() still gets it closed by stop().
+      const ledger = new LedgerStore(active.bankDbPath);
+      ledgerStore = ledger;
       const templates = new TemplateStore(layout.templatesDir);
       // Built-in bank presets ship inside @raidenyn/bank-mcp and resolve
       // relative to that package, not the data root — constructing this
@@ -183,6 +197,7 @@ export function createServer(options: ServerOptions): ComposedServer {
         categories,
         presets,
         regex: regexExecutor,
+        ledger,
       };
 
       const host: McpHost = createMcpHost<LinePrincipal>({
@@ -252,14 +267,30 @@ export function createServer(options: ServerOptions): ComposedServer {
         executorFailure = error;
         executorFailed = true;
       }
-      // Close both DB-backed stores the composed server owns: the line-message
-      // cache and the bank/category store. CategoryStore opens its own
-      // better-sqlite3 connection (separate from the cache's), so without an
-      // explicit close() the bank DB handle would outlive stop() and leak
-      // across repeated start/stop cycles (e.g. tests).
-      categoryStore?.close();
-      cache?.close();
+      // Close every DB-backed store the composed server owns: the ledger, the
+      // bank/category store and the line-message cache. Each opens its own
+      // better-sqlite3 connection, so without an explicit close() the handles
+      // would outlive stop() and leak across repeated start/stop cycles (e.g.
+      // tests). Each close runs even when another one fails; the first close
+      // error is rethrown after all have run, and the executor failure keeps
+      // precedence.
+      let closeFailure: unknown;
+      let closeFailed = false;
+      const closeOrRecord = (close: (() => void) | undefined): void => {
+        try {
+          close?.();
+        } catch (error) {
+          if (!closeFailed) {
+            closeFailure = error;
+            closeFailed = true;
+          }
+        }
+      };
+      closeOrRecord(ledgerStore ? () => ledgerStore!.close() : undefined);
+      closeOrRecord(categoryStore ? () => categoryStore!.close() : undefined);
+      closeOrRecord(cache ? () => cache!.close() : undefined);
       if (executorFailed) throw executorFailure;
+      if (closeFailed) throw closeFailure;
     },
   };
 }

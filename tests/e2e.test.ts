@@ -274,7 +274,7 @@ describe('LINE MCP server e2e (real account)', () => {
     expect(isValidSummary || isNoTemplatesError).toBe(true);
   });
 
-  it('resources/list returns all 11 guide URIs', async () => {
+  it('resources/list returns all 13 guide URIs', async () => {
     const result = await mcpClient.listResources();
     const uris = result.resources.map((r) => r.uri);
     const expected = [
@@ -289,6 +289,8 @@ describe('LINE MCP server e2e (real account)', () => {
       'line://guide/tools/summarize_transactions',
       'line://guide/tools/initiate_import',
       'line://guide/tools/complete_import',
+      'line://guide/tools/ledger_status',
+      'line://guide/tools/manage_accounts',
     ];
     for (const uri of expected) {
       expect(uris).toContain(uri);

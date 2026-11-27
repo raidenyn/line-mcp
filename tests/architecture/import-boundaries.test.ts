@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { parse } from 'yaml';
+import * as ts from 'typescript';
 
 /**
  * Enforces the workspace dependency graph from issue #75 (modular-workspaces).
@@ -188,5 +190,155 @@ describe('extra prohibitions', () => {
     const imported = importedWorkspacePackages('line-mcp');
     expect(deps).not.toContain('@raidenyn/bank-mcp');
     expect(imported.has('@raidenyn/bank-mcp')).toBe(false);
+  });
+});
+
+// ─── Ledger import boundary (expense-ledger M1 task 2) ──────────────────────
+//
+// Nothing under packages/bank-mcp/src/ledger/, nor any file it reaches through
+// relative imports, may import @raidenyn/line-client (or a subpath). The
+// package-level IMPORT_RE above cannot express this: it allows bank-mcp as a
+// whole to use line-client, and it matches package names only.
+
+interface BoundaryViolation {
+  file: string;
+  chain: string[];
+}
+
+/** Every module specifier of an import, export-from, dynamic import or require. */
+function importSpecifiers(fileName: string, content: string): string[] {
+  const source = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const found: string[] = [];
+  const add = (expression: ts.Expression | undefined): void => {
+    if (expression !== undefined && ts.isStringLiteralLike(expression)) found.push(expression.text);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      add(node.moduleSpecifier);
+    } else if (ts.isCallExpression(node)) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        add(node.arguments[0]);
+      } else if (ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+        add(node.arguments[0]);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return [...new Set(found)];
+}
+
+function resolveRelative(fromFile: string, specifier: string): string | undefined {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates: string[] = [];
+  // Node16-style source imports name the emitted `.js` file; the checker reads
+  // TypeScript source, so look for the matching `.ts` first.
+  if (base.endsWith('.js')) candidates.push(`${base.slice(0, -3)}.ts`);
+  candidates.push(`${base}.ts`, path.join(base, 'index.ts'));
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Reports every file reached from `dir` (through relative imports) that
+ * imports @raidenyn/line-client or a subpath, with the import chain.
+ */
+function ledgerBoundaryViolations(dir: string): BoundaryViolation[] {
+  const roots = listSourceFiles(dir);
+  const violations: BoundaryViolation[] = [];
+  const visited = new Set<string>();
+  const queue: Array<{ file: string; chain: string[] }> = roots.map((file) => ({ file, chain: [file] }));
+
+  while (queue.length > 0) {
+    const { file, chain } = queue.shift()!;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const content = fs.readFileSync(file, 'utf-8');
+    for (const specifier of importSpecifiers(file, content)) {
+      if (/^@raidenyn\/line-client(\/|$)/.test(specifier)) {
+        violations.push({ file, chain });
+        continue;
+      }
+      if (!specifier.startsWith('.')) continue;
+      const resolved = resolveRelative(file, specifier);
+      if (resolved && !visited.has(resolved)) {
+        queue.push({ file: resolved, chain: [...chain, resolved] });
+      }
+    }
+  }
+  return violations;
+}
+
+describe('bank-mcp ledger import boundary', () => {
+  const ledgerDir = path.join(PACKAGES_DIR, 'bank-mcp', 'src', 'ledger');
+
+  it('exists, has .ts files and reports no line-client import', () => {
+    expect(fs.existsSync(ledgerDir)).toBe(true);
+    expect(listSourceFiles(ledgerDir).length).toBeGreaterThan(0);
+    expect(ledgerBoundaryViolations(ledgerDir)).toEqual([]);
+  });
+
+  const cases: Array<{ label: string; files: Record<string, string>; expected: string }> = [
+    {
+      label: 'a direct import',
+      files: { 'checked/a.ts': "import { x } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an import type',
+      files: { 'checked/a.ts': "import type { M } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an export from',
+      files: { 'checked/a.ts': "export { y } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'a subpath import',
+      files: { 'checked/a.ts': "import '@raidenyn/line-client/dist/client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'a comment before the module literal',
+      files: { 'checked/a.ts': "import /* comment */ '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an indirect relative import',
+      files: {
+        'checked/a.ts': "import { z } from '../outside';\n",
+        'outside.ts': "import { M } from '@raidenyn/line-client';\n",
+      },
+      expected: 'outside.ts',
+    },
+    {
+      label: 'an indirect relative .js import that resolves to TypeScript',
+      files: {
+        'checked/a.ts': "import { z } from '../outside.js';\n",
+        'outside.ts': "import { M } from '@raidenyn/line-client';\n",
+      },
+      expected: 'outside.ts',
+    },
+  ];
+
+  it.each(cases)('reports $label', ({ files, expected }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-boundary-'));
+    try {
+      for (const [relative, content] of Object.entries(files)) {
+        const file = path.join(root, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+      }
+      const violations = ledgerBoundaryViolations(path.join(root, 'checked'));
+      expect(violations).toHaveLength(1);
+      expect(violations[0].file.endsWith(expected)).toBe(true);
+      expect(violations[0].chain[0].endsWith(path.join('checked', 'a.ts'))).toBe(true);
+      expect(violations[0].chain[violations[0].chain.length - 1]).toBe(violations[0].file);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

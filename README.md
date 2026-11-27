@@ -4,7 +4,7 @@ An [MCP (Model Context Protocol)](https://modelcontextprotocol.io) server that e
 
 It ships as a **modular pnpm-workspace monorepo** that builds into two runnable servers:
 
-- **Composed server** (`@raidenyn/server`, the default) — all **ten** tools: five messenger tools plus five bank/transaction tools.
+- **Composed server** (`@raidenyn/server`, the default) — all **twelve** tools: five messenger tools plus seven bank/transaction/ledger tools.
 - **Standalone messenger server** (`@raidenyn/line-mcp`) — the **five** messenger tools only, with no bank code, no bank data, and a smaller dependency and Docker footprint.
 
 ## Packages
@@ -17,7 +17,7 @@ Six workspace packages under `packages/*`, with a strict, one-directional depend
 | `@raidenyn/line-client-sqlite` | SQLite-backed message cache + persistence-migration primitives, wrapping the client. | `line-client`, `better-sqlite3` |
 | `@raidenyn/mcp-runtime` | Generic, product-agnostic MCP-over-HTTP scaffolding: Express host, per-request server/transport, token codec, one `AuthProvider`. Imports no product package. | `express`, MCP SDK (peer) |
 | `@raidenyn/line-mcp` | Messenger product: the five messenger tools + guides, OAuth/LINE auth provider, import service, sync loop, and the **standalone** server. | `line-client`, `line-client-sqlite`, `mcp-runtime` |
-| `@raidenyn/bank-mcp` | Bank product: the five transaction tools + guides, template/category/preset stores, parser, FX. Imports no `line-mcp`. | `line-client`, `mcp-runtime`, `better-sqlite3` |
+| `@raidenyn/bank-mcp` | Bank product: the seven bank/ledger tools + guides, owner-scoped ledger on `bank/bank.db`, template/category/preset stores, parser, FX. Imports no `line-mcp`; nothing under `src/ledger/` imports `line-client`. | `line-client`, `mcp-runtime`, `better-sqlite3` |
 | `@raidenyn/server` | Composition root — the **only** package importing both product packages; wires them onto `mcp-runtime` and owns the data root, secret, and legacy-persistence migration. | all of the above + MCP SDK |
 
 ## Tools
@@ -41,6 +41,24 @@ Six workspace packages under `packages/*`, with a strict, one-directional depend
 | `manage_categories` | CRUD for global spending categories (not scoped per chat) |
 | `get_transactions` | Parse bank notifications into structured transactions; paginates full history with `since`; auto-loads saved templates; filters by category, currency, merchant regex, amount range |
 | `summarize_transactions` | Aggregate transactions into totals grouped by month, merchant, or category |
+| `ledger_status` | Report the owner's ledger settings and sources; before setup it answers the structured error `setup_required` |
+| `manage_accounts` | Add, get, list and update ledger sources (LINE chats); read and update the owner's base currency (set once) and timezone |
+
+### Expense ledger
+
+The composed server keeps a per-account expense ledger in `bank/bank.db`. Set it up before using any
+ledger feature; the existing parser tools (`get_transactions`, `summarize_transactions`) work without it:
+
+1. `ledger_status` — before setup it answers `setup_required` with an `action`.
+2. `manage_accounts` (`action: add_source`) — pass the chat MID, an ISO 4217 `base_currency` and an
+   IANA `owner_timezone`. The base currency is set once with the first source and can never change;
+   the owner timezone changes only through `update_settings`.
+3. `ledger_status` — now lists the source with its effective timezone and `review_from` date.
+
+A source without its own timezone follows the owner's, also after later changes. Writes accept an
+`idempotency_key` (retry-safe for 24 hours) and an `expected_revision` (optimistic concurrency).
+Every answer is structured: a result or `{ error: { code, message, action?, details? } }` with one of
+the six contract codes. Sources are owner-scoped: another account on the same data root never sees them.
 
 ### Transaction workflow
 
@@ -81,7 +99,7 @@ Never run two servers against the same data root on one host. The composed serve
 
 ### Docker (recommended)
 
-Both runtime targets are published to the **public** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, ten tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Both packages are public **once the owner has completed the one-time visibility flip** described in [docs/RELEASING.md](docs/RELEASING.md#first-publication-the-one-way-visibility-flip); until then each package is created private by its first publication and an anonymous pull fails. After the flip, pulling needs no authentication and no access grant.
+Both runtime targets are published to the **public** GitHub Container Registry as `ghcr.io/raidenyn/line-mcp-full` (composed, twelve tools) and `ghcr.io/raidenyn/line-mcp` (standalone, five tools). Both packages are public **once the owner has completed the one-time visibility flip** described in [docs/RELEASING.md](docs/RELEASING.md#first-publication-the-one-way-visibility-flip); until then each package is created private by its first publication and an anonymous pull fails. After the flip, pulling needs no authentication and no access grant.
 
 #### Pull the published images
 
@@ -104,7 +122,7 @@ an authorization error; wait for the flip rather than authenticating manually.
 Run each image against **its own** data root:
 
 ```bash
-# Composed server (ten tools) on host port 3000
+# Composed server (twelve tools) on host port 3000
 docker run -d --name line-mcp-full \
   -p 3000:3000 \
   -v bank-mcp-data:/data \
@@ -143,7 +161,7 @@ docker pull ghcr.io/raidenyn/line-mcp-full@sha256:<digest>
 Two build targets share one multi-stage `Dockerfile`:
 
 ```bash
-# Composed server (ten tools) — the docker-compose default
+# Composed server (twelve tools) — the docker-compose default
 docker compose up -d line-mcp-full
 claude mcp add --transport http --scope user line http://localhost:3000/mcp
 
@@ -262,9 +280,9 @@ pnpm exec vitest run tests/docker/docker-smoke.test.ts          # both Docker ta
 The repository ships four distinct test surfaces:
 
 - **`test:unit`** — in-process unit, contract, and migration tests plus the package import-boundary guard. No LINE session, no Docker.
-- **`test:smoke`** — strict local LINE mock plus the **compiled** composed (`packages/server/dist/cli.js`) and standalone (`packages/line-mcp/dist/cli.js`) CLIs, run as real child processes against a deterministic in-process mock gateway. Four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. The composed scenario exercises all ten MCP tools; the standalone scenario exercises all five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker.
+- **`test:smoke`** — strict local LINE mock plus the **compiled** composed (`packages/server/dist/cli.js`) and standalone (`packages/line-mcp/dist/cli.js`) CLIs, run as real child processes against a deterministic in-process mock gateway. Four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. The composed scenario exercises all twelve MCP tools; the standalone scenario exercises all five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker.
 - **`test:e2e`** — manual live LINE account verification. Export a real session to `.line-auth.json`, then run; the suite launches the composed server, seeds a `TEST_TOKEN` bypass, and connects over the MCP HTTP transport. Excluded from the PR-blocking CI gate; run as a pre-release check.
-- **Docker smoke** — runtime-image startup and the exact tool surface per container (composed = ten tools, standalone = five) over a real MCP `tools/list`. Run via `tests/docker/docker-smoke.test.ts`.
+- **Docker smoke** — runtime-image startup and the exact tool surface per container (composed = twelve tools, standalone = five) over a real MCP `tools/list`. Run via `tests/docker/docker-smoke.test.ts`.
 
 `LINE_API_BASE_URL` may be set in tests or local development to point the LINE client at a different gateway (the smoke suite sets it to the local mock). Production deployments leave it unset: the default gateway is LINE, and any configured override still receives real LINE authorization headers, so only point it at a trusted endpoint.
 

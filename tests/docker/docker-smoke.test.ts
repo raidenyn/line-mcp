@@ -13,7 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
  * Builds (if not already tagged) and runs each runtime Docker target against a
  * throwaway data root on an ephemeral host port, waits for `/healthz`, and then
  * proves — over a REAL MCP `tools/list` roundtrip, not a byte grep — that the
- * composed `server` target exposes all ten tool registrations and the
+ * composed `server` target exposes all twelve tool registrations and the
  * standalone `line-mcp` target exposes only the five messenger registrations.
  *
  * This is the exact same tool surface asserted in-process by
@@ -148,6 +148,7 @@ const MESSENGER_TOOLS = [
 const COMPOSED_TOOLS = [
   ...MESSENGER_TOOLS,
   'manage_templates', 'manage_categories', 'sample_messages', 'get_transactions', 'summarize_transactions',
+  'ledger_status', 'manage_accounts',
 ].sort();
 
 describe.skipIf(!dockerAvailable())('Docker runtime targets — real MCP tools/list smoke', () => {
@@ -156,7 +157,7 @@ describe.skipIf(!dockerAvailable())('Docker runtime targets — real MCP tools/l
     buildIfMissing('line-mcp', STANDALONE_IMAGE);
   }, 900_000);
 
-  it('composed `server` target exposes exactly the ten composed tools', async () => {
+  it('composed `server` target exposes exactly the twelve composed tools', async () => {
     const c = startContainer(SERVER_IMAGE);
     try {
       await waitForHealthz(c.hostPort, c.id);
