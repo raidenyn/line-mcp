@@ -45,6 +45,10 @@ export {
 
 export { CategoryStore } from './category-store';
 
+// ─── Ledger (owner-scoped, separate connection to bank/bank.db) ─────────────
+export { LedgerStore, type LedgerSettings, type LedgerSource } from './ledger/ledger-store';
+export { LEDGER_SCHEMA_STEPS } from './ledger/schema';
+
 export {
   loadAllPresets,
   getPreset,

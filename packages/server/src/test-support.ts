@@ -14,7 +14,7 @@ import * as os from 'os';
 import { withMessageCache, type LineApiClient, type MessageCache } from '@raidenyn/line-client';
 import { SqliteMessageCache } from '@raidenyn/line-client-sqlite';
 import { ImportService, type LineToolDeps, type LinePrincipal } from '@raidenyn/line-mcp';
-import { CategoryStore, TemplateStore, PresetStore, RegexExecutor, type BankToolDeps } from '@raidenyn/bank-mcp';
+import { CategoryStore, TemplateStore, PresetStore, RegexExecutor, LedgerStore, type BankToolDeps } from '@raidenyn/bank-mcp';
 import type { RequestLineClient } from './request-client';
 import { buildRegistrations, type ComposedDeps } from './registrations';
 
@@ -61,6 +61,7 @@ export interface ComposedFixture {
   dataRoot: string;
   cache: SqliteMessageCache;
   categories: CategoryStore;
+  ledger: LedgerStore;
   templates: TemplateStore;
   deps: ComposedDeps;
   cleanup(): Promise<void>;
@@ -77,6 +78,7 @@ export function buildComposedFixture(guideDir: string): ComposedFixture {
   const dataRoot = mkdtemp('server-composition-');
   const cacheInstance = new SqliteMessageCache({ dbPath: path.join(dataRoot, 'line', 'messages.db') });
   const categories = new CategoryStore(path.join(dataRoot, 'bank', 'bank.db'));
+  const ledger = new LedgerStore(path.join(dataRoot, 'bank', 'bank.db'));
   const templates = new TemplateStore(path.join(dataRoot, 'templates'));
   const presets = new PresetStore();
   const regex = new RegexExecutor();
@@ -91,17 +93,20 @@ export function buildComposedFixture(guideDir: string): ComposedFixture {
     categories,
     presets,
     regex,
+    ledger,
   };
 
   return {
     dataRoot,
     cache: cacheInstance,
     categories,
+    ledger,
     templates,
     deps: { line, bank, guideDir },
     async cleanup(): Promise<void> {
       await regex.close();
       cacheInstance.close();
+      ledger.close();
       categories.close();
       fs.rmSync(dataRoot, { recursive: true, force: true });
     },

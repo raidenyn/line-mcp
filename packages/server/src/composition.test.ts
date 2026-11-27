@@ -67,7 +67,7 @@ describe('composed server — tool/resource registration (real MCP roundtrip)', 
     fs.rmSync(authStoreDir, { recursive: true, force: true });
   });
 
-  it('lists exactly ten tools, with no duplicates', async () => {
+  it('lists exactly twelve tools, with no duplicates', async () => {
     const result = await client.listTools();
     const names = result.tools.map((t) => t.name);
     expect(new Set(names).size).toBe(names.length); // no duplicate registrations
@@ -75,6 +75,7 @@ describe('composed server — tool/resource registration (real MCP roundtrip)', 
       [
         'list_chats', 'get_messages', 'get_image', 'initiate_import', 'complete_import',
         'manage_templates', 'manage_categories', 'sample_messages', 'get_transactions', 'summarize_transactions',
+        'ledger_status', 'manage_accounts',
       ].sort(),
     );
   });

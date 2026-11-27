@@ -11,6 +11,7 @@ import { TemplateStore } from './template-store';
 import { CategoryStore } from './category-store';
 import { PresetStore } from './preset-store';
 import { RegexExecutor } from './regex-executor';
+import { LedgerStore } from './ledger/ledger-store';
 import { buildAmountWarnings } from './tools/fetch-transactions';
 
 // ─── Minimal fakes ─────────────────────────────────────────────────────────
@@ -55,6 +56,13 @@ let presetsDir: string;
 let currentPrincipal: Principal;
 let readerCreations: string[];
 let regex: RegexExecutor;
+const ledgers: LedgerStore[] = [];
+
+function makeLedger(): LedgerStore {
+  const store = new LedgerStore(':memory:');
+  ledgers.push(store);
+  return store;
+}
 
 function makeContext(): RequestContext<Principal> {
   return {
@@ -83,6 +91,7 @@ function makeDeps(messagesByPrincipal: Record<string, Message[]> = {
     categories: new CategoryStore(':memory:'),
     presets: new PresetStore(presetsDir), // empty dir → no built-in presets
     regex,
+    ledger: makeLedger(),
   };
 }
 
@@ -95,6 +104,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await regex.close();
+  for (const ledger of ledgers.splice(0)) ledger.close();
   rmSync(templatesDir, { recursive: true, force: true });
   rmSync(presetsDir, { recursive: true, force: true });
 });
@@ -105,11 +115,14 @@ function parsePayload(text: string): unknown {
 }
 
 describe('registerBankTools', () => {
-  it('registers exactly the five bank tools', () => {
+  it('registers exactly the seven bank tools', () => {
     const server = new FakeServer();
     registerBankTools(server as unknown as McpServer, makeContext(), makeDeps());
     expect([...server.tools.keys()].sort()).toEqual(
-      ['get_transactions', 'manage_categories', 'manage_templates', 'sample_messages', 'summarize_transactions'].sort(),
+      [
+        'get_transactions', 'manage_categories', 'manage_templates', 'sample_messages',
+        'summarize_transactions', 'ledger_status', 'manage_accounts',
+      ].sort(),
     );
   });
 
@@ -283,6 +296,7 @@ describe('registerBankTools', () => {
         categories: new CategoryStore(':memory:'),
         presets: new PresetStore(presetsDir),
         regex: executor,
+        ledger: makeLedger(),
       };
     }
 
