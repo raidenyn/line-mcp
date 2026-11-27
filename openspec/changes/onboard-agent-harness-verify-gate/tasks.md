@@ -15,6 +15,8 @@
   Verify: `pnpm exec vitest run tests/harness`
 - [x] 2.4 Run `node .agents/harness/verify-gate/cli.mjs run` once on the committed tree; it must pass and seed the no-change shortcut.
   Verify: `node .agents/harness/verify-gate/cli.mjs run`
+- [x] 2.5 Run `update --repo .` of both tools from catalog v0.8.0 (hook runtime 0.1.6, verify gate 0.2.4), which maps OpenCode's native `write` and `edit` by `input.path` (raidenyn/agentic-development-skills#72).
+  Verify: `node .agents/harness/hook-runtime/cli.mjs check`
 
 ## 3. CI and docs
 
@@ -27,7 +29,7 @@
 
 ## 4. Live runs and the gate
 
-- [ ] 4.1 OpenCode first, through a private `opencode serve` in a throwaway clone with `origin/main` moved to the onboarding commit: a TypeScript edit with a lint error (reported once), a tick while a check fails, a blocked turn end, then a passing and a no-change turn end, with `AGENT_HARNESS_TRACE=1`; record the OpenCode version and the outputs.
+- [x] 4.1 OpenCode first, through a private `opencode serve` in a throwaway clone with `origin/main` moved to the onboarding commit: a TypeScript edit with a lint error (reported once), a tick while a check fails, a blocked turn end, then a passing and a no-change turn end, with `AGENT_HARNESS_TRACE=1`; record the OpenCode version and the outputs.
   Verify: `node .agents/harness/hook-runtime/cli.mjs capabilities`
 - [x] 4.2 Claude Code: the same sequence in a throwaway clone; record the Claude Code version and the outputs.
   Verify: `node .agents/harness/hook-runtime/cli.mjs capabilities`
