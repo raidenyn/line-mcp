@@ -58,7 +58,7 @@
 
 - [ ] **Step 1: Write the failing tests** — `describe('validation')` with:
   - `normalizeCurrency('thb')` → `'THB'`; `'ABC'`, `'TH'`, `5`, `null` throw `LedgerError` with `code: 'invalid_argument'` and `details.field` equal to the field name.
-  - `normalizeTimezone('asia/bangkok')` → `'Asia/Bangkok'`; `'UTC'` → `'UTC'`; `'+07:00'`, `'Mars/Base'`, `''` throw `invalid_argument`.
+  - `normalizeTimezone('asia/bangkok')` → `'Asia/Bangkok'`; `normalizeTimezone('Asia/Kolkata') === normalizeTimezone('Asia/Calcutta')`; `'UTC'` → `'UTC'`; `'+07:00'`, `'Mars/Base'`, `''` throw `invalid_argument`.
   - `parseReviewFrom('2026-02-28')` ok; `'2026-02-30'`, `'2026-2-1'`, `'20260101'` throw.
   - `parseLineSourceId('c0123abc_-')` ok; `'a/b'`, `''`, a 101-char id throw.
   - `optionalString('x'.repeat(201), 'label', LABEL_MAX)` throws; `undefined` → `undefined`; `null` throws.
@@ -68,7 +68,7 @@
 
 - [ ] **Step 2: Run and see it fail.** Run: `pnpm exec vitest run packages/bank-mcp/src/ledger/validation.test.ts` — Expected: FAIL, module not found.
 
-- [ ] **Step 3: Implement** `errors.ts` and `validation.ts` with the signatures above. Currency: uppercase, then `Intl.supportedValuesOf('currency').includes(code)`. Timezone: `new Intl.DateTimeFormat('en-US', { timeZone })` in try/catch, take `resolvedOptions().timeZone`, accept only `'UTC'` or a member of `Intl.supportedValuesOf('timeZone')`. Today in a timezone: `Intl.DateTimeFormat('en-CA', { timeZone, year, month, day })` parts.
+- [ ] **Step 3: Implement** `errors.ts` and `validation.ts` with the signatures above. Currency: uppercase, then `Intl.supportedValuesOf('currency').includes(code)`. Timezone: `new Intl.DateTimeFormat('en-US', { timeZone })` in try/catch, take `resolvedOptions().timeZone`, accept only `'UTC'` or a member of `Intl.supportedValuesOf('timeZone')`. Comparisons of a stored timezone with input (`owner_timezone` on a later `add_source`, no-op detection) compare `normalizeTimezone(stored)` with `normalizeTimezone(input)`, so link names and ICU upgrades never cause a false `conflict`. Today in a timezone: `Intl.DateTimeFormat('en-CA', { timeZone, year, month, day })` parts.
 
 - [ ] **Step 4: Run and see it pass.** Same command — Expected: PASS.
 
@@ -114,7 +114,7 @@
 - Consumes: Tasks 1–2.
 - Produces (all methods take the owner first; all inputs already validated/normalized by the tool layer; the store enforces state rules):
   - `interface LedgerSettings { base_currency: string; timezone: string; revision: number }`
-  - `interface LedgerSource { provider: 'line'; source_id: string; native_id: string; label: string | null; timezone: string; own_timezone: string | null; review_from: string; last_caught_up_at: number | null; last_error: string | null; revision: number; created_at: number; updated_at: number }`
+  - `interface LedgerSource { provider: 'line'; source_id: string; native_id: string; label: string | null; timezone: string; own_timezone: string | null; review_from: string; last_caught_up_at: number | null; last_error: { code: string; message: string; at: number } | null; revision: number; created_at: number; updated_at: number }`
   - `interface WriteKeys { idempotencyKey?: string; requestHash?: string; expectedRevision?: number }`
   - `getSettings(owner: string): LedgerSettings` (throws `setup_required`)
   - `updateSettings(owner, patch: { timezone?: string; base_currency?: string }, keys: WriteKeys): { settings: LedgerSettings }`
@@ -210,14 +210,14 @@
   - `BankToolDeps<P>` gains `ledger: LedgerStore`.
   - `registerLedgerStatus<P>(server, context, deps): void`, `registerManageAccounts<P>(server, context, deps): void`, called by `registerBankTools` after the five existing tools.
   - `src/index.ts` exports `LedgerStore`, `LEDGER_SCHEMA_STEPS`, type `LedgerSource`, `LedgerSettings`.
-  - Tool inputs (all `z.unknown().optional().meta(...)`): `ledger_status`: `idempotency_key` (string), `expected_revision` (integer) — both refused when present. `manage_accounts`: `action` (string, enum in description), `provider`, `source_id`, `label`, `timezone`, `review_from`, `base_currency`, `owner_timezone` (strings), `idempotency_key` (string), `expected_revision` (integer).
+  - Tool inputs (all `z.unknown().optional().meta(...)`): `ledger_status`: none (no `inputSchema`; any argument is stripped by the SDK and ignored). `manage_accounts`: `action` (string, enum in description), `provider`, `source_id`, `label`, `timezone`, `review_from`, `base_currency`, `owner_timezone` (strings), `idempotency_key` (string), `expected_revision` (integer).
   - Per-action allowed fields (anything else present → `invalid_argument` with `details.field`): `add_source`: provider, source_id, label, timezone, review_from, base_currency, owner_timezone, write keys. `get_source`: provider, source_id. `list_sources`, `get_settings`: none. `update_source`: provider, source_id, label, timezone, review_from, write keys. `update_settings`: timezone, base_currency, write keys.
 
 - [ ] **Step 1: Write the failing tests** in `ledger-tools.test.ts`, over a real `McpServer` connected to a `Client` with `InMemoryTransport.createLinkedPair()`, `LedgerStore(':memory:', { now })`, a context whose `principal` getter returns a mutable principal:
   - AC1 `ledger_status before setup is setup_required with an action`.
   - AC2 `add_source then ledger_status lists the source`; `update_settings with another base_currency is conflict`.
   - AC4 `same idempotency_key on update_source is applied once`; `stale expected_revision is conflict`.
-  - `validation stays inside the envelope`: each of `{ action: 'add_source', provider: 'x', … }`, `provider: 5`, `label: null` on add, `expected_revision: 0`, `{}` (no action), `action: 'nope'`, `owner_timezone: 'Mars/Base'`, `owner_timezone: '+07:00'`, `base_currency: 'ABC'`, `source_id: 'a/b'`, `idempotency_key` on `list_sources`, `base_currency` on `update_source`, `idempotency_key` on `ledger_status`, Review Focus 3 `review_from: null` and `base_currency: null` on add, and an `idempotency_key` of 201 chars → `isError` and `structuredContent.error.code === 'invalid_argument'`.
+  - `validation stays inside the envelope`: each of `{ action: 'add_source', provider: 'x', … }`, `provider: 5`, `label: null` on add, `expected_revision: 0`, `{}` (no action), `action: 'nope'`, `owner_timezone: 'Mars/Base'`, `owner_timezone: '+07:00'`, `base_currency: 'ABC'`, `source_id: 'a/b'`, `idempotency_key` on `list_sources`, `idempotency_key` on `list_sources` before setup (→ `invalid_argument`, not `setup_required`: argument checks run first), `base_currency` on `update_source`, Review Focus 3 `review_from: null` and `base_currency: null` on add, and an `idempotency_key` of 201 chars → `isError` and `structuredContent.error.code === 'invalid_argument'`.
   - Review Focus 2 (tool level, where the hash is computed): `add_source` without `review_from` at `2026-05-31T16:59:00Z` with key `k` and `owner_timezone: 'Asia/Bangkok'`, replayed at `17:01Z` → identical answer, not `conflict`.
   - `accepts thb as THB`; `label: null on update_source clears it`; Review Focus 4 `label with quotes and emoji round-trips`.
   - Timezone cases of design § Tests (inherit, own, reset, `owner_timezone` conflict, default `review_from` in the source's effective timezone).
@@ -236,7 +236,7 @@
 - Create: `packages/bank-mcp/docs/guide/tools/ledger_status.md`, `packages/bank-mcp/docs/guide/tools/manage_accounts.md`
 - Modify: `packages/bank-mcp/src/resources.ts` (`TOOL_GUIDES`, doc comment), `packages/bank-mcp/docs/guide/overview.md`, `packages/bank-mcp/src/register-tools.test.ts` (resource counts: `server.resources.size` 6 → 8 at line 466 with the overview, the guide URIs 5 → 7 at line 474), `packages/server/src/composition.test.ts` (thirteen resources incl. both guide URIs)
 
-- [ ] **Step 1: Extend the resource test** to expect `line://guide/tools/ledger_status` and `line://guide/tools/manage_accounts`, and that each reads without "Guide file not found". `FakeServer.registerResource` (line 28) currently drops the reader: extend it to keep the reader per URI (an extension; no existing assertion changes) and call it in the new test.
+- [ ] **Step 1: Extend the resource test** (and `BANK_TOOLS` in `tests/support/smoke-helpers.ts` with both tool names, so the smoke suite's exact surface check is green from this task on) to expect `line://guide/tools/ledger_status` and `line://guide/tools/manage_accounts`, and that each reads without "Guide file not found". `FakeServer.registerResource` (line 28) currently drops the reader: extend it to keep the reader per URI (an extension; no existing assertion changes) and call it in the new test.
 - [ ] **Step 2: Run and see it fail.** Run: `pnpm exec vitest run packages/bank-mcp/src/register-tools.test.ts`
 - [ ] **Step 3: Write the guides** — when to use, each action with required/optional fields, write keys and their semantics (24 h, per owner), every error code with its typical cause, setup flow (first `add_source` with `base_currency` + `owner_timezone`; base currency can never change), `review_from` default and on-boarding override, timezone inheritance, wrong-JSON-type arguments answered as `invalid_argument`. Add both to `TOOL_GUIDES` and the bank overview.
 - [ ] **Step 4: Run and see it pass.** Run: `pnpm exec vitest run packages/bank-mcp/src/register-tools.test.ts && pnpm run build && pnpm exec vitest run packages/server/src/composition.test.ts`
@@ -283,7 +283,7 @@
 
 - [ ] **Step 1: Write the test** modelled on `trusted-tenant.test.ts` (`buildComposedFixture`, `seedTestToken('token-alice', { …, mid: 'u-alice' })` and `token-bob`/`u-bob`, HTTP clients):
   - `beforeAll`: Alice `add_source` `c-alice-chat` (THB, Asia/Bangkok); Bob `add_source` `c-bob-chat` (USD, UTC).
-  - `another owner's source is not_found and never listed` (AC3): Bob `get_source` / `update_source` (`label: 'x'`) on `c-alice-chat` → `not_found`; Alice `get_source` shows `revision: 1`, no label; Bob `list_sources` and `ledger_status` have exactly `['c-bob-chat']`.
+  - `another owner's source is not_found and never listed` (AC3): Bob `get_source` / `update_source` (`label: 'x'`) on `c-alice-chat` → `not_found`; Alice `get_source` shows `revision: 1`, no label; Bob `list_sources` and `ledger_status` are non-empty, contain `c-bob-chat` and do not contain `c-alice-chat` (no exact list, so the result does not depend on test order).
   - `both owners can register the same chat`: both add `c-shared` with labels `A`/`B`; each `get_source` shows own label.
   - `idempotency keys are per owner`: Alice `update_source` with key `same-key`; Bob `update_source` on his own source with `same-key` and other arguments → applied (not `conflict`).
 - [ ] **Step 2: Run it.** Run: `pnpm run build && pnpm exec vitest run packages/server/src/ledger-isolation.test.ts` — Expected: PASS (behaviour from Tasks 3–9). If it fails, fix the store, not the test.
@@ -294,7 +294,7 @@
 **Files:**
 - Modify: `packages/server/src/registrations.ts` and `packages/server/src/data-layout.ts` (comments: twelve tools, thirteen resources), `tests/support/smoke-helpers.ts`, `tests/docker/docker-smoke.test.ts`, `tests/e2e.test.ts`
 
-- [ ] **Step 1: Extend the lists**: `BANK_TOOLS` gains both names. Docker smoke composed list gains both. e2e resource list gains both guide URIs. In `runComposedBankAssertions`, before the template steps: `ledger_status` → `isError` and `structuredContent.error.code === 'setup_required'`; `manage_accounts` `add_source` for `MOCK_GROUP_MID` (`base_currency: 'THB'`, `owner_timezone: 'UTC'`) → no `isError`; `ledger_status` → `structuredContent.sources[0].source_id === MOCK_GROUP_MID`.
+- [ ] **Step 1: Extend the lists** (`BANK_TOOLS` was done in Task 7): Docker smoke composed list gains both. e2e resource list gains both guide URIs. In `runComposedBankAssertions`, before the template steps: `ledger_status` → `isError` and `structuredContent.error.code === 'setup_required'`; `manage_accounts` `add_source` for `MOCK_GROUP_MID` (`base_currency: 'THB'`, `owner_timezone: 'UTC'`) → no `isError`; `ledger_status` → `structuredContent.sources[0].source_id === MOCK_GROUP_MID`.
 - [ ] **Step 2: Run.** Run: `pnpm run build && pnpm run test:smoke` — Expected: PASS (mock LINE request counts unchanged: the ledger tools make no LINE call).
 - [ ] **Step 3: Commit** — `test(server): extend the composed tool surface to twelve tools`.
 
@@ -303,7 +303,7 @@
 **Files:**
 - Modify: `docs/ARCHITECTURE.md`, `README.md`, `AGENTS.md`, `packages/server/docs/guide/overview.md`, `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml` (comments only), `openspec/changes/ledger-status-and-sources/handoff.md`
 
-- [ ] **Step 1: Update docs** per tasks.md 5.1: ARCHITECTURE package row (seven bank tools, ledger), a `ledger/` paragraph (schema steps in `ledger_schema_steps`, owner-scoped `LedgerStore`, envelope helper, import boundary), `bank.db` tables, server start/stop order, resources table (both guides), test sections ("twelve tools", `ledger-isolation.test.ts`); README tool table, "five bank/transaction tools" (line 7), "the five transaction tools" (line 20) and the four "ten tools"; ARCHITECTURE Images line 148 and smoke line 173 ("ten tools"); ARCHITECTURE "five bank guides" (lines 70, 85); AGENTS "ten tools" → "twelve tools"; composed overview twelve-tool map; the comments `Dockerfile:6` ("ten tools, eleven resources" → twelve, thirteen), `Dockerfile:89`, `docker-compose.yml:1` and `.github/workflows/ci.yml:171`. Touching `Dockerfile`/`docker-compose.yml` makes `verify:all` the required gate (AGENTS.md). Finish with `grep -rn "ten tools\|ten-tool\|five bank\|five transaction" README.md AGENTS.md docs Dockerfile docker-compose.yml .github packages/*/docs packages/*/src` — Expected: no stale hit.
+- [ ] **Step 1: Update docs** per tasks.md 5.1: ARCHITECTURE package row (seven bank tools, ledger), a `ledger/` paragraph (schema steps in `ledger_schema_steps`, owner-scoped `LedgerStore`, envelope helper, import boundary), `bank.db` tables, server start/stop order, resources table (both guides), test sections ("twelve tools", `ledger-isolation.test.ts`); README tool table, "five bank/transaction tools" (line 7), "the five transaction tools" (line 20) and the four "ten tools"; ARCHITECTURE Images line 148 and smoke line 173 ("ten tools"); ARCHITECTURE "five bank guides" (lines 70, 85); AGENTS "ten tools" → "twelve tools"; composed overview twelve-tool map; the comments `Dockerfile:6` ("ten tools, eleven resources" → twelve, thirteen), `Dockerfile:89`, `docker-compose.yml:1` and `.github/workflows/ci.yml:171`; `composition.test.ts:103` test title "(ten-tool) overview" is already done in Task 6. Touching `Dockerfile`/`docker-compose.yml` makes `verify:all` the required gate (AGENTS.md). Finish with `grep -rn "ten tools\|ten-tool\|five bank\|five transaction" README.md AGENTS.md docs/ARCHITECTURE.md Dockerfile docker-compose.yml .github packages/*/docs packages/*/src` — Expected: no stale hit (`docs/superpowers/` is a frozen archive: never searched, never edited).
 - [ ] **Step 2: Run the gate.** Run: `pnpm run verify:all` — Expected: PASS. It always rebuilds both images, so the twelve-tool Docker assertion runs against the new code (a bare `vitest run tests/docker/docker-smoke.test.ts` reuses an existing `:test` image). It fails without a Docker daemon: then run `pnpm run verify`, record that the Docker rung did not run, and say so in the PR.
 - [ ] **Step 3: Record** results, change size (`git diff --stat origin/main...HEAD -- . ':!pnpm-lock.yaml' ':!openspec'`) against the task's ~850 lines / ~14 files, and remaining steps in `handoff.md`.
 - [ ] **Step 4: Commit** — `docs: describe the ledger and the twelve-tool composed server`.

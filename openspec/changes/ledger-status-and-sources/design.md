@@ -114,11 +114,11 @@ Alternatives (see `brainstorm.md`): sharing `CategoryStore`'s connection
   so.
 - **Fields an action does not use are `invalid_argument`**: write keys on a
   read action (`get_source`, `list_sources`, `get_settings`), or
-  `base_currency` on `update_source`. `ledger_status` declares
-  `idempotency_key` and `expected_revision` as `z.unknown().optional()` only so
-  that it can refuse them; with no declared field the SDK would drop them
-  before the handler. Keys no schema declares are stripped by the SDK and
-  cannot be seen; they are ignored.
+  `base_currency` on `update_source`. Argument checks run before state checks,
+  so a bad argument is `invalid_argument` even before setup. `ledger_status`
+  declares no input fields: it is a read tool and its `tools/list` schema must
+  not advertise write keys. Keys no schema declares are stripped by the SDK
+  and ignored.
 
 ### Data model (schema step 1)
 
@@ -128,7 +128,7 @@ All in `bank/bank.db`, every row keyed by `owner` (= principal subject).
 |---|---|
 | `ledger_schema_steps` | `step INTEGER PRIMARY KEY`, `applied_at INTEGER` — owned by the step runner, created if absent before any step; step 1 creates the three tables below |
 | `ledger_owners` | `owner TEXT PRIMARY KEY`, `base_currency TEXT NOT NULL`, `timezone TEXT NOT NULL`, `revision INTEGER NOT NULL`, `created_at`, `updated_at` |
-| `ledger_sources` | `id INTEGER PRIMARY KEY`, `owner`, `provider`, `native_id`, `source_id`, `label TEXT NULL`, `timezone TEXT NULL` (`NULL` = the owner's), `review_from TEXT` (`YYYY-MM-DD`), `last_caught_up_at INTEGER NULL`, `last_error TEXT NULL`, `revision`, `created_at`, `updated_at`; `UNIQUE(owner, provider, source_id)` |
+| `ledger_sources` | `id INTEGER PRIMARY KEY`, `owner`, `provider`, `native_id`, `source_id`, `label TEXT NULL`, `timezone TEXT NULL` (`NULL` = the owner's), `review_from TEXT` (`YYYY-MM-DD`), `last_caught_up_at INTEGER NULL`, `last_error TEXT NULL` (JSON `{ code, message, at }`, the shape #135 needs), `revision`, `created_at`, `updated_at`; `UNIQUE(owner, provider, source_id)` |
 | `ledger_idempotency` | `owner`, `tool`, `key`, `request_hash`, `response TEXT`, `created_at`; `PRIMARY KEY(owner, tool, key)` |
 
 Times are epoch milliseconds. `provider`, `native_id` and `source_id` are
@@ -201,7 +201,10 @@ Rules:
   - timezone: an IANA name — accepted by `Intl.DateTimeFormat`, stored as its
     `resolvedOptions().timeZone` (`asia/bangkok` → `Asia/Bangkok`), and that
     canonical name must be `UTC` or in `Intl.supportedValuesOf('timeZone')`;
-    fixed offsets such as `+07:00` are refused;
+    fixed offsets such as `+07:00` are refused. The stored name is the
+    runtime's canonical one (it may be a link name such as `Asia/Calcutta`),
+    so every comparison normalises both sides first; an ICU upgrade never
+    turns an equal zone into a `conflict`;
   - `review_from`: a real calendar date `YYYY-MM-DD`;
   - `source_id` for `line`: matches `^[a-zA-Z0-9_-]{1,100}$`, the same rule
     `TemplateStore` enforces on chat MIDs (`template-store.ts`, `SAFE_MID_RE`),
@@ -237,7 +240,7 @@ calendar day.
 
 ### `ledger_status`
 
-No input (the write keys are declared only so they can be refused). Result:
+No input. Result:
 `{ settings: { base_currency, timezone, revision }, sources: [{ provider, source_id, native_id, label, timezone, own_timezone, review_from, last_caught_up_at, last_error, revision, created_at, updated_at }] }`;
 the same source shape is used in every `manage_accounts` result,
 sources ordered by `id` (insertion order). `last_caught_up_at` and `last_error` are `null`

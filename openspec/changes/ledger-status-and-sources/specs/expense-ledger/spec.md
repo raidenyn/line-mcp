@@ -30,8 +30,8 @@ The ledger tools SHALL check every argument rule — JSON type, allowed values, 
 - **THEN** the answer is a structured `invalid_argument`
 
 #### Scenario: Field the action does not use
-- **WHEN** a read action (`get_source`, `list_sources`, `get_settings`, or `ledger_status`) receives `idempotency_key` or `expected_revision`
-- **THEN** the answer is a structured `invalid_argument`
+- **WHEN** a read action (`get_source`, `list_sources`, `get_settings`) receives `idempotency_key` or `expected_revision`, also before setup
+- **THEN** the answer is a structured `invalid_argument` (argument checks run before `setup_required`)
 
 #### Scenario: Types stay advertised
 - **WHEN** a client lists tools
@@ -71,7 +71,7 @@ Before an owner has a source, `ledger_status` and every `manage_accounts` action
 - **THEN** the answer is `conflict` and nothing changes
 
 ### Requirement: Source attributes
-A source SHALL have an optional label, an optional own IANA timezone (when absent it follows the owner's timezone, also after that changes), a `review_from` date, `last_caught_up_at` and `last_error` (both `null` until ingest exists), and an integer `revision` that starts at 1 and rises by 1 on each change.
+A source SHALL have an optional label, an optional own IANA timezone (when absent it follows the owner's timezone, also after that changes), a `review_from` date, `last_caught_up_at` and `last_error` (`{ code, message, at }`; both `null` until ingest exists), and an integer `revision` that starts at 1 and rises by 1 on each change.
 
 #### Scenario: Inherited timezone
 - **WHEN** a source was added without its own timezone and the owner later changes their timezone with `update_settings`
@@ -121,6 +121,10 @@ The owner timezone SHALL be an IANA name, stored in its canonical form; fixed of
 #### Scenario: Canonical name
 - **WHEN** the first `add_source` passes `owner_timezone: asia/bangkok`
 - **THEN** the settings' timezone is `Asia/Bangkok`
+
+#### Scenario: Equal zones under different names
+- **WHEN** the owner timezone was stored from `Asia/Kolkata` and a later `add_source` passes `owner_timezone: Asia/Calcutta`
+- **THEN** the source is added (no `conflict`)
 
 #### Scenario: Owner timezone changed through add_source
 - **WHEN** an owner with timezone `Asia/Bangkok` adds a source with `owner_timezone: Europe/Berlin`
