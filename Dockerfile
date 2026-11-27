@@ -3,7 +3,7 @@
 # Workspace-aware multi-stage build for the modular LINE MCP monorepo.
 #
 # Two runtime targets:
-#   * server   — the fully composed server (ten tools, eleven resources).
+#   * server   — the fully composed server (twelve tools, thirteen resources).
 #                `docker build --target server .`   (Compose default)
 #   * line-mcp — the standalone messenger-only server (five tools).
 #                `docker build --target line-mcp .`
@@ -86,7 +86,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
 
 USER node
 
-# ─── Target: composed server (ten tools) ─────────────────────────────────────
+# ─── Target: composed server (twelve tools) ──────────────────────────────────
 # Depends on all six packages, so the whole pruned packages/ tree is copied.
 FROM runtime-base AS server
 COPY --from=builder /app/packages ./packages
