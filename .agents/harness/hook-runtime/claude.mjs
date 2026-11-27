@@ -8,7 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { capabilityNotice, HOST_CAPABILITIES } from './lib/capabilities.mjs';
 import { CLAUDE_EVENTS, HOST, toEvent, toOutput } from './lib/claude-adapter.mjs';
-import { createRuntime, failureNotice, loadHandlers, OUTPUT_MS, writeTrace } from './lib/runtime.mjs';
+import { anyHandlerWants, createRuntime, failureNotice, loadHandlers, OUTPUT_MS, writeTrace } from './lib/runtime.mjs';
 
 const HOST_MARGIN_MS = 7000; // work deadline = host deadline - 7 s (cleanup 6 s + output 1 s)
 const GIT_TIMEOUT_MS = 2000;
@@ -235,6 +235,25 @@ export async function main({
         now: startClock,
         resolved: true,
       });
+    }
+    if (
+      (type === 'tool.before' || type === 'tool.after') &&
+      !anyHandlerWants(repoRoot, mapped.event.tool?.kind ?? 'other')
+    ) {
+      // No installed handler wants this kind: return before loading any handler (design D2).
+      writeTrace(
+        repoRoot,
+        {
+          event: type,
+          processStart: performance.timeOrigin,
+          receivedAt: start,
+          settledAt: now(),
+          skipped: 'no-subscriber',
+          outcomes: {},
+        },
+        env,
+      );
+      return empty;
     }
     const { handlers, problems } = await loadHandlers(repoRoot);
     const handlersLoadedAt = now();

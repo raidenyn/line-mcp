@@ -58,7 +58,8 @@ function repoRelative(path, repoRoot) {
 }
 
 // Tool hook input to a normalized tool event. `patch` files come from the result's metadata,
-// `edit` and `write` files from input.filePath.
+// `edit` and `write` files from input.path (OpenCode 2.4.1's native tools, relative to the session
+// directory) or input.filePath.
 export function toToolEvent(type, input, repoRoot) {
   const name = String(input?.tool ?? '');
   const toolInput = isObject(input?.input) ? input.input : {};
@@ -68,7 +69,11 @@ export function toToolEvent(type, input, repoRoot) {
   if (kind === 'edit') {
     const meta = input?.result?.metadata;
     const paths =
-      name === 'patch' ? (Array.isArray(meta?.files) ? meta.files.map((f) => f?.file) : []) : [toolInput.filePath];
+      name === 'patch'
+        ? Array.isArray(meta?.files)
+          ? meta.files.map((f) => f?.file)
+          : []
+        : [toolInput.path ?? toolInput.filePath];
     event.files = [...new Set(paths.map((p) => repoRelative(p, repoRoot)).filter((p) => p !== null))];
   }
   return event;

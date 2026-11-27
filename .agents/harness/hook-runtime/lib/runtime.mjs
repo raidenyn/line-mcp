@@ -22,6 +22,7 @@ export const OUTPUT_MS = 1000;
 export const LOAD_BUDGET_MS = 2000;
 
 const KINDS = ['deny', 'block', 'context'];
+const TOOL_KINDS = ['shell', 'edit', 'read', 'other'];
 const JOIN = '\n\n';
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 const errText = (err) => (err instanceof Error ? err.message : String(err));
@@ -31,7 +32,8 @@ const positive = (v) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? 
 
 // With AGENT_HARNESS_TRACE=1, one JSON line per dispatched event in
 // <hook-runtime state>/trace.jsonl (design D7): {event, processStart, hostCreatedAt?, receivedAt,
-// handlersLoadedAt, settledAt, outcomes}. Never throws.
+// handlersLoadedAt, settledAt, outcomes}. A skipped call has skipped? instead of handlersLoadedAt.
+// Never throws.
 export function writeTrace(repoRoot, record, env = process.env) {
   if (env.AGENT_HARNESS_TRACE !== '1') return;
   try {
@@ -97,6 +99,44 @@ function callQuietly(fn) {
 }
 
 const toolOf = (h) => h.tool ?? h.name;
+
+// The tool kinds a handler tool declared in its tool.json `tools` key, or null for every kind.
+// Anything malformed (missing, not an array, empty, an unknown kind) means every kind.
+export function declaredKinds(meta) {
+  if (!isObject(meta)) return null;
+  const tools = meta.tools;
+  if (!Array.isArray(tools) || tools.length === 0) return null;
+  const kinds = [];
+  for (const kind of tools) {
+    if (!TOOL_KINDS.includes(kind)) return null;
+    kinds.push(kind);
+  }
+  return kinds;
+}
+
+// Whether any installed handler tool could want a tool call of this kind (design D2). A missing or
+// unreadable lock, tool.json or `tools` list means every kind, so the caller loads handlers instead
+// of skipping. Returns false only when every handler tool provably excludes the kind.
+export function anyHandlerWants(repoRoot, kind) {
+  let lock;
+  try {
+    lock = readLock(repoRoot);
+  } catch {
+    return true;
+  }
+  for (const name of Object.keys(lock.tools)) {
+    let meta;
+    try {
+      meta = JSON.parse(readFileSync(join(repoRoot, '.agents', 'harness', name, 'tool.json'), 'utf8'));
+    } catch {
+      return true;
+    }
+    if (!isObject(meta) || meta.handler !== true) continue;
+    const kinds = declaredKinds(meta);
+    if (!kinds || kinds.includes(kind)) return true;
+  }
+  return false;
+}
 
 export function createRuntime({ repoRoot, host, handlers = [], problems = [], now = Date.now, budgetMs } = {}) {
   const sorted = [...handlers].sort(byName);
@@ -244,6 +284,12 @@ export function createRuntime({ repoRoot, host, handlers = [], problems = [], no
     let spent = false; // a timer can fire a little before Date.now() reaches its moment
 
     for (const handler of sorted.filter((h) => Array.isArray(h.events) && h.events.includes(type))) {
+      // Only tool events read `tools` at all, so an unrelated dispatch never touches the key.
+      if (type === 'tool.before' || type === 'tool.after') {
+        // Validate on every tool dispatch so an in-process `tools: []` or an unknown kind means every kind.
+        const kinds = declaredKinds(handler);
+        if (kinds && !kinds.includes(event.tool?.kind ?? 'other')) continue;
+      }
       if (configError || spent || now() >= workDeadline) {
         const reason = configError ?? "skipped, the event's time budget was used up";
         notices.push(failureNotice(handler.name, type, reason, handler.manual));
@@ -325,7 +371,11 @@ export async function loadHandlers(repoRoot, { loadBudgetMs = LOAD_BUDGET_MS } =
         const issues = checkTool({ toolDir, repoRoot });
         if (issues.length) return { problem: notLoaded(name, `its copy differs from the lock: ${issues.join('; ')}`) };
         try {
-          return { handler: await startWorker(toolDir, { loadBudgetMs, tool: name }) };
+          const handler = await startWorker(toolDir, { loadBudgetMs, tool: name });
+          // tool.json is the only source of `tools`; a `tools` export in handler.mjs is ignored.
+          const kinds = declaredKinds(meta);
+          if (kinds) handler.tools = kinds;
+          return { handler };
         } catch (err) {
           return { problem: notLoaded(name, errText(err)) };
         }
