@@ -1,40 +1,27 @@
-import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-// Plain ESM without declarations: the hook is a script, not part of the
+// Plain ESM without declarations: the edit lint is a script, not part of the
 // TypeScript build.
-import { formatErrors, lintTarget, MAX_LINES } from '../../.claude/hooks/lint-on-edit.mjs';
+import { formatErrors, lintEditedFile, lintFile, lintTarget, MAX_LINES } from '../../scripts/lint-file.mjs';
 
 const ROOT = resolve('.');
-const HOOK = '.claude/hooks/lint-on-edit.mjs';
 
-function runHook(payload: unknown) {
-  return spawnSync('node', [HOOK], { input: JSON.stringify(payload), encoding: 'utf8', timeout: 60_000 });
-}
-
-describe('lint-on-edit target selection', () => {
+describe('edit lint target selection', () => {
   it('accepts TypeScript files inside the repository, absolute or relative', () => {
-    expect(lintTarget({ tool_input: { file_path: join(ROOT, 'packages/server/src/cli.ts') } }, ROOT)).toBe(
-      'packages/server/src/cli.ts',
-    );
-    expect(lintTarget({ cwd: ROOT, tool_input: { file_path: 'scripts/x.mts' } }, ROOT)).toBe('scripts/x.mts');
-    // OpenCode's edit tools name the file `path`.
-    expect(lintTarget({ cwd: ROOT, tool_input: { path: 'tests/a.test.ts' } }, ROOT)).toBe('tests/a.test.ts');
+    expect(lintTarget(join(ROOT, 'packages/server/src/cli.ts'), ROOT)).toBe('packages/server/src/cli.ts');
+    expect(lintTarget('scripts/x.mts', ROOT)).toBe('scripts/x.mts');
+    expect(lintTarget('tests/a.test.ts', ROOT, ROOT)).toBe('tests/a.test.ts');
   });
 
   it('resolves a checkout reached through a symlink', () => {
     const link = join(mkdtempSync(join(tmpdir(), 'lint-hook-')), 'repo');
     try {
       symlinkSync(ROOT, link);
-      expect(lintTarget({ tool_input: { file_path: join(link, 'packages/server/src/cli.ts') } }, link)).toBe(
-        'packages/server/src/cli.ts',
-      );
-      // The script's root is the real path; the payload may use the link.
-      expect(lintTarget({ cwd: link, tool_input: { file_path: 'packages/new-file.ts' } }, ROOT)).toBe(
-        'packages/new-file.ts',
-      );
+      expect(lintTarget(join(link, 'packages/server/src/cli.ts'), link)).toBe('packages/server/src/cli.ts');
+      // The script's root is the real path; the caller may use the link.
+      expect(lintTarget('packages/new-file.ts', ROOT, link)).toBe('packages/new-file.ts');
     } finally {
       rmSync(resolve(link, '..'), { recursive: true, force: true });
     }
@@ -50,14 +37,14 @@ describe('lint-on-edit target selection', () => {
       '../outside.ts',
       '/etc/x.ts',
     ]) {
-      expect(lintTarget({ cwd: ROOT, tool_input: { file_path: file } }, ROOT), file).toBeNull();
+      expect(lintTarget(file, ROOT), file).toBeNull();
     }
-    expect(lintTarget({ tool_input: {} }, ROOT)).toBeNull();
-    expect(lintTarget(null, ROOT)).toBeNull();
+    expect(lintTarget(undefined, ROOT)).toBeNull();
+    expect(lintTarget('', ROOT)).toBeNull();
   });
 });
 
-describe('lint-on-edit formatting', () => {
+describe('edit lint formatting', () => {
   const message = (line: number) => ({ line, column: 7, severity: 2, message: `bad ${line}`, ruleId: 'no-x' });
 
   it('reports errors only, one compact line each', () => {
@@ -81,7 +68,7 @@ describe('lint-on-edit formatting', () => {
   });
 });
 
-describe('lint-on-edit hook script', () => {
+describe('edit lint of one file', () => {
   let dir: string | undefined;
 
   afterEach(() => {
@@ -89,49 +76,49 @@ describe('lint-on-edit hook script', () => {
     dir = undefined;
   });
 
-  it('exits 0 silently for payloads it does not own', () => {
-    for (const input of ['{}', 'not json', JSON.stringify({ tool_input: { file_path: 'README.md' } })]) {
-      const result = spawnSync('node', [HOOK], { input, encoding: 'utf8' });
-      expect(result.status).toBe(0);
-      expect(result.stderr).toBe('');
+  // A fixture inside the repository so the repository ESLint config applies.
+  function fixture(name: string, text: string) {
+    dir = mkdtempSync(join(ROOT, 'tests/harness/.fixture-'));
+    const file = join(dir, name);
+    writeFileSync(file, text);
+    return file;
+  }
+
+  it('passes silently for files it does not own', () => {
+    for (const file of [undefined, '', 'README.md', 'tests/harness/.fixture-missing/x.ts']) {
+      expect(lintEditedFile(file, ROOT), String(file)).toEqual({ code: 0, output: '' });
     }
   });
 
-  it('fixes what it can and exits 2 with the remaining errors on stderr', () => {
-    // A fixture inside the repository so the repository ESLint config applies.
-    dir = mkdtempSync(join(ROOT, 'tests/harness/.fixture-'));
-    const file = join(dir, 'fixture.ts');
-    writeFileSync(file, 'let fixable = 1;\nexport const used = fixable;\nconst unused = 2;\n');
-
-    const result = runHook({ cwd: ROOT, tool_input: { file_path: file } });
-
-    expect(result.status).toBe(2);
-    expect(result.stderr).toMatch(/fixture\.ts:3:7 .*unused.*\(@typescript-eslint\/no-unused-vars\)/);
-    expect(result.stderr.trim().split('\n').length).toBeLessThanOrEqual(MAX_LINES);
+  it('fixes what it can and fails with the remaining errors and the rewrite note', () => {
+    const file = fixture('fixture.ts', 'let fixable = 1;\nexport const used = fixable;\nconst unused = 2;\n');
+    const result = lintEditedFile(file, ROOT);
+    expect(result.code).toBe(1);
+    expect(result.output).toMatch(/fixture\.ts:3:7 .*unused.*\(@typescript-eslint\/no-unused-vars\)/);
+    expect(result.output.trim().split('\n').length).toBeLessThanOrEqual(MAX_LINES);
     // `prefer-const` is auto-fixable, so --fix rewrote the file and says so.
     expect(readFileSync(file, 'utf8')).toContain('const fixable = 1;');
-    expect(result.stderr).toMatch(/ESLint --fix rewrote .*fixture\.ts; re-read it/);
+    expect(result.output).toMatch(/ESLint --fix rewrote .*fixture\.ts; re-read it/);
   });
 
-  it('exits 0 and reports a --fix rewrite as PostToolUse additionalContext', () => {
-    dir = mkdtempSync(join(ROOT, 'tests/harness/.fixture-'));
-    const file = join(dir, 'fixable.ts');
-    writeFileSync(file, 'let fixable = 1;\nexport const used = fixable;\n');
-    const result = runHook({ cwd: ROOT, tool_input: { file_path: file } });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
-    const output = JSON.parse(result.stdout);
-    expect(output.hookSpecificOutput.hookEventName).toBe('PostToolUse');
-    expect(output.hookSpecificOutput.additionalContext).toMatch(/ESLint --fix rewrote .*fixable\.ts/);
+  it('passes with only the rewrite note when --fix cleans the file', () => {
+    const file = fixture('fixable.ts', 'let fixable = 1;\nexport const used = fixable;\n');
+    const result = lintEditedFile(file, ROOT);
+    expect(result.code).toBe(0);
+    expect(result.output).toMatch(/^ESLint --fix rewrote .*fixable\.ts; re-read it before editing it again\.\n$/);
   });
 
-  it('exits 0 for a clean file', () => {
-    dir = mkdtempSync(join(ROOT, 'tests/harness/.fixture-'));
-    const file = join(dir, 'clean.ts');
-    writeFileSync(file, 'export const clean = 1;\n');
-    const result = runHook({ cwd: ROOT, tool_input: { file_path: file } });
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe('');
-    expect(result.stdout).toBe('');
+  it('passes silently for a clean file', () => {
+    const file = fixture('clean.ts', 'export const clean = 1;\n');
+    expect(lintEditedFile(file, ROOT)).toEqual({ code: 0, output: '' });
+  });
+
+  it('does not judge an edit when ESLint itself fails or is killed', () => {
+    const file = fixture('crash.ts', 'export const crash = 1;\n');
+    const rel = file.slice(ROOT.length + 1);
+    for (const outcome of [{ status: 2 }, { status: null, signal: 'SIGTERM' }]) {
+      const spawn = (() => ({ stdout: '', stderr: 'boom', ...outcome })) as unknown as Parameters<typeof lintFile>[2];
+      expect(lintFile(rel, ROOT, spawn)).toEqual({ errors: [], fixed: false });
+    }
   });
 });

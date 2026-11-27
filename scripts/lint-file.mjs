@@ -1,21 +1,20 @@
-/* global process, URL -- Node globals are not declared for this script */
-// Edit-time diagnostics. Claude Code runs this after Edit/Write/MultiEdit
-// (PostToolUse) and the OpenCode plugin in .opencode/plugin/ runs it after its
-// edit tools, with the same JSON payload on stdin:
-//   { "cwd": "...", "tool_input": { "file_path": "..." } }
-// For a TypeScript file inside the repository it runs `eslint --fix` on that
-// one file. Errors that remain are printed on stderr (at most MAX_LINES) and
-// the script exits 2, which both hosts feed back to the agent. When --fix
-// changed the file, a one-line note says so (on exit 0 as PostToolUse JSON
-// `additionalContext` on stdout). Everything else
-// (other files, a missing or crashing ESLint, a timeout) exits 0 silently, so
-// the hook never blocks work it cannot judge.
+/* global URL -- Node globals are not declared for this script */
+// The edit trigger of scripts/verify-changed.mjs. The agent harness verify gate
+// (.agents/harness/verify-gate/) runs that script after every edit of a file in
+// its `editFiles` with VERIFY_TRIGGER=edit and VERIFY_FILE, on Claude Code and
+// OpenCode alike. For a TypeScript file inside the repository it runs
+// `eslint --fix` on that one file. Errors that remain are returned (at most
+// MAX_LINES) with exit code 1, which the gate appends to the tool result. When
+// --fix changed the file, a one-line note says so; on a clean run it is the
+// only output and exit 0, which the gate hands to the model as pass output.
+// Everything else (other files, a missing or crashing ESLint, a timeout)
+// passes silently, so the edit run never fails work it cannot judge.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
-export const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+export const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 export const MAX_LINES = 20;
 const TIMEOUT_MS = 20_000;
 const LINTABLE = /\.(?:c|m)?ts$/;
@@ -43,19 +42,17 @@ function canonical(path) {
 }
 
 /**
- * Return the repository-relative path to lint, or null when the payload does
- * not name a TypeScript file this hook owns.
+ * Return the repository-relative path to lint, or null when `file` is not a
+ * TypeScript file the edit run owns.
  *
- * @param {unknown} payload hook JSON
+ * @param {string | undefined} file path, absolute or relative to `cwd`
  * @param {string} [root] repository root
+ * @param {string} [cwd] directory a relative `file` is resolved from
  * @returns {string | null}
  */
-export function lintTarget(payload, root = REPO_ROOT) {
-  const input = /** @type {any} */ (payload)?.tool_input;
-  const file = input?.file_path ?? input?.filePath ?? input?.path;
+export function lintTarget(file, root = REPO_ROOT, cwd = root) {
   if (typeof file !== 'string' || file.length === 0 || !LINTABLE.test(file)) return null;
-  const cwd = /** @type {any} */ (payload)?.cwd;
-  const absolute = canonical(resolve(typeof cwd === 'string' && cwd ? cwd : root, file));
+  const absolute = canonical(resolve(cwd, file));
   const rel = relative(canonical(root), absolute);
   if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
   const posix = rel.split(sep).join('/');
@@ -101,10 +98,11 @@ export function formatErrors(json, file, maxLines = MAX_LINES) {
 /**
  * @param {string} file repository-relative path
  * @param {string} [root]
+ * @param {typeof spawnSync} [spawn] injectable for the ESLint-crash tests
  * @returns {{ errors: string[], fixed: boolean }} remaining errors (empty when
  *   clean or when ESLint could not judge) and whether --fix rewrote the file
  */
-export function lintFile(file, root = REPO_ROOT) {
+export function lintFile(file, root = REPO_ROOT, spawn = spawnSync) {
   const path = resolve(root, file);
   if (!existsSync(path)) return { errors: [], fixed: false };
   const before = readFileSync(path, 'utf8');
@@ -112,7 +110,7 @@ export function lintFile(file, root = REPO_ROOT) {
   // itself rather than a pnpm parent that leaves it holding the pipe.
   const local = resolve(root, 'node_modules/.bin/eslint');
   const [command, prefix] = existsSync(local) ? [local, []] : ['pnpm', ['exec', 'eslint']];
-  const result = spawnSync(command, [...prefix, '--fix', '--format', 'json', '--', file], {
+  const result = spawn(command, [...prefix, '--fix', '--format', 'json', '--', file], {
     cwd: root,
     encoding: 'utf8',
     timeout: TIMEOUT_MS,
@@ -131,15 +129,6 @@ export function lintFile(file, root = REPO_ROOT) {
 }
 
 /**
- * PostToolUse JSON output that hands `fixedNote` to the agent on exit 0.
- *
- * @param {string} file
- */
-export function fixedOutput(file) {
-  return { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: fixedNote(file) } };
-}
-
-/**
  * The note shown when --fix changed the file, so the agent re-reads it
  * before its next exact-match edit.
  *
@@ -150,33 +139,20 @@ export function fixedNote(file) {
   return `ESLint --fix rewrote ${file}; re-read it before editing it again.`;
 }
 
-function main() {
-  let payload;
-  try {
-    payload = JSON.parse(readFileSync(0, 'utf8'));
-  } catch {
-    return 0;
-  }
-  const file = lintTarget(payload);
-  if (!file) return 0;
-  const { errors, fixed } = lintFile(file);
-  if (errors.length === 0) {
-    // Claude Code passes `additionalContext` to the model; the OpenCode plugin
-    // reads the same JSON.
-    if (fixed) process.stdout.write(`${JSON.stringify(fixedOutput(file))}\n`);
-    return 0;
-  }
-  const lines = fixed ? [...errors.slice(0, MAX_LINES - 1), fixedNote(file)] : errors;
-  process.stderr.write(`${lines.join('\n')}\n`);
-  return 2;
-}
-
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  let code;
-  try {
-    code = main();
-  } catch {
-    code = 0;
-  }
-  process.exit(code);
+/**
+ * Lint the edited file. Exit code 1 with the remaining errors (and the --fix
+ * note when the file was rewritten); exit code 0 with only the note after a
+ * clean rewrite; exit code 0 and no output otherwise.
+ *
+ * @param {string | undefined} file edited path, as VERIFY_FILE gives it
+ * @param {string} [root]
+ * @returns {{ code: 0 | 1, output: string }}
+ */
+export function lintEditedFile(file, root = REPO_ROOT) {
+  const target = lintTarget(file, root);
+  if (!target) return { code: 0, output: '' };
+  const { errors, fixed } = lintFile(target, root);
+  if (errors.length === 0) return { code: 0, output: fixed ? `${fixedNote(target)}\n` : '' };
+  const lines = fixed ? [...errors.slice(0, MAX_LINES - 1), fixedNote(target)] : errors;
+  return { code: 1, output: `${lines.join('\n')}\n` };
 }
