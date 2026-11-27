@@ -25,7 +25,7 @@
 
 ## 4. Composed server (`packages/server`)
 
-- [ ] 4.1 Harden the composed server lifecycle in `server.ts` (`stop()` closes the ledger, category store and cache each in its own `try`, first error rethrown after all, executor failure keeps precedence) and extend `startup.test.ts` (`open-ledger-store` in the exact boot-order list after the category store; ledger closed when the executor close rejects; a failing ledger close still closes the others; double `stop()` safe) (design § Wiring; spec Ledger lifecycle in the composed server).
+- [x] 4.1 Harden the composed server lifecycle in `server.ts` (`stop()` closes the ledger, category store and cache each in its own `try`, first error rethrown after all, executor failure keeps precedence) and extend `startup.test.ts` (`open-ledger-store` in the exact boot-order list after the category store; ledger closed when the executor close rejects; a failing ledger close still closes the others; double `stop()` safe) (design § Wiring; spec Ledger lifecycle in the composed server).
   Verify: `pnpm run build && pnpm exec vitest run packages/server/src/startup.test.ts`
 - [ ] 4.2 Add `packages/server/src/ledger-isolation.test.ts`, two principals over HTTP modelled on `trusted-tenant.test.ts`: both set up with different sources; Bob's lists non-empty without Alice's MID; Bob's `get_source`/`update_source` on Alice's MID `not_found` with Alice's revision unchanged; same MID registered by both with different labels, each sees own label; Alice's `idempotency_key` reused by Bob applied as a new write (acceptance criterion 3; spec Owner-scoped ledger).
   Verify: `pnpm run build && pnpm exec vitest run packages/server/src/ledger-isolation.test.ts`
