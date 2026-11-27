@@ -46,8 +46,8 @@ Six workspace packages under `packages/*`, with a strict, one-directional depend
 
 ### Expense ledger
 
-The composed server keeps a per-account expense ledger in `bank/bank.db`. Set it up before the first
-bank-message parse:
+The composed server keeps a per-account expense ledger in `bank/bank.db`. Set it up before using any
+ledger feature; the existing parser tools (`get_transactions`, `summarize_transactions`) work without it:
 
 1. `ledger_status` — before setup it answers `setup_required` with an `action`.
 2. `manage_accounts` (`action: add_source`) — pass the chat MID, an ISO 4217 `base_currency` and an
@@ -280,7 +280,7 @@ pnpm exec vitest run tests/docker/docker-smoke.test.ts          # both Docker ta
 The repository ships four distinct test surfaces:
 
 - **`test:unit`** — in-process unit, contract, and migration tests plus the package import-boundary guard. No LINE session, no Docker.
-- **`test:smoke`** — strict local LINE mock plus the **compiled** composed (`packages/server/dist/cli.js`) and standalone (`packages/line-mcp/dist/cli.js`) CLIs, run as real child processes against a deterministic in-process mock gateway. Four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. The composed scenario exercises all ten MCP tools; the standalone scenario exercises all five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker.
+- **`test:smoke`** — strict local LINE mock plus the **compiled** composed (`packages/server/dist/cli.js`) and standalone (`packages/line-mcp/dist/cli.js`) CLIs, run as real child processes against a deterministic in-process mock gateway. Four scenarios: composed seeded credentials, standalone seeded credentials, composed full OAuth (PKCE → PIN → certificate reuse → MCP token issuance → MCP token refresh), and standalone full OAuth. The composed scenario exercises all twelve MCP tools; the standalone scenario exercises all five messenger tools and asserts the bank surfaces are absent. Requires no `.line-auth.json`, no LINE credentials, and no Docker.
 - **`test:e2e`** — manual live LINE account verification. Export a real session to `.line-auth.json`, then run; the suite launches the composed server, seeds a `TEST_TOKEN` bypass, and connects over the MCP HTTP transport. Excluded from the PR-blocking CI gate; run as a pre-release check.
 - **Docker smoke** — runtime-image startup and the exact tool surface per container (composed = twelve tools, standalone = five) over a real MCP `tools/list`. Run via `tests/docker/docker-smoke.test.ts`.
 

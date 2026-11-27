@@ -223,6 +223,10 @@ export class LedgerStore {
           revision: 1,
         };
       } else {
+        // A stale expected_revision is the first conflict, so every stale
+        // write carries details.current_revision even when the same request
+        // also proposes a different base currency or owner timezone.
+        this.checkExpectedRevision(keys.expectedRevision, settings.revision);
         if (input.base_currency !== undefined && input.base_currency !== settings.base_currency) {
           throw new LedgerError('conflict', 'The base currency cannot change once it is set.', {
             details: { current: settings.base_currency },
@@ -234,7 +238,6 @@ export class LedgerStore {
             details: { current: settings.timezone },
           });
         }
-        this.checkExpectedRevision(keys.expectedRevision, settings.revision);
       }
 
       const existing = this.findSource(owner, input.provider, input.source_id);

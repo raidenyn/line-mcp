@@ -145,6 +145,9 @@ describe('validation stays inside the envelope', () => {
       { action: 'list_sources', idempotency_key: 'k' },
       { action: 'list_sources', expected_revision: 1 },
       { action: 'get_settings', idempotency_key: 'k' },
+      { action: 'update_source', provider: 'line', source_id: 'c-one' },
+      { action: 'update_settings' },
+      { action: 'update_settings', idempotency_key: 'k' },
     ];
     for (const args of cases) {
       const result = await call(args);
@@ -316,10 +319,12 @@ describe('tools/list', () => {
     const manage = listed.tools.find((tool) => tool.name === 'manage_accounts');
     expect(manage).toBeDefined();
     expect(manage?.description).toMatch(/action.*required/is);
-    const properties = manage?.inputSchema.properties as Record<string, { type?: string }>;
+    const properties = manage?.inputSchema.properties as Record<string, { type?: string | string[] }>;
     expect(properties.provider.type).toBe('string');
     expect(properties.expected_revision.type).toBe('integer');
     expect(properties.action.type).toBe('string');
+    expect(properties.label.type).toEqual(['string', 'null']);
+    expect(properties.timezone.type).toEqual(['string', 'null']);
 
     const status = listed.tools.find((tool) => tool.name === 'ledger_status');
     expect(status).toBeDefined();

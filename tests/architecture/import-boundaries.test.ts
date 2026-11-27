@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { parse } from 'yaml';
+import * as ts from 'typescript';
 
 /**
  * Enforces the workspace dependency graph from issue #75 (modular-workspaces).
@@ -204,34 +205,37 @@ interface BoundaryViolation {
   chain: string[];
 }
 
-interface Specifier {
-  value: string;
-  index: number;
-}
-
-const IMPORT_CONTEXT_RES = [
-  /from\s*(['"])([^'"\n]+)\1/g,
-  /import\s*(['"])([^'"\n]+)\1/g,
-  /import\(\s*(['"])([^'"\n]+)\1/g,
-  /require\(\s*(['"])([^'"\n]+)\1/g,
-];
-
-function importSpecifiers(content: string): string[] {
-  const found: Specifier[] = [];
-  for (const re of IMPORT_CONTEXT_RES) {
-    re.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(content)) !== null) {
-      found.push({ value: match[2], index: match.index });
+/** Every module specifier of an import, export-from, dynamic import or require. */
+function importSpecifiers(fileName: string, content: string): string[] {
+  const source = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const found: string[] = [];
+  const add = (expression: ts.Expression | undefined): void => {
+    if (expression !== undefined && ts.isStringLiteralLike(expression)) found.push(expression.text);
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      add(node.moduleSpecifier);
+    } else if (ts.isCallExpression(node)) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        add(node.arguments[0]);
+      } else if (ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+        add(node.arguments[0]);
+      }
     }
-  }
-  // Deduplicate the same specifier found by more than one position pattern.
-  return [...new Set(found.sort((a, b) => a.index - b.index).map((specifier) => specifier.value))];
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return [...new Set(found)];
 }
 
 function resolveRelative(fromFile: string, specifier: string): string | undefined {
   const base = path.resolve(path.dirname(fromFile), specifier);
-  for (const candidate of [`${base}.ts`, path.join(base, 'index.ts')]) {
+  const candidates: string[] = [];
+  // Node16-style source imports name the emitted `.js` file; the checker reads
+  // TypeScript source, so look for the matching `.ts` first.
+  if (base.endsWith('.js')) candidates.push(`${base.slice(0, -3)}.ts`);
+  candidates.push(`${base}.ts`, path.join(base, 'index.ts'));
+  for (const candidate of candidates) {
     if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
   }
   return undefined;
@@ -252,7 +256,7 @@ function ledgerBoundaryViolations(dir: string): BoundaryViolation[] {
     if (visited.has(file)) continue;
     visited.add(file);
     const content = fs.readFileSync(file, 'utf-8');
-    for (const specifier of importSpecifiers(content)) {
+    for (const specifier of importSpecifiers(file, content)) {
       if (/^@raidenyn\/line-client(\/|$)/.test(specifier)) {
         violations.push({ file, chain });
         continue;
@@ -298,9 +302,22 @@ describe('bank-mcp ledger import boundary', () => {
       expected: 'a.ts',
     },
     {
+      label: 'a comment before the module literal',
+      files: { 'checked/a.ts': "import /* comment */ '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
       label: 'an indirect relative import',
       files: {
         'checked/a.ts': "import { z } from '../outside';\n",
+        'outside.ts': "import { M } from '@raidenyn/line-client';\n",
+      },
+      expected: 'outside.ts',
+    },
+    {
+      label: 'an indirect relative .js import that resolves to TypeScript',
+      files: {
+        'checked/a.ts': "import { z } from '../outside.js';\n",
         'outside.ts': "import { M } from '@raidenyn/line-client';\n",
       },
       expected: 'outside.ts',

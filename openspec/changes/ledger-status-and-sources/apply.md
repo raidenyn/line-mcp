@@ -5,8 +5,8 @@
 > Overwritten on each apply iteration; iteration counter grows.
 
 **Change**: `ledger-status-and-sources`
-**Iteration**: `1`
-**Applied at**: `2026-11-27 10:55`
+**Iteration**: `2`
+**Applied at**: `2026-11-27 11:02`
 **Executor**: `executing-plans` (implemented inline in the host worktree)
 
 ---
@@ -20,8 +20,8 @@
 
 ## Commits
 
-- **Range**: `959d77c..dfdeab0`
-- **Count**: `12`
+- **Range**: `959d77c..HEAD`
+- **Count**: `14` (12 implementation commits + review fixes)
 
 ---
 
@@ -34,4 +34,10 @@
 
 ## Next step
 
-Run `/opsx:verify` (`openspec-verify-change`).
+Run `/opsx:verify` (`openspec-verify-change`). Iteration 2 folded the independent review's
+findings: stale `add_source` now reports `details.current_revision`, argument validation
+(including a patchless update) runs before hashing/state, `tools/list` advertises
+string-or-null for `label`/`timezone`, the import-boundary checker uses the TypeScript
+AST and resolves `.js`→`.ts`, early years and malformed Unicode are validated, the
+rollback test inspects the failed database before reopening, and README counts/wording
+are corrected.

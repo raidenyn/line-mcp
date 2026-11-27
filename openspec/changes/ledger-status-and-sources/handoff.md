@@ -8,9 +8,10 @@
 
 ## State
 
-- Current task: implementation complete — all 13 tasks ticked; draft PR and independent review next
+- Current task: implementation complete and reviewed — all 13 tasks ticked; draft PR #168, review findings fixed, ready for human review next
 - Head commit: see `git log` on `feat/132-set-up-the-ledger-and-report-its-status`
 - Tasks: 13 of 13 complete
+- Review: PR #168 draft; independent review posted eight inline findings (1 blocking, 3 important, 4 minor). All fixed in iteration 2; gate rerun.
 - Size: 2,885 insertions / 56 deletions across 40 files (`git diff --stat origin/main...HEAD -- . ':!pnpm-lock.yaml' ':!openspec'`), against the raised accepted size of ~3,100 lines (see `proposal.md` § Size)
 
 ## Verified
@@ -22,7 +23,7 @@
 - `pnpm exec vitest run tests/release/openspec-tasks.test.ts` — 6/6 pass
 - Implementation, targeted suites: validation 16/16, ledger store + request hash 30/30, envelope 4/4, ledger tools + register-tools 27/27, `packages/server` 80/80, import boundaries 30/30, startup 9/9, ledger isolation 3/3
 - `pnpm run test:smoke` — 88/88 (compiled CLIs; the ledger tools make no LINE call)
-- `pnpm run verify:all` — PASS: 1,128 in-process tests, Docker smoke 8/8, packed line-client artifact 7/7. The Docker images were rebuilt, so the twelve-tool Docker assertion ran against this code.
+- `pnpm run verify:all` — PASS (twice, before and after the review fixes): 1,132 in-process tests, Docker smoke 8/8, packed line-client artifact 7/7. The Docker images were rebuilt, so the twelve-tool Docker assertion ran against this code.
 - Local environment note: this container's `localhost` binds to `::1` while Node's fetch dials `127.0.0.1`, so the untouched `packages/line-mcp/src/auth/oauth-router.test.ts` "non-root basePath" suite fails without `NODE_OPTIONS=--dns-result-order=ipv4first`. The gate run used that variable; it changes no repository file. The first retry also hit one timing-sensitive `regex-executor.test.ts` flake; the clean second run passed. Proposed follow-up: make that oauth test bind an explicit loopback address.
 
 ## Remaining

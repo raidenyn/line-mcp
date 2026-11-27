@@ -5,8 +5,8 @@
 > Failed checks must be fixed in the corresponding artifact, then re-run verify.
 
 **Change**: `ledger-status-and-sources`
-**Verified at**: `2026-11-27 10:56`
-**Iteration**: `1`
+**Verified at**: `2026-11-27 11:03`
+**Iteration**: `2`
 **Verifier**: implementing agent (fresh-context review follows in the PR)
 
 ---
@@ -60,6 +60,7 @@ compare with `openspec/specs/<capability>/spec.md`:
 **Drift warnings** (non-blocking):
 
 - None. The one flagged open question (timezone in two places, design call 1) is recorded for owner confirmation at PR review.
+- Independent review (PR #168) reported one blocking and three important findings; all were fixed in iteration 2 with regression tests, and the gate was rerun (1,132 tests).
 
 ---
 
@@ -68,7 +69,7 @@ compare with `openspec/specs/<capability>/spec.md`:
 - [x] No unstaged files in the worktree (this report and `apply.md` are committed with the finalize step)
 - [x] All related commits are on the pushed branch
 
-**Commit range** (if known): `959d77c..dfdeab0` (12 commits; docs/verify receipt appended after)
+**Commit range** (if known): `959d77c..HEAD` (14 commits, including the review fixes)
 
 ---
 

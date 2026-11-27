@@ -14,6 +14,7 @@ import {
   parseLineSourceId,
   parseReviewFrom,
 } from '../ledger/validation';
+import type { WriteKeys } from '../ledger/ledger-store';
 import type { BankToolDeps } from './deps';
 import { runTool } from './envelope';
 
@@ -47,10 +48,9 @@ const DECLARED_FIELDS = [
   'base_currency', 'owner_timezone', ...WRITE_KEYS,
 ] as const;
 
-function field(
-  description: string,
-  type: 'string' | 'integer',
-): z.ZodOptional<z.ZodUnknown> {
+type FieldType = 'string' | 'integer' | ['string', 'null'];
+
+function field(description: string, type: FieldType): z.ZodOptional<z.ZodUnknown> {
   return z.unknown().optional().meta({ type, description });
 }
 
@@ -76,8 +76,8 @@ export function registerManageAccounts<P extends Principal>(
         action: field('Required. One of add_source, get_source, list_sources, update_source, get_settings, update_settings.', 'string'),
         provider: field('The source provider. Only "line" is supported.', 'string'),
         source_id: field('The LINE chat MID of the source, a string of 1-100 letters, digits, underscores or hyphens.', 'string'),
-        label: field('A label for the source, up to 200 characters. On update_source, null clears it.', 'string'),
-        timezone: field('The source own IANA timezone. On update_source, null returns it to the owner timezone.', 'string'),
+        label: field('A label for the source, up to 200 characters. On update_source, null clears it.', ['string', 'null']),
+        timezone: field('The source own IANA timezone. On update_source, null returns it to the owner timezone.', ['string', 'null']),
         review_from: field('The first date to review, written YYYY-MM-DD. Defaults to three calendar months before today.', 'string'),
         base_currency: field('The owner base currency as an ISO 4217 code. Required for the first source and never changes after.', 'string'),
         owner_timezone: field('The owner IANA timezone. Required for the first source; later changes use update_settings.', 'string'),
@@ -97,76 +97,103 @@ export function registerManageAccounts<P extends Principal>(
           }
         }
 
+        // Validate every field of the chosen action (including that an update
+        // actually changes something) before hashing or touching the store, so
+        // a bad argument is invalid_argument even before setup.
+        const perform = planAction(action, input, deps, owner);
         const idempotencyKey = optionalIdempotencyKey(input.idempotency_key);
         const expectedRevision = optionalRevision(input.expected_revision);
-        const keys = {
+        return perform({
           idempotencyKey,
           requestHash: idempotencyKey === undefined ? undefined : requestHash(input),
           expectedRevision,
-        };
-
-        switch (action) {
-          case 'add_source': {
-            const provider = requireProvider(input.provider);
-            const sourceId = parseLineSourceId(input.source_id);
-            const baseCurrency = input.base_currency === undefined
-              ? undefined
-              : normalizeCurrency(input.base_currency, 'base_currency');
-            const ownerTimezone = input.owner_timezone === undefined
-              ? undefined
-              : normalizeTimezone(input.owner_timezone, 'owner_timezone');
-            const timezone = input.timezone === undefined
-              ? undefined
-              : normalizeTimezone(input.timezone, 'timezone');
-            const result = deps.ledger.addSource(owner, {
-              provider,
-              source_id: sourceId,
-              label: optionalString(input.label, 'label', LABEL_MAX),
-              timezone,
-              review_from: input.review_from === undefined
-                ? undefined
-                : parseReviewFrom(input.review_from, 'review_from'),
-              base_currency: baseCurrency,
-              owner_timezone: ownerTimezone,
-            }, keys);
-            return result;
-          }
-          case 'get_source': {
-            const provider = requireProvider(input.provider);
-            const sourceId = parseLineSourceId(input.source_id);
-            return deps.ledger.getSource(owner, provider, sourceId);
-          }
-          case 'list_sources':
-            return deps.ledger.listSources(owner);
-          case 'update_source': {
-            const provider = requireProvider(input.provider);
-            const sourceId = parseLineSourceId(input.source_id);
-            const timezone = optionalNullableString(input.timezone, 'timezone', 100);
-            return deps.ledger.updateSource(owner, provider, sourceId, {
-              label: optionalNullableString(input.label, 'label', LABEL_MAX),
-              timezone: timezone === undefined || timezone === null
-                ? timezone
-                : normalizeTimezone(timezone, 'timezone'),
-              review_from: input.review_from === undefined
-                ? undefined
-                : parseReviewFrom(input.review_from, 'review_from'),
-            }, keys);
-          }
-          case 'get_settings':
-            return { settings: deps.ledger.getSettings(owner) };
-          case 'update_settings':
-            return deps.ledger.updateSettings(owner, {
-              timezone: input.timezone === undefined
-                ? undefined
-                : normalizeTimezone(input.timezone, 'timezone'),
-              base_currency: input.base_currency === undefined
-                ? undefined
-                : normalizeCurrency(input.base_currency, 'base_currency'),
-            }, keys);
-        }
+        });
       });
     },
   );
+}
+
+type Perform = (keys: WriteKeys) => Record<string, unknown>;
+
+/** Validates one action's fields and returns the store call that performs it. */
+function planAction<P extends Principal>(
+  action: Action,
+  input: Record<string, unknown>,
+  deps: BankToolDeps<P>,
+  owner: string,
+): Perform {
+  switch (action) {
+    case 'add_source': {
+      const provider = requireProvider(input.provider);
+      const sourceId = parseLineSourceId(input.source_id);
+      const baseCurrency = input.base_currency === undefined
+        ? undefined
+        : normalizeCurrency(input.base_currency, 'base_currency');
+      const ownerTimezone = input.owner_timezone === undefined
+        ? undefined
+        : normalizeTimezone(input.owner_timezone, 'owner_timezone');
+      const timezone = input.timezone === undefined
+        ? undefined
+        : normalizeTimezone(input.timezone, 'timezone');
+      const label = optionalString(input.label, 'label', LABEL_MAX);
+      const reviewFrom = input.review_from === undefined
+        ? undefined
+        : parseReviewFrom(input.review_from, 'review_from');
+      return (keys) => deps.ledger.addSource(owner, {
+        provider,
+        source_id: sourceId,
+        label,
+        timezone,
+        review_from: reviewFrom,
+        base_currency: baseCurrency,
+        owner_timezone: ownerTimezone,
+      }, keys);
+    }
+    case 'get_source': {
+      const provider = requireProvider(input.provider);
+      const sourceId = parseLineSourceId(input.source_id);
+      return () => deps.ledger.getSource(owner, provider, sourceId);
+    }
+    case 'list_sources':
+      return () => deps.ledger.listSources(owner);
+    case 'update_source': {
+      const provider = requireProvider(input.provider);
+      const sourceId = parseLineSourceId(input.source_id);
+      const label = optionalNullableString(input.label, 'label', LABEL_MAX);
+      const rawTimezone = optionalNullableString(input.timezone, 'timezone', 100);
+      const timezone = rawTimezone === undefined || rawTimezone === null
+        ? rawTimezone
+        : normalizeTimezone(rawTimezone, 'timezone');
+      const reviewFrom = input.review_from === undefined
+        ? undefined
+        : parseReviewFrom(input.review_from, 'review_from');
+      if (label === undefined && timezone === undefined && reviewFrom === undefined) {
+        throw invalidArgument('action', 'update_source needs a label, a timezone or a review_from');
+      }
+      return (keys) => deps.ledger.updateSource(owner, provider, sourceId, {
+        label,
+        timezone,
+        review_from: reviewFrom,
+      }, keys);
+    }
+    case 'get_settings':
+      return () => ({ settings: deps.ledger.getSettings(owner) });
+    case 'update_settings': {
+      const timezone = input.timezone === undefined
+        ? undefined
+        : normalizeTimezone(input.timezone, 'timezone');
+      const baseCurrency = input.base_currency === undefined
+        ? undefined
+        : normalizeCurrency(input.base_currency, 'base_currency');
+      if (timezone === undefined && baseCurrency === undefined) {
+        throw invalidArgument('action', 'update_settings needs a timezone or a base_currency');
+      }
+      return (keys) => deps.ledger.updateSettings(owner, {
+        timezone,
+        base_currency: baseCurrency,
+      }, keys);
+    }
+  }
 }
 
 function parseAction(value: unknown): Action {

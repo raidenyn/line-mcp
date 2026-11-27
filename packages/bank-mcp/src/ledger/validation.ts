@@ -19,9 +19,31 @@ function describe(value: unknown): string {
   return typeof value;
 }
 
+/**
+ * A string with no lone UTF-16 surrogate. SQLite replaces a lone surrogate
+ * with U+FFFD when binding, which would silently change a label and could make
+ * two caller-supplied idempotency keys compare equal.
+ */
+function isWellFormed(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string') {
     throw invalidArgument(field, `${field} must be a string, got ${describe(value)}`);
+  }
+  if (!isWellFormed(value)) {
+    throw invalidArgument(field, `${field} must be valid Unicode text`);
   }
   return value;
 }
@@ -70,7 +92,11 @@ export function parseReviewFrom(value: unknown, field: string): string {
   const year = Number(match[1]);
   const month = Number(match[2]);
   const day = Number(match[3]);
-  const date = new Date(Date.UTC(year, month - 1, day));
+  // Date.UTC remaps years 0-99 to 1900-1999, so set the calendar fields on a
+  // fixed instant instead; the parts check below then rejects impossible days.
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(0, 0, 0, 0);
   if (
     date.getUTCFullYear() !== year ||
     date.getUTCMonth() !== month - 1 ||
@@ -125,6 +151,9 @@ export function optionalIdempotencyKey(value: unknown): string | undefined {
       'idempotency_key',
       `idempotency_key must be a string of 1 to ${IDEMPOTENCY_KEY_MAX} characters`,
     );
+  }
+  if (!isWellFormed(value)) {
+    throw invalidArgument('idempotency_key', 'idempotency_key must be valid Unicode text');
   }
   return value;
 }

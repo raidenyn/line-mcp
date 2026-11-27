@@ -113,10 +113,15 @@ describe('LedgerStore lifecycle', () => {
       closeSpy.mockRestore();
     }
 
+    // Inspect the failed file BEFORE reopening it: with defaults the runner
+    // would create the tables and record step 1, hiding a non-rolled-back step.
+    const failedTables = tableNames(path);
+    expect(failedTables).not.toContain('ledger_x');
+    expect(failedTables).not.toContain('ledger_schema_steps');
+    expect(failedTables).not.toContain('ledger_owners');
+
     const store = new LedgerStore(path);
     try {
-      const tables = tableNames(path);
-      expect(tables).not.toContain('ledger_x');
       const db = new Database(path, { readonly: true });
       try {
         expect(db.prepare('SELECT step FROM ledger_schema_steps').all()).toEqual([{ step: 1 }]);
@@ -397,6 +402,17 @@ describe('LedgerStore settings and sources', () => {
       );
       expect(staleSettings.code).toBe('conflict');
       expect(staleSettings.details).toMatchObject({ current_revision: 1 });
+
+      // A stale add_source that also proposes another base currency or owner
+      // timezone still reports the settings revision.
+      for (const input of [
+        { provider: 'line' as const, source_id: 'c-two', base_currency: 'USD', owner_timezone: 'Asia/Bangkok' },
+        { provider: 'line' as const, source_id: 'c-two', base_currency: 'THB', owner_timezone: 'Asia/Tokyo' },
+      ]) {
+        const staleAdd = ledgerError(() => store.addSource(ALICE, input, { expectedRevision: 9 }));
+        expect(staleAdd.code).toBe('conflict');
+        expect(staleAdd.details).toMatchObject({ current_revision: 1 });
+      }
     } finally {
       store.close();
     }

@@ -135,3 +135,17 @@ describe('validation — default review start', () => {
     expect(defaultReviewFrom(Date.parse('2026-01-15T12:00:00Z'), 'UTC')).toBe('2025-10-15');
   });
 });
+
+describe('validation — malformed Unicode and early years', () => {
+  it('accepts a valid date below year 100', () => {
+    expect(parseReviewFrom('0099-02-28', 'review_from')).toBe('0099-02-28');
+    expectInvalid(() => parseReviewFrom('0099-02-29', 'review_from'), 'review_from');
+  });
+
+  it('refuses a lone surrogate in a label or an idempotency key', () => {
+    expectInvalid(() => optionalString('x\uD800y', 'label', LABEL_MAX), 'label');
+    expectInvalid(() => optionalIdempotencyKey('key\uDC00', ), 'idempotency_key');
+    expect(optionalString('Card 🥇', 'label', LABEL_MAX)).toBe('Card 🥇');
+    expect(optionalIdempotencyKey('key-🥇')).toBe('key-🥇');
+  });
+});
