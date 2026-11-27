@@ -80,7 +80,7 @@ describe('composed server — tool/resource registration (real MCP roundtrip)', 
     );
   });
 
-  it('lists exactly eleven resources: one composed overview + ten tool guides, with no duplicates', async () => {
+  it('lists exactly thirteen resources: one composed overview + twelve tool guides, with no duplicates', async () => {
     const result = await client.listResources();
     const uris = result.resources.map((r) => r.uri);
     expect(new Set(uris).size).toBe(uris.length); // no duplicate registrations
@@ -97,11 +97,13 @@ describe('composed server — tool/resource registration (real MCP roundtrip)', 
         'line://guide/tools/manage_categories',
         'line://guide/tools/get_transactions',
         'line://guide/tools/summarize_transactions',
+        'line://guide/tools/ledger_status',
+        'line://guide/tools/manage_accounts',
       ].sort(),
     );
   });
 
-  it('reads the composed (ten-tool) overview at line://guide — not either package-relative one', async () => {
+  it('reads the composed (twelve-tool) overview at line://guide — not either package-relative one', async () => {
     const result = await client.readResource({ uri: 'line://guide' });
     const item = result.contents[0];
     expect(item.mimeType).toBe('text/markdown');

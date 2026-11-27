@@ -19,15 +19,20 @@ import { buildAmountWarnings } from './tools/fetch-transactions';
 // against it, so we can invoke a tool by name without a real MCP transport.
 
 type ToolHandler = (args: Record<string, unknown>) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+type ResourceReader = (uri: URL) => Promise<{
+  contents: Array<{ uri: string; mimeType: string; text: string }>;
+}>;
 
 class FakeServer {
   readonly tools = new Map<string, ToolHandler>();
   readonly resources = new Map<string, string>();
+  readonly readers = new Map<string, ResourceReader>();
   registerTool(name: string, _schema: unknown, handler: ToolHandler): void {
     this.tools.set(name, handler);
   }
-  registerResource(id: string, uri: string, _meta: unknown, _reader: unknown): void {
+  registerResource(id: string, uri: string, _meta: unknown, reader: unknown): void {
     this.resources.set(uri, id);
+    this.readers.set(uri, reader as ResourceReader);
   }
 }
 
@@ -474,10 +479,10 @@ describe('registerBankTools', () => {
 });
 
 describe('registerBankResources', () => {
-  it('registers the shared overview plus five tool guides by default', () => {
+  it('registers the shared overview plus seven tool guides by default', () => {
     const server = new FakeServer();
     registerBankResources(server as unknown as McpServer);
-    expect(server.resources.size).toBe(6);
+    expect(server.resources.size).toBe(8);
     expect([...server.resources.keys()]).toContain('line://guide');
   });
 
@@ -485,7 +490,20 @@ describe('registerBankResources', () => {
     const server = new FakeServer();
     registerBankResources(server as unknown as McpServer, { includeOverview: false });
     const uris = [...server.resources.keys()];
-    expect(uris).toHaveLength(5);
+    expect(uris).toHaveLength(7);
     expect(uris).not.toContain('line://guide');
+  });
+
+  it('reads both ledger guides without a missing-file placeholder', async () => {
+    const server = new FakeServer();
+    registerBankResources(server as unknown as McpServer);
+    for (const uri of ['line://guide/tools/ledger_status', 'line://guide/tools/manage_accounts']) {
+      const reader = server.readers.get(uri);
+      expect(reader, uri).toBeDefined();
+      const read = await reader!(new URL(uri));
+      expect(read.contents[0].mimeType).toBe('text/markdown');
+      expect(read.contents[0].text).not.toContain('Guide file not found');
+      expect(read.contents[0].text.length).toBeGreaterThan(100);
+    }
   });
 });

@@ -16,7 +16,10 @@ import {
 } from './mock-line-server/fixtures';
 
 const MESSENGER_TOOLS = ['complete_import', 'get_image', 'get_messages', 'initiate_import', 'list_chats'];
-const BANK_TOOLS = ['get_transactions', 'manage_categories', 'manage_templates', 'sample_messages', 'summarize_transactions'];
+const BANK_TOOLS = [
+  'get_transactions', 'manage_categories', 'manage_templates', 'sample_messages', 'summarize_transactions',
+  'ledger_status', 'manage_accounts',
+];
 const MESSENGER_RESOURCES = MESSENGER_TOOLS.map((name) => `line://guide/tools/${name}`).concat('line://guide');
 const COMPOSED_RESOURCES = MESSENGER_RESOURCES.concat(BANK_TOOLS.map((name) => `line://guide/tools/${name}`));
 
