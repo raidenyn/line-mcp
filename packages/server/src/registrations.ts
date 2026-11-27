@@ -20,13 +20,13 @@ async function readGuideFile(guideDir: string, relPath: string, uri: string) {
 }
 
 /**
- * Registers ONLY the composed, ten-tool overview at `line://guide`. Both
+ * Registers ONLY the composed, twelve-tool overview at `line://guide`. Both
  * registerLineResources() and registerBankResources() are called with
  * `includeOverview: false` in `buildRegistrations` below so their own
  * package-relative overview docs never fight over this shared URI — this is
  * the one and only overview registration for the composed server, reading
  * `packages/server/docs/guide/overview.md` (the real combined workflow map
- * covering all ten tools).
+ * covering all twelve tools).
  */
 export function registerComposedOverview(server: McpServer, guideDir: string): void {
   server.registerResource(
@@ -45,8 +45,8 @@ export interface ComposedDeps {
 
 /**
  * Builds the composed server's full registration list: five messenger tools,
- * five bank tools, and eleven resources total (one composed overview + five
- * messenger guides + five bank guides). Exported separately from `server.ts`
+ * seven bank tools, and thirteen resources total (one composed overview + five
+ * messenger guides + seven bank guides). Exported separately from `server.ts`
  * so tests can drive the EXACT same production wiring against test-double
  * `deps` (never a hand-rolled re-implementation that could drift from what
  * `createServer` actually registers) — only the LINE network layer inside

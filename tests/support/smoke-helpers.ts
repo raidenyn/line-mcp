@@ -133,6 +133,26 @@ export async function runMessengerAssertions(
 }
 
 export async function runComposedBankAssertions(client: Client, fixtures: MockFixtures): Promise<void> {
+  // The ledger is exercised on the generation's real bankDbPath: a fresh data
+  // root starts unconfigured, the first source sets it up, and ledger_status
+  // then lists it. No LINE request is made by either tool.
+  const initialStatus = await client.callTool({ name: 'ledger_status', arguments: {} });
+  expect(initialStatus.isError).toBe(true);
+  expect((initialStatus.structuredContent as { error?: { code?: string } }).error?.code).toBe('setup_required');
+
+  const addSource = await client.callTool({
+    name: 'manage_accounts',
+    arguments: {
+      action: 'add_source', provider: 'line', source_id: MOCK_GROUP_MID,
+      base_currency: 'THB', owner_timezone: 'UTC',
+    },
+  });
+  expect(addSource.isError).toBeFalsy();
+  const configuredStatus = await client.callTool({ name: 'ledger_status', arguments: {} });
+  expect(configuredStatus.isError).toBeFalsy();
+  const ledger = configuredStatus.structuredContent as { sources?: Array<{ source_id?: string }> };
+  expect(ledger.sources?.[0]?.source_id).toBe(MOCK_GROUP_MID);
+
   const template = {
     name: 'mock-signed-transaction',
     pattern: 'MOCK TX (?<original_amount>[+-][\\d,.]+) (?<original_currency>[A-Z]+) at (?<merchant>[^|]+) \\| (?<date>\\S+) \\| acct (?<account>\\S+) \\| bal (?<balance>[\\d,.]+)',
