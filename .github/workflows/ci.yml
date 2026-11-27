@@ -114,6 +114,15 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The agent harness tools in .agents/harness/ are copied from the
+      # published catalog and never edited here; `check` fails on any copied
+      # file that differs from .agents/harness/lock.json, and on config errors.
+      - name: Check the agent harness hook runtime copy and settings
+        run: node .agents/harness/hook-runtime/cli.mjs check
+
+      - name: Check the agent harness verify gate copy and settings
+        run: node .agents/harness/verify-gate/cli.mjs check
+
       - name: Lint
         run: pnpm run lint
 

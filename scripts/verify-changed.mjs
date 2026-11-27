@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { lintEditedFile } from './lint-file.mjs';
 
 // The fast rung is restricted to the in-process suites: smoke, Docker and
 // packaging need a build or a daemon and belong to `verify` / `verify:all`.
@@ -76,7 +77,26 @@ function run(command, args) {
   return result.status ?? 1;
 }
 
+/**
+ * The agent harness verify gate's edit trigger (VERIFY_TRIGGER=edit): lint only
+ * VERIFY_FILE, never the changed-file run below. Null for every other trigger,
+ * and when no trigger is set, so those keep the full fast rung.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {{ code: number, output: string } | null}
+ */
+export function editRun(env = process.env) {
+  if (env.VERIFY_TRIGGER !== 'edit') return null;
+  return lintEditedFile(env.VERIFY_FILE || undefined);
+}
+
 function main() {
+  const edit = editRun();
+  if (edit) {
+    if (edit.output) process.stdout.write(edit.output);
+    process.exit(edit.code);
+  }
+
   const resolved = resolveBase();
   if (!resolved) {
     console.error('verify:changed: cannot resolve a git base commit');

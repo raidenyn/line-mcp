@@ -1,9 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 // Plain ESM without declarations: the inner-loop helper is a script, not part
 // of the TypeScript build.
-import { hasChangedFiles, resolveBase, selectLintTargets, selectPackageSources } from '../../scripts/verify-changed.mjs';
+import { editRun, hasChangedFiles, resolveBase, selectLintTargets, selectPackageSources } from '../../scripts/verify-changed.mjs';
 
 type PackageJson = {
   engines?: Record<string, string>;
@@ -130,5 +132,46 @@ describe('verify:changed selection', () => {
     ).toEqual({ base: 'def', ref: 'HEAD', fallback: true });
 
     expect(resolveBase(() => null)).toBeNull();
+  });
+});
+
+describe('verify:changed triggers of the agent harness verify gate', () => {
+  function runTrigger(env: Record<string, string | undefined>) {
+    const base = { ...process.env };
+    delete base.VERIFY_TRIGGER;
+    delete base.VERIFY_FILE;
+    return spawnSync('node', ['scripts/verify-changed.mjs'], {
+      env: { ...base, ...env },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+  }
+
+  it('lints only the edited file on the edit trigger', () => {
+    const dir = mkdtempSync(join('tests/harness', '.fixture-'));
+    try {
+      const file = join(dir, 'broken.ts');
+      writeFileSync(file, 'const unused = 2;\nexport {};\n');
+      const result = runTrigger({ VERIFY_TRIGGER: 'edit', VERIFY_FILE: file });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toMatch(/no-unused-vars/);
+      expect(result.stdout).not.toContain('verify:changed:');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('passes at once, with no output, for an edit it does not lint', () => {
+    for (const file of ['README.md', 'tests/harness/.fixture-missing/x.ts', undefined]) {
+      const result = runTrigger({ VERIFY_TRIGGER: 'edit', VERIFY_FILE: file });
+      expect(result.status, String(file)).toBe(0);
+      expect(result.stdout + result.stderr, String(file)).toBe('');
+    }
+  });
+
+  it('keeps the full fast rung for the task and turn-end triggers and by hand', () => {
+    expect(editRun({ VERIFY_TRIGGER: 'turn-end', VERIFY_FILE: 'a.ts' })).toBeNull();
+    expect(editRun({ VERIFY_TRIGGER: 'task' })).toBeNull();
+    expect(editRun({})).toBeNull();
   });
 });

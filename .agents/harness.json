@@ -1,0 +1,18 @@
+{
+  "hook-runtime": {},
+  "verify-gate": {
+    "command": [
+      "node",
+      "scripts/verify-changed.mjs"
+    ],
+    "base": "origin/main",
+    "taskFiles": [
+      "openspec/changes/*/tasks.md"
+    ],
+    "editFiles": [
+      "**/*.ts",
+      "**/*.mts",
+      "**/*.cts"
+    ]
+  }
+}

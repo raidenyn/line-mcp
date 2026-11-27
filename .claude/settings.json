@@ -26,12 +26,11 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/lint-on-edit.mjs\"",
-            "timeout": 30
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 1800
           }
         ]
       }
@@ -43,6 +42,81 @@
             "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-context.mjs\"",
             "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 1800
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 1800
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 1800
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.agents/harness/hook-runtime/claude.mjs\"",
+            "timeout": 10
           }
         ]
       }

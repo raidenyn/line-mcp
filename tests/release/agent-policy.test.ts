@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { parse } from 'yaml';
 import { describe, expect, it } from 'vitest';
 
 interface PermissionSettings {
@@ -101,5 +102,28 @@ describe('secret scanning', () => {
     expect(config).toContain('condition = "AND"');
     expect(config).toContain('regexTarget = "line"');
     expect(config).toContain('packages/mcp-runtime/src/token-codec');
+  });
+});
+
+describe('agent harness', () => {
+  it('checks both copied agent harness tools in the CI check job, after the install', () => {
+    const ci = parse(readFileSync('.github/workflows/ci.yml', 'utf8')) as {
+      jobs: Record<string, { steps: Array<{ run?: string }> }>;
+    };
+    const runs = ci.jobs.check.steps.map((step) => step.run ?? '');
+    const install = runs.indexOf('pnpm install --frozen-lockfile');
+    expect(install).toBeGreaterThanOrEqual(0);
+    for (const tool of ['hook-runtime', 'verify-gate']) {
+      const at = runs.indexOf(`node .agents/harness/${tool}/cli.mjs check`);
+      expect(at, tool).toBeGreaterThan(install);
+    }
+  });
+
+  it('runs scripts/verify-changed.mjs as the one verify command, linting only TypeScript edits', () => {
+    const harness = JSON.parse(readFileSync('.agents/harness.json', 'utf8'));
+    expect(harness['verify-gate'].command).toEqual(['node', 'scripts/verify-changed.mjs']);
+    expect(harness['verify-gate'].editFiles).toEqual(['**/*.ts', '**/*.mts', '**/*.cts']);
+    // No hook besides the runtime lints an edit, so a lint error reaches the model once.
+    expect(readFileSync('.claude/settings.json', 'utf8')).not.toContain('lint-on-edit');
   });
 });
