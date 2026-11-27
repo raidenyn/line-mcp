@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { parse } from 'yaml';
 
 /**
@@ -188,5 +189,139 @@ describe('extra prohibitions', () => {
     const imported = importedWorkspacePackages('line-mcp');
     expect(deps).not.toContain('@raidenyn/bank-mcp');
     expect(imported.has('@raidenyn/bank-mcp')).toBe(false);
+  });
+});
+
+// ─── Ledger import boundary (expense-ledger M1 task 2) ──────────────────────
+//
+// Nothing under packages/bank-mcp/src/ledger/, nor any file it reaches through
+// relative imports, may import @raidenyn/line-client (or a subpath). The
+// package-level IMPORT_RE above cannot express this: it allows bank-mcp as a
+// whole to use line-client, and it matches package names only.
+
+interface BoundaryViolation {
+  file: string;
+  chain: string[];
+}
+
+interface Specifier {
+  value: string;
+  index: number;
+}
+
+const IMPORT_CONTEXT_RES = [
+  /from\s*(['"])([^'"\n]+)\1/g,
+  /import\s*(['"])([^'"\n]+)\1/g,
+  /import\(\s*(['"])([^'"\n]+)\1/g,
+  /require\(\s*(['"])([^'"\n]+)\1/g,
+];
+
+function importSpecifiers(content: string): string[] {
+  const found: Specifier[] = [];
+  for (const re of IMPORT_CONTEXT_RES) {
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(content)) !== null) {
+      found.push({ value: match[2], index: match.index });
+    }
+  }
+  // Deduplicate the same specifier found by more than one position pattern.
+  return [...new Set(found.sort((a, b) => a.index - b.index).map((specifier) => specifier.value))];
+}
+
+function resolveRelative(fromFile: string, specifier: string): string | undefined {
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  for (const candidate of [`${base}.ts`, path.join(base, 'index.ts')]) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Reports every file reached from `dir` (through relative imports) that
+ * imports @raidenyn/line-client or a subpath, with the import chain.
+ */
+function ledgerBoundaryViolations(dir: string): BoundaryViolation[] {
+  const roots = listSourceFiles(dir);
+  const violations: BoundaryViolation[] = [];
+  const visited = new Set<string>();
+  const queue: Array<{ file: string; chain: string[] }> = roots.map((file) => ({ file, chain: [file] }));
+
+  while (queue.length > 0) {
+    const { file, chain } = queue.shift()!;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const content = fs.readFileSync(file, 'utf-8');
+    for (const specifier of importSpecifiers(content)) {
+      if (/^@raidenyn\/line-client(\/|$)/.test(specifier)) {
+        violations.push({ file, chain });
+        continue;
+      }
+      if (!specifier.startsWith('.')) continue;
+      const resolved = resolveRelative(file, specifier);
+      if (resolved && !visited.has(resolved)) {
+        queue.push({ file: resolved, chain: [...chain, resolved] });
+      }
+    }
+  }
+  return violations;
+}
+
+describe('bank-mcp ledger import boundary', () => {
+  const ledgerDir = path.join(PACKAGES_DIR, 'bank-mcp', 'src', 'ledger');
+
+  it('exists, has .ts files and reports no line-client import', () => {
+    expect(fs.existsSync(ledgerDir)).toBe(true);
+    expect(listSourceFiles(ledgerDir).length).toBeGreaterThan(0);
+    expect(ledgerBoundaryViolations(ledgerDir)).toEqual([]);
+  });
+
+  const cases: Array<{ label: string; files: Record<string, string>; expected: string }> = [
+    {
+      label: 'a direct import',
+      files: { 'checked/a.ts': "import { x } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an import type',
+      files: { 'checked/a.ts': "import type { M } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an export from',
+      files: { 'checked/a.ts': "export { y } from '@raidenyn/line-client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'a subpath import',
+      files: { 'checked/a.ts': "import '@raidenyn/line-client/dist/client';\n" },
+      expected: 'a.ts',
+    },
+    {
+      label: 'an indirect relative import',
+      files: {
+        'checked/a.ts': "import { z } from '../outside';\n",
+        'outside.ts': "import { M } from '@raidenyn/line-client';\n",
+      },
+      expected: 'outside.ts',
+    },
+  ];
+
+  it.each(cases)('reports $label', ({ files, expected }) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ledger-boundary-'));
+    try {
+      for (const [relative, content] of Object.entries(files)) {
+        const file = path.join(root, relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+      }
+      const violations = ledgerBoundaryViolations(path.join(root, 'checked'));
+      expect(violations).toHaveLength(1);
+      expect(violations[0].file.endsWith(expected)).toBe(true);
+      expect(violations[0].chain[0].endsWith(path.join('checked', 'a.ts'))).toBe(true);
+      expect(violations[0].chain[violations[0].chain.length - 1]).toBe(violations[0].file);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

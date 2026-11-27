@@ -20,7 +20,7 @@
 
 ## 3. Ledger import boundary
 
-- [ ] 3.1 Extend `tests/architecture/import-boundaries.test.ts` with `ledgerBoundaryViolations(dir)`: scan quoted specifiers in every `.ts` file under `dir`, follow relative imports transitively (`.ts`, `/index.ts`), report any file reached that imports `@raidenyn/line-client` or a subpath, with the chain; cases: the real `packages/bank-mcp/src/ledger/` exists, has `.ts` files and no violation; temp-dir fixtures for direct, `import type`, `export … from`, subpath, and indirect relative violations each reported (design § Architecture check; spec Ledger import boundary).
+- [x] 3.1 Extend `tests/architecture/import-boundaries.test.ts` with `ledgerBoundaryViolations(dir)`: scan quoted specifiers in every `.ts` file under `dir`, follow relative imports transitively (`.ts`, `/index.ts`), report any file reached that imports `@raidenyn/line-client` or a subpath, with the chain; cases: the real `packages/bank-mcp/src/ledger/` exists, has `.ts` files and no violation; temp-dir fixtures for direct, `import type`, `export … from`, subpath, and indirect relative violations each reported (design § Architecture check; spec Ledger import boundary).
   Verify: `pnpm exec vitest run tests/architecture/import-boundaries.test.ts`
 
 ## 4. Composed server (`packages/server`)
