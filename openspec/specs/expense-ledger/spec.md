@@ -1,4 +1,10 @@
-## ADDED Requirements
+# expense-ledger Specification
+
+## Purpose
+
+The owner-scoped expense ledger behind the bank tools: the owner's base currency and timezone, the LINE chats that feed the ledger, each source's review start and freshness, structured tool results with typed errors, idempotent writes with optimistic revisions, ordered ledger schema steps in `bank/bank.db`, and the rule that the ledger module never imports `@raidenyn/line-client`.
+
+## Requirements
 
 ### Requirement: Bank tool envelope
 Every answer of a ledger bank tool (`ledger_status`, `manage_accounts`) SHALL be built by one envelope helper in `@raidenyn/bank-mcp`. A success SHALL carry the result as `structuredContent` and the same JSON as text. An error SHALL set `isError: true` and carry `{ error: { code, message, action?, details? } }` as `structuredContent` and text, with one of the six contract codes (`setup_required`, `invalid_argument`, `not_found`, `conflict`, `internal_error`, `line_session_expired`).
