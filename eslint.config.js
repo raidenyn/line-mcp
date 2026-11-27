@@ -16,6 +16,10 @@ module.exports = tseslint.config(
       // linting the rest of the workspace gets.
       'packages/line-client/assets/ltsm/ltsmSandbox.js',
       'packages/line-client/scripts/vendor-happy-dom.js',
+      // Agent harness tools copied from the published catalog: never edited in
+      // this repo (their `check` in CI fails on any change), so they cannot be
+      // fixed to its lint rules.
+      '.agents/harness/**',
     ],
   },
   js.configs.recommended,

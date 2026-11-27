@@ -1,0 +1,5 @@
+{
+  "plugins": [
+    "./.agents/harness/hook-runtime/opencode"
+  ]
+}

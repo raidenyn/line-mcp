@@ -139,14 +139,27 @@ If `repo-search` exists, use it for where/why questions; fall back to grep
 
 ## Agent hooks
 
-Claude Code (`.claude/settings.json`) and OpenCode
-(`.opencode/plugin/line-mcp-harness.ts`) run the same scripts:
+The verify command is `node scripts/verify-changed.mjs`, run by the copied agent
+harness tools in `.agents/harness/` (settings in `.agents/harness.json`; never
+edit the copies, `update` from the published catalog brings new versions). On
+Claude Code (`.claude/settings.json`) and OpenCode (`opencode.json`) it runs:
 
-- `.claude/hooks/lint-on-edit.mjs` — after an edit to an in-repo `.ts` file,
-  runs `eslint --fix` on it and feeds back up to 20 lines of remaining errors;
-  fix them before moving on.
-- `.claude/hooks/session-context.mjs` — at session start, adds up to 30 lines:
-  branch, status, diff vs `origin/main`, active OpenSpec changes, last CI run.
+- after an edit of a `.ts`, `.mts` or `.cts` file — `eslint --fix` on that file
+  only; up to 20 lines of remaining errors are added to the tool result, and a
+  note when `--fix` rewrote the file. Other edits start no check.
+- after a ticked task in `openspec/changes/*/tasks.md`, and at every turn end —
+  the `verify:changed` rung; a failing turn end blocks up to three times per
+  failure, and a turn end on a tree unchanged since the last pass runs nothing.
+- by hand: `node .agents/harness/verify-gate/cli.mjs run`.
+
+`.claude/hooks/session-context.mjs` adds up to 30 lines at session start
+(branch, status, diff vs `origin/main`, active OpenSpec changes, last CI run);
+on OpenCode through `.opencode/plugin/line-mcp-harness.ts`.
+
+Before starting an agent in a clone you do not trust, read
+`.claude/settings.json`, `opencode.json`, `.agents/harness.json`,
+`.agents/harness/` and `scripts/verify-changed.mjs`: they run on every tool call
+and turn end.
 
 ## Hard rules
 
