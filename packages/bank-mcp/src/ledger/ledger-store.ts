@@ -9,6 +9,12 @@ import { defaultReviewFrom, normalizeTimezone } from './validation';
 export const SETUP_ACTION =
   'Call manage_accounts with action add_source, a base_currency and an owner_timezone.';
 
+/** How long an idempotency record is remembered. */
+export const IDEMPOTENCY_TTL_MS = 86_400_000;
+
+/** The one tool whose writes carry idempotency keys in this task. */
+export const MANAGE_ACCOUNTS_TOOL = 'manage_accounts';
+
 export interface LedgerSettings {
   base_currency: string;
   timezone: string;
@@ -191,6 +197,8 @@ export class LedgerStore {
   } {
     const add = this.database.transaction((): { settings: LedgerSettings; source: LedgerSource } => {
       const now = this.now();
+      const replayed = this.replay<{ settings: LedgerSettings; source: LedgerSource }>(owner, keys, now);
+      if (replayed !== undefined) return replayed;
       let settings = this.findSettings(owner);
 
       if (!settings) {
@@ -253,13 +261,18 @@ export class LedgerStore {
         now,
         now,
       );
-      return { settings, source: this.requireSource(owner, input.provider, input.source_id) };
+      const result = { settings, source: this.requireSource(owner, input.provider, input.source_id) };
+      this.record(owner, keys, now, result);
+      return result;
     });
     return add();
   }
 
   updateSettings(owner: string, patch: UpdateSettingsPatch, keys: WriteKeys): { settings: LedgerSettings } {
     const update = this.database.transaction((): { settings: LedgerSettings } => {
+      const now = this.now();
+      const replayed = this.replay<{ settings: LedgerSettings }>(owner, keys, now);
+      if (replayed !== undefined) return replayed;
       const settings = this.requireSettings(owner);
       this.checkExpectedRevision(keys.expectedRevision, settings.revision);
       if (patch.timezone === undefined && patch.base_currency === undefined) {
@@ -272,15 +285,17 @@ export class LedgerStore {
       }
       const timezoneChanged = patch.timezone !== undefined && !sameTimezone(patch.timezone, settings.timezone);
       if (!timezoneChanged) {
+        this.record(owner, keys, now, { settings });
         return { settings };
       }
-      const now = this.now();
       this.database.prepare(
         `UPDATE ledger_owners
             SET timezone = ?, revision = revision + 1, updated_at = ?
           WHERE owner = ?`,
       ).run(patch.timezone, now, owner);
-      return { settings: this.requireSettings(owner) };
+      const result = { settings: this.requireSettings(owner) };
+      this.record(owner, keys, now, result);
+      return result;
     });
     return update();
   }
@@ -293,6 +308,9 @@ export class LedgerStore {
     keys: WriteKeys,
   ): { source: LedgerSource } {
     const update = this.database.transaction((): { source: LedgerSource } => {
+      const now = this.now();
+      const replayed = this.replay<{ source: LedgerSource }>(owner, keys, now);
+      if (replayed !== undefined) return replayed;
       this.requireSettings(owner);
       const source = this.requireSource(owner, provider, sourceId);
       this.checkExpectedRevision(keys.expectedRevision, source.revision);
@@ -309,10 +327,10 @@ export class LedgerStore {
       const reviewFromChanged = patch.review_from !== undefined && patch.review_from !== source.review_from;
 
       if (!labelChanged && !timezoneChanged && !reviewFromChanged) {
+        this.record(owner, keys, now, { source });
         return { source };
       }
 
-      const now = this.now();
       this.database.prepare(
         `UPDATE ledger_sources
             SET label = CASE WHEN ? THEN ? ELSE label END,
@@ -332,9 +350,48 @@ export class LedgerStore {
         provider,
         sourceId,
       );
-      return { source: this.requireSource(owner, provider, sourceId) };
+      const result = { source: this.requireSource(owner, provider, sourceId) };
+      this.record(owner, keys, now, result);
+      return result;
     });
     return update();
+  }
+
+  /**
+   * Purges this owner's expired records, then replays a stored answer when the
+   * key and request hash match. A key reused with other arguments is a
+   * conflict; a key with no record proceeds to the write.
+   */
+  private replay<T>(owner: string, keys: WriteKeys, now: number): T | undefined {
+    this.database
+      .prepare('DELETE FROM ledger_idempotency WHERE owner = ? AND created_at < ?')
+      .run(owner, now - IDEMPOTENCY_TTL_MS);
+    if (keys.idempotencyKey === undefined) return undefined;
+    if (keys.requestHash === undefined) {
+      throw new Error('requestHash is required when an idempotency key is set');
+    }
+    const row = this.database.prepare(
+      `SELECT request_hash, response FROM ledger_idempotency
+        WHERE owner = ? AND tool = ? AND key = ?`,
+    ).get(owner, MANAGE_ACCOUNTS_TOOL, keys.idempotencyKey) as
+      | { request_hash: string; response: string }
+      | undefined;
+    if (!row) return undefined;
+    if (row.request_hash !== keys.requestHash) {
+      throw new LedgerError('conflict', 'This idempotency key was used with other arguments.', {
+        details: { reason: 'idempotency_key_reused' },
+      });
+    }
+    return JSON.parse(row.response) as T;
+  }
+
+  /** Records a successful write's answer. Refused writes are never recorded. */
+  private record(owner: string, keys: WriteKeys, now: number, response: unknown): void {
+    if (keys.idempotencyKey === undefined || keys.requestHash === undefined) return;
+    this.database.prepare(
+      `INSERT INTO ledger_idempotency (owner, tool, key, request_hash, response, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(owner, MANAGE_ACCOUNTS_TOOL, keys.idempotencyKey, keys.requestHash, JSON.stringify(response), now);
   }
 
   private findSettings(owner: string): LedgerSettings | undefined {

@@ -6,7 +6,8 @@ import Database from 'better-sqlite3';
 import { CategoryStore } from '../category-store';
 import { LEDGER_SCHEMA_STEPS, applySchemaSteps, type SchemaStep } from './schema';
 import { LedgerError } from './errors';
-import { SETUP_ACTION, LedgerStore } from './ledger-store';
+import { IDEMPOTENCY_TTL_MS, SETUP_ACTION, LedgerStore } from './ledger-store';
+import { requestHash } from './request-hash';
 
 function tempDbPath(): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), 'ledger-store-'));
@@ -481,6 +482,142 @@ describe('LedgerStore settings and sources', () => {
       expect(store.getSource(ALICE, 'line', 'c-one').source).toMatchObject({
         timezone: 'Asia/Bangkok', own_timezone: 'Asia/Bangkok',
       });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replays update_source once and keeps the first updated_at', () => {
+    let now = NOW;
+    const store = new LedgerStore(':memory:', { now: () => now });
+    try {
+      store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC', label: 'one',
+      }, {});
+      now += 1000;
+      const args = { action: 'update_source', provider: 'line', source_id: 'c-one', label: 'two' };
+      const keys = { idempotencyKey: 'k', requestHash: requestHash(args) };
+      const first = store.updateSource(ALICE, 'line', 'c-one', { label: 'two' }, keys);
+      now += 1000;
+      const replay = store.updateSource(ALICE, 'line', 'c-one', { label: 'two' }, keys);
+
+      expect(replay).toEqual(first);
+      expect(store.getSource(ALICE, 'line', 'c-one').source.revision).toBe(2);
+      expect(store.getSource(ALICE, 'line', 'c-one').source.updated_at).toBe(NOW + 1000);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replays a retried add_source instead of answering conflict', () => {
+    const store = makeStore();
+    try {
+      const args = {
+        action: 'add_source', provider: 'line', source_id: 'c-one',
+      };
+      const keys = { idempotencyKey: 'retry-me', requestHash: requestHash(args) };
+      const first = store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC',
+      }, keys);
+      const replay = store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC',
+      }, keys);
+      expect(replay).toEqual(first);
+      expect(store.listSources(ALICE).sources).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses a reused key with other arguments and records only successes', () => {
+    const store = makeStore();
+    try {
+      store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC',
+      }, {});
+      // A refused write (duplicate source) must not be recorded.
+      const refusedKeys = {
+        idempotencyKey: 'k', requestHash: requestHash({ action: 'add_source', source_id: 'c-one' }),
+      };
+      const refused = ledgerError(() => store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC',
+      }, refusedKeys));
+      expect(refused.code).toBe('conflict');
+      const applied = store.updateSource(ALICE, 'line', 'c-one', { label: 'later' }, refusedKeys);
+      expect(applied.source.label).toBe('later');
+
+      const otherHash = ledgerError(() => store.updateSource(ALICE, 'line', 'c-one', { label: 'other' }, {
+        idempotencyKey: 'k', requestHash: requestHash({ action: 'update_source', label: 'other' }),
+      }));
+      expect(otherHash.code).toBe('conflict');
+      expect(otherHash.details).toMatchObject({ reason: 'idempotency_key_reused' });
+      expect(store.getSource(ALICE, 'line', 'c-one').source.label).toBe('later');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('expires keys after 24 hours', () => {
+    let now = NOW;
+    const store = new LedgerStore(':memory:', { now: () => now });
+    try {
+      store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'UTC', label: 'one',
+      }, {});
+      const args = { action: 'update_source', label: 'two' };
+      store.updateSource(ALICE, 'line', 'c-one', { label: 'two' }, {
+        idempotencyKey: 'k', requestHash: requestHash(args),
+      });
+      now += IDEMPOTENCY_TTL_MS + 1;
+      const applied = store.updateSource(ALICE, 'line', 'c-one', { label: 'three' }, {
+        idempotencyKey: 'k', requestHash: requestHash({ action: 'update_source', label: 'three' }),
+      });
+      expect(applied.source.label).toBe('three');
+      expect(applied.source.revision).toBe(3);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps idempotency keys per owner', () => {
+    const store = makeStore();
+    try {
+      store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-alice', base_currency: 'THB', owner_timezone: 'UTC',
+      }, {});
+      store.addSource(BOB, {
+        provider: 'line', source_id: 'c-bob', base_currency: 'USD', owner_timezone: 'UTC',
+      }, {});
+      const args = { action: 'update_source', label: 'alice-label' };
+      store.updateSource(ALICE, 'line', 'c-alice', { label: 'alice-label' }, {
+        idempotencyKey: 'same-key', requestHash: requestHash(args),
+      });
+      const bobResult = store.updateSource(BOB, 'line', 'c-bob', { label: 'bob-label' }, {
+        idempotencyKey: 'same-key', requestHash: requestHash({ action: 'update_source', label: 'bob-label' }),
+      });
+      expect(bobResult.source.label).toBe('bob-label');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('replays an add_source retry across midnight in the source timezone', () => {
+    let now = Date.parse('2026-05-31T16:59:00Z'); // 23:59 in Bangkok
+    const store = new LedgerStore(':memory:', { now: () => now });
+    try {
+      const args = {
+        action: 'add_source', provider: 'line', source_id: 'c-one', owner_timezone: 'Asia/Bangkok',
+      };
+      const keys = { idempotencyKey: 'midnight', requestHash: requestHash(args) };
+      const first = store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'Asia/Bangkok',
+      }, keys);
+      now = Date.parse('2026-05-31T17:01:00Z'); // 00:01 in Bangkok
+      const replay = store.addSource(ALICE, {
+        provider: 'line', source_id: 'c-one', base_currency: 'THB', owner_timezone: 'Asia/Bangkok',
+      }, keys);
+      expect(replay).toEqual(first);
+      expect(replay.source.review_from).toBe('2026-02-28');
     } finally {
       store.close();
     }
