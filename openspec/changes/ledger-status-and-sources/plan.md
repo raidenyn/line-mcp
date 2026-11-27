@@ -27,7 +27,7 @@
 
 ## Review Focus
 
-1. **Concurrent first sources** — two `add_source` calls for a fresh owner with different base currencies: exactly one creates settings, the other is `conflict`. Test in Task 3 (`ledger-store.test.ts`: two stores on one temp file, sequential calls, second refused).
+1. **A second "first" source** — two `add_source` calls for a fresh owner with different base currencies, one after the other through two stores: exactly one creates settings, the other is `conflict`. Test in Task 3 (`ledger-store.test.ts`: two stores on one temp file, sequential calls, second refused).
 2. **Retry after a lost answer on a later day** — `add_source` without `review_from` replayed with the same key after midnight in the source's timezone returns the stored answer, not `conflict`. Test in Task 4.
 3. **Agent sends `null` for optional fields** — `review_from: null` or `base_currency: null` on `add_source` is `invalid_argument`, not a crash or a silent default. Test in Task 6.
 4. **Large or odd strings** — `label` over 200 characters and `idempotency_key` over 200 characters are `invalid_argument`; a label with quotes or emoji round-trips unchanged. Test in Task 1 (label rule) and Task 6 (round-trip).
@@ -136,7 +136,8 @@
   - `no-op update keeps the revision; a change raises it by 1`.
   - `expected_revision`: stale on `updateSource` → `conflict`, `details.current_revision: 2`, row unchanged; on `addSource` before settings with `expectedRevision: 1` → `conflict`, `details.current_revision: null`; on `updateSettings` stale → `conflict`.
   - `scopes everything by owner`: owner `b` gets `not_found` for `a`'s source after `b` has its own; same `source_id` for both owners with different labels coexists.
-  - Review Focus 1: `two stores on one file: second first-source with another currency is conflict`.
+  - Review Focus 1: `two stores on one file: a second first-source after another, with another currency, is conflict` (sequential is enough: better-sqlite3 is synchronous and AGENTS.md forbids two servers on one data root, so the transaction's own check is what must hold).
+  - `a given timezone pins the source`: on a source with `own_timezone: null`, `updateSource({ timezone: <owner's zone> })` sets `own_timezone` (compared with the stored own value, not the effective one); a later owner change leaves the source on the pinned zone.
 
 - [ ] **Step 2: Run and see it fail.**
 
@@ -188,10 +189,10 @@
   - `interface ToolError { code: ToolErrorCode; message: string; action?: string; details?: Record<string, unknown> }`
   - `okResult(result: Record<string, unknown>): CallToolResult` — `{ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result }`
   - `errorResult(error: ToolError): CallToolResult` — `isError: true`, `structuredContent: { error }`, same text
-  - `runTool(fn: () => Record<string, unknown> | Promise<Record<string, unknown>>): Promise<CallToolResult>` — maps `LedgerError` → its fields, anything else → `{ code: 'internal_error', message: 'Internal error in the ledger.' }`
+  - `runTool(fn: () => Record<string, unknown> | Promise<Record<string, unknown>>): Promise<CallToolResult>` — maps `LedgerError` → its fields, anything else → `{ code: 'internal_error', message: 'Internal error in the ledger.' }` and writes the original error to `process.stderr` (the answer never contains it)
   - `INTERNAL_ERROR_MESSAGE = 'Internal error in the ledger.'`
 
-- [ ] **Step 1: Write the failing tests**: success shape and text equals `JSON.stringify(structuredContent)`; `LedgerError('conflict', 'm', { details: { a: 1 } })` → `isError`, `structuredContent.error` `{ code: 'conflict', message: 'm', details: { a: 1 } }` with no `action` key; a thrown `new Error('SQLITE secret')` → `internal_error`, text does not contain `SQLITE`.
+- [ ] **Step 1: Write the failing tests**: success shape and text equals `JSON.stringify(structuredContent)`; `LedgerError('conflict', 'm', { details: { a: 1 } })` → `isError`, `structuredContent.error` `{ code: 'conflict', message: 'm', details: { a: 1 } }` with no `action` key; a thrown `new Error('SQLITE secret')` → `internal_error`, text does not contain `SQLITE`, and a `process.stderr.write` spy saw `SQLITE secret`.
 - [ ] **Step 2: Run and see it fail.** Run: `pnpm exec vitest run packages/bank-mcp/src/tools/envelope.test.ts`
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run and see it pass.**
@@ -234,7 +235,7 @@
 
 **Files:**
 - Create: `packages/bank-mcp/docs/guide/tools/ledger_status.md`, `packages/bank-mcp/docs/guide/tools/manage_accounts.md`
-- Modify: `packages/bank-mcp/src/resources.ts` (`TOOL_GUIDES`, doc comment), `packages/bank-mcp/docs/guide/overview.md`, `packages/bank-mcp/src/register-tools.test.ts` (resource counts: `server.resources.size` 6 → 8 at line 466 with the overview, the guide URIs 5 → 7 at line 474), `packages/server/src/composition.test.ts` (thirteen resources incl. both guide URIs)
+- Modify: `packages/bank-mcp/src/resources.ts` (`TOOL_GUIDES`, doc comment), `packages/bank-mcp/docs/guide/overview.md`, `packages/bank-mcp/src/register-tools.test.ts` (resource counts: `server.resources.size` 6 → 8 at line 466 with the overview, the guide URIs 5 → 7 at line 474), `packages/server/src/composition.test.ts` (thirteen resources incl. both guide URIs; test title at line 82 "eleven resources … ten tool guides" → thirteen / twelve)
 
 - [ ] **Step 1: Extend the resource test** (and `BANK_TOOLS` in `tests/support/smoke-helpers.ts` with both tool names, so the smoke suite's exact surface check is green from this task on) to expect `line://guide/tools/ledger_status` and `line://guide/tools/manage_accounts`, and that each reads without "Guide file not found". `FakeServer.registerResource` (line 28) currently drops the reader: extend it to keep the reader per URI (an extension; no existing assertion changes) and call it in the new test.
 - [ ] **Step 2: Run and see it fail.** Run: `pnpm exec vitest run packages/bank-mcp/src/register-tools.test.ts`
@@ -270,8 +271,8 @@
   - Mock `bankMcpModule.LedgerStore` like `CategoryStore` (push `'open-ledger-store'`); the exact boot-order list becomes `[…, 'open-bank-store', 'open-ledger-store', 'create-regex-executor', …]`.
   - In `closes database stores when executor shutdown rejects`: spy `LedgerStore.prototype.close`, expect 1 call and the executor error rethrown.
   - `stop() is idempotent` still passes with the real store.
-  - `a failing store close does not leave the others open`: make `LedgerStore.prototype.close` throw once; `stop()` rejects with that error and `CategoryStore.prototype.close` and `SqliteMessageCache.prototype.close` were each called once.
-- [ ] **Step 2: Run and see it fail.** Run: `pnpm run build && pnpm exec vitest run packages/server/src/startup.test.ts`
+  - `a failing store close does not leave the others open`: mock `LedgerStore.prototype.close` once to call the real close and then throw; `stop()` rejects with that error, `CategoryStore.prototype.close` and `SqliteMessageCache.prototype.close` were each called once; then set `server = undefined`.
+- [ ] **Step 2: Run and see it fail.** Run: `pnpm run build && pnpm exec vitest run packages/server/src/startup.test.ts` — Expected: only the failing-close case fails (Task 6 already opens and closes the store, so the boot-order and executor-failure cases may already pass).
 - [ ] **Step 3: Implement.** In `stop()`, close `ledgerStore`, `categoryStore`, `cache` each in its own try, remember the first error, rethrow the executor failure first, then the first close error. (The store itself was wired in Task 6.)
 - [ ] **Step 4: Run and see it pass.**
 - [ ] **Step 5: Commit** — `feat(server): close every store on stop even when one fails`.
@@ -294,7 +295,7 @@
 **Files:**
 - Modify: `packages/server/src/registrations.ts` and `packages/server/src/data-layout.ts` (comments: twelve tools, thirteen resources), `tests/support/smoke-helpers.ts`, `tests/docker/docker-smoke.test.ts`, `tests/e2e.test.ts`
 
-- [ ] **Step 1: Extend the lists** (`BANK_TOOLS` was done in Task 7): Docker smoke composed list gains both. e2e resource list gains both guide URIs. In `runComposedBankAssertions`, before the template steps: `ledger_status` → `isError` and `structuredContent.error.code === 'setup_required'`; `manage_accounts` `add_source` for `MOCK_GROUP_MID` (`base_currency: 'THB'`, `owner_timezone: 'UTC'`) → no `isError`; `ledger_status` → `structuredContent.sources[0].source_id === MOCK_GROUP_MID`.
+- [ ] **Step 1: Extend the lists** (`BANK_TOOLS` was done in Task 7): Docker smoke composed list gains both (title line 159 → "twelve composed tools"). e2e resource list gains both guide URIs (title line 277 → "all 13 guide URIs"). In `runComposedBankAssertions`, before the template steps: `ledger_status` → `isError` and `structuredContent.error.code === 'setup_required'`; `manage_accounts` `add_source` for `MOCK_GROUP_MID` (`base_currency: 'THB'`, `owner_timezone: 'UTC'`) → no `isError`; `ledger_status` → `structuredContent.sources[0].source_id === MOCK_GROUP_MID`.
 - [ ] **Step 2: Run.** Run: `pnpm run build && pnpm run test:smoke` — Expected: PASS (mock LINE request counts unchanged: the ledger tools make no LINE call).
 - [ ] **Step 3: Commit** — `test(server): extend the composed tool surface to twelve tools`.
 
@@ -303,7 +304,7 @@
 **Files:**
 - Modify: `docs/ARCHITECTURE.md`, `README.md`, `AGENTS.md`, `packages/server/docs/guide/overview.md`, `Dockerfile`, `docker-compose.yml`, `.github/workflows/ci.yml` (comments only), `openspec/changes/ledger-status-and-sources/handoff.md`
 
-- [ ] **Step 1: Update docs** per tasks.md 5.1: ARCHITECTURE package row (seven bank tools, ledger), a `ledger/` paragraph (schema steps in `ledger_schema_steps`, owner-scoped `LedgerStore`, envelope helper, import boundary), `bank.db` tables, server start/stop order, resources table (both guides), test sections ("twelve tools", `ledger-isolation.test.ts`); README tool table, "five bank/transaction tools" (line 7), "the five transaction tools" (line 20) and the four "ten tools"; ARCHITECTURE Images line 148 and smoke line 173 ("ten tools"); ARCHITECTURE "five bank guides" (lines 70, 85); AGENTS "ten tools" → "twelve tools"; composed overview twelve-tool map; the comments `Dockerfile:6` ("ten tools, eleven resources" → twelve, thirteen), `Dockerfile:89`, `docker-compose.yml:1` and `.github/workflows/ci.yml:171`; `composition.test.ts:103` test title "(ten-tool) overview" is already done in Task 6. Touching `Dockerfile`/`docker-compose.yml` makes `verify:all` the required gate (AGENTS.md). Finish with `grep -rn "ten tools\|ten-tool\|five bank\|five transaction" README.md AGENTS.md docs/ARCHITECTURE.md Dockerfile docker-compose.yml .github packages/*/docs packages/*/src` — Expected: no stale hit (`docs/superpowers/` is a frozen archive: never searched, never edited).
+- [ ] **Step 1: Update docs** per tasks.md 5.1: ARCHITECTURE package row (seven bank tools, ledger), a `ledger/` paragraph (schema steps in `ledger_schema_steps`, owner-scoped `LedgerStore`, envelope helper, import boundary), `bank.db` tables, server start/stop order, resources table (both guides), test sections ("twelve tools", `ledger-isolation.test.ts`); README tool table, "five bank/transaction tools" (line 7), "the five transaction tools" (line 20) and the four "ten tools"; ARCHITECTURE Images line 148 and smoke line 173 ("ten tools"); ARCHITECTURE "five bank guides" (lines 70, 85); AGENTS "ten tools" → "twelve tools"; composed overview twelve-tool map; the comments `Dockerfile:6` ("ten tools, eleven resources" → twelve, thirteen), `Dockerfile:89`, `docker-compose.yml:1` and `.github/workflows/ci.yml:171`; `composition.test.ts:103` test title "(ten-tool) overview" is already done in Task 6. Touching `Dockerfile`/`docker-compose.yml` makes `verify:all` the required gate (AGENTS.md). Finish with `grep -rn "ten tools\|ten-tool\|ten tool\|ten composed\|five bank\|five transaction\|eleven\|11 guide" README.md AGENTS.md docs/ARCHITECTURE.md Dockerfile docker-compose.yml .github packages/*/docs packages/*/src tests` — Expected: no stale hit (`docs/superpowers/` is a frozen archive: never searched, never edited).
 - [ ] **Step 2: Run the gate.** Run: `pnpm run verify:all` — Expected: PASS. It always rebuilds both images, so the twelve-tool Docker assertion runs against the new code (a bare `vitest run tests/docker/docker-smoke.test.ts` reuses an existing `:test` image). It fails without a Docker daemon: then run `pnpm run verify`, record that the Docker rung did not run, and say so in the PR.
 - [ ] **Step 3: Record** results, change size (`git diff --stat origin/main...HEAD -- . ':!pnpm-lock.yaml' ':!openspec'`) against the task's ~850 lines / ~14 files, and remaining steps in `handoff.md`.
 - [ ] **Step 4: Commit** — `docs: describe the ledger and the twelve-tool composed server`.

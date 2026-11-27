@@ -76,7 +76,7 @@ envelope helper sits in `tools/` because it is MCP-facing; `ledger/` throws
 error-code union is defined in `ledger/errors.ts` (so `ledger/` never imports
 from `tools/`) and re-exported by the envelope helper. Any other
 exception becomes `internal_error` with a fixed message (no stack or SQL in the
-answer).
+answer); the original error is written to stderr for diagnosis.
 
 Alternatives (see `brainstorm.md`): sharing `CategoryStore`'s connection
 (touches legacy code), idempotency in the tool layer (not atomic).
@@ -178,7 +178,8 @@ Rules:
   (`null` when inherited). `update_source` with `timezone: null` returns the
   source to the owner's timezone.
 - On an update, at least one field must be given. A given value equal to the
-  current one is a no-op: if nothing changes, the answer is the current row
+  current stored one is a no-op (for a source's `timezone` the stored value is
+  `own_timezone`: giving the owner's zone to an inheriting source pins it): if nothing changes, the answer is the current row
   and the `revision` stays; otherwise the `revision` rises by 1.
 - `review_from` may be any real date, also in the future (the owner may want
   the list to start later).

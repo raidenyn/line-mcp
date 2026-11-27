@@ -17,6 +17,7 @@
 - `pnpm exec openspec validate ledger-status-and-sources --strict` — valid
 - Design: five independent Opus (medium) review rounds, every finding folded in.
 - Plan: three independent Opus (medium) review rounds; round 3 APPROVE, its four minor findings folded in.
+- Whole change, second series: two more Opus (medium) rounds; round 1 one important finding (stale-count grep hit the frozen `docs/superpowers/` archive) and six minor, round 2 APPROVE with five minor; all folded in.
 - `pnpm exec vitest run tests/release/openspec-tasks.test.ts` — 6/6 pass
 
 ## Remaining
